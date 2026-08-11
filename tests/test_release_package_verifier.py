@@ -110,6 +110,20 @@ def test_release_documents_are_byte_bound_to_committed_sources(
         verifier._verify_release_documents(root)
 
 
+def test_release_license_is_required_and_bound_to_root_mit_license(tmp_path: Path) -> None:
+    root = tmp_path / NAME
+    _make_source_bound_documents(root)
+
+    assert verifier.COMMITTED_RELEASE_DOCUMENT_SOURCES["LICENSE.txt"] == "LICENSE"
+    assert (root / "LICENSE.txt").read_bytes() == (
+        verifier.PROJECT_ROOT / "LICENSE"
+    ).read_bytes()
+
+    (root / "LICENSE.txt").unlink()
+    with pytest.raises(SystemExit, match="Required release document missing: LICENSE.txt"):
+        verifier._verify_release_documents(root)
+
+
 def test_pe_metadata_matches_product_filename_and_expected_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -524,6 +538,7 @@ def test_corrupt_zip_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 @pytest.mark.parametrize(
     ("omitted", "message"),
     [
+        ("LICENSE.txt", "Required release document missing"),
         ("README.txt", "Required release document missing"),
         ("THIRD_PARTY_NOTICES.txt", "Required release document missing"),
         ("qwindows.dll", "qwindows.dll"),

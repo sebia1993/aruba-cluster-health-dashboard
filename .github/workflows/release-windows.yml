@@ -1,4 +1,4 @@
-name: "[BLOCKED] Build and stage Windows prerelease"
+name: "Build and publish Windows prerelease"
 
 on:
   workflow_dispatch:
@@ -8,15 +8,16 @@ on:
         required: true
         type: string
       release_mode:
-        description: "Build only or create a private review-only draft"
+        description: "Build only, create a review draft, or publish a prerelease"
         required: true
         default: build-only
         type: choice
         options:
           - build-only
           - draft-prerelease
+          - publish-prerelease
       confirmation:
-        description: "For draft mode, enter the exact tag again"
+        description: "For draft or publish mode, enter the exact tag again"
         required: false
         type: string
 
@@ -46,15 +47,6 @@ jobs:
       sha256: ${{ steps.assets.outputs.sha256 }}
 
     steps:
-      - name: Fail closed until binary distribution terms are approved
-        shell: pwsh
-        env:
-          AMD_PUBLIC_BINARY_DISTRIBUTION_APPROVED: "false"
-        run: |
-          if ($env:AMD_PUBLIC_BINARY_DISTRIBUTION_APPROVED -ne 'true') {
-            throw 'PUBLIC_BINARY_DISTRIBUTION_BLOCKED: the copyright holder has not approved application distribution terms. Do not build, upload an Actions artifact, create a Draft, or publish a Release from this public repository.'
-          }
-
       - name: Require a manual run from main
         shell: pwsh
         env:
@@ -75,6 +67,31 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Verify MIT distribution approval in source
+        shell: pwsh
+        env:
+          AMD_PUBLIC_BINARY_DISTRIBUTION_APPROVED: "true"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:AMD_PUBLIC_BINARY_DISTRIBUTION_APPROVED -cne 'true') {
+            throw 'Public binary distribution must be explicitly approved in the reviewed workflow source.'
+          }
+          git ls-files --error-unmatch LICENSE *> $null
+          if ($LASTEXITCODE -ne 0) {
+            throw 'The reviewed release source must contain a tracked LICENSE file.'
+          }
+          $license = Get-Content -LiteralPath .\LICENSE -Raw -Encoding UTF8
+          $requiredMitPhrases = @(
+            'MIT License',
+            'Permission is hereby granted, free of charge',
+            'THE SOFTWARE IS PROVIDED "AS IS"'
+          )
+          foreach ($phrase in $requiredMitPhrases) {
+            if (-not $license.Contains($phrase)) {
+              throw "The tracked LICENSE file does not contain the expected MIT license text: $phrase"
+            }
+          }
+
       - name: Validate tag, source version, and release intent
         id: metadata
         shell: pwsh
@@ -90,12 +107,12 @@ jobs:
             throw "Invalid release tag: $tag"
           }
           $version = $Matches.version
-          $allowedModes = @('build-only', 'draft-prerelease')
+          $allowedModes = @('build-only', 'draft-prerelease', 'publish-prerelease')
           if ($allowedModes -notcontains $env:AMD_RELEASE_MODE) {
             throw "Invalid release mode: $($env:AMD_RELEASE_MODE)"
           }
           if ($env:AMD_RELEASE_MODE -ne 'build-only' -and $env:AMD_CONFIRMATION -cne $tag) {
-            throw 'Draft mode requires confirmation that exactly matches the release tag.'
+            throw 'Draft and publish modes require confirmation that exactly matches the release tag.'
           }
 
           $pyproject = Get-Content -LiteralPath .\pyproject.toml -Raw -Encoding UTF8
@@ -125,8 +142,10 @@ jobs:
           }
           git fetch --no-tags origin main
           if ($LASTEXITCODE -ne 0) { throw 'Could not refresh origin/main.' }
-          git merge-base --is-ancestor $tagCommit origin/main
-          if ($LASTEXITCODE -ne 0) { throw "Release tag target is not reachable from origin/main: $tag" }
+          $mainCommit = (git rev-parse origin/main).Trim()
+          if ($tagCommit -ne $mainCommit) {
+            throw "Release tag, workflow source SHA, and current origin/main must identify the same commit. Tag: $tagCommit; main: $mainCommit"
+          }
           if (git status --porcelain) { throw 'The checked-out release source is unexpectedly dirty.' }
 
           @(
@@ -177,7 +196,7 @@ jobs:
         run: |
           .\scripts\package_release.ps1 -Version $env:AMD_RELEASE_VERSION
 
-      - name: Upload verified release handoff
+      - name: Upload MIT-approved public repository release handoff
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.metadata.outputs.artifact_name }}
@@ -235,7 +254,7 @@ jobs:
           }
 
   release:
-    name: Safely stage private prerelease draft
+    name: Safely stage or publish prerelease
     if: needs.package.outputs.release-mode != 'build-only'
     needs: [package, verify-handoff]
     runs-on: windows-latest
@@ -282,7 +301,7 @@ jobs:
             throw 'Release-job artifact SHA-256 differs from the verified package output.'
           }
 
-      - name: Create notes and safely stage the private prerelease draft
+      - name: Create notes, verify the exact draft, and optionally publish
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -302,14 +321,18 @@ jobs:
           $publicNames = @($env:AMD_ZIP_NAME, $env:AMD_CHECKSUM_NAME) | Sort-Object
           $publicPaths = @($zipPath, $checksumPath)
 
-          function Assert-ReleaseTagUnchanged {
+          function Assert-ReleaseSourceUnchanged {
             git fetch --force --no-tags origin "+refs/tags/$($env:AMD_RELEASE_TAG)`:refs/tags/$($env:AMD_RELEASE_TAG)"
             if ($LASTEXITCODE -ne 0) { throw 'Release tag refresh failed.' }
+            git fetch --no-tags origin main
+            if ($LASTEXITCODE -ne 0) { throw 'origin/main refresh failed.' }
             $tagType = (git cat-file -t "refs/tags/$($env:AMD_RELEASE_TAG)").Trim()
             $tagObject = (git rev-parse "refs/tags/$($env:AMD_RELEASE_TAG)").Trim()
             $tagCommit = (git rev-parse "refs/tags/$($env:AMD_RELEASE_TAG)^{}").Trim()
-            if ($tagType -ne 'tag' -or $tagObject -ne $env:AMD_EXPECTED_TAG_OBJECT -or $tagCommit -ne $env:AMD_SOURCE_COMMIT) {
-              throw 'Release tag changed after packaging; release mutation is forbidden.'
+            $mainCommit = (git rev-parse origin/main).Trim()
+            if ($tagType -ne 'tag' -or $tagObject -ne $env:AMD_EXPECTED_TAG_OBJECT -or
+                $tagCommit -ne $env:AMD_SOURCE_COMMIT -or $mainCommit -ne $env:AMD_SOURCE_COMMIT) {
+              throw 'Annotated release tag, packaged source, and origin/main changed or no longer identify the same commit; release mutation is forbidden.'
             }
           }
 
@@ -321,11 +344,36 @@ jobs:
               Where-Object { $_.tag_name -eq $env:AMD_RELEASE_TAG })
           }
 
+          function Test-ExactRemoteAssets {
+            param([Parameter(Mandatory = $true)][object]$Release)
+
+            $remoteNames = @($Release.assets | ForEach-Object { [string]$_.name } | Sort-Object)
+            if (($remoteNames -join '|') -ne ($publicNames -join '|')) { return $false }
+            foreach ($path in $publicPaths) {
+              $name = Split-Path -Leaf $path
+              $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+              $length = (Get-Item -LiteralPath $path).Length
+              $asset = @($Release.assets | Where-Object { $_.name -eq $name })
+              if ($asset.Count -ne 1 -or $asset[0].state -ne 'uploaded' -or
+                  [long]$asset[0].size -ne $length -or [string]$asset[0].digest -ne "sha256:$hash") {
+                return $false
+              }
+            }
+            return $true
+          }
+
           $notesPath = Join-Path $env:RUNNER_TEMP "ArubaMiniDashboard-$($env:AMD_RELEASE_VERSION)-release-notes.md"
           $notesText = @"
           # Aruba Mini Dashboard $($env:AMD_RELEASE_TAG)
 
           Windows 11용 Aruba Mobility Master 및 7240XM 상태 미니 대시보드의 사전 릴리스입니다.
+
+          ## 라이선스
+
+          Aruba Mini Dashboard 자체 소스와 배포물은 **MIT License**로 제공됩니다.
+          함께 배포되는 제3자 구성요소는 각 구성요소의 라이선스를 따르며, 정확한 고지와
+          원문은 ZIP의 ``THIRD_PARTY_NOTICES.txt`` 및 ``QT_THIRD_PARTY_NOTICES.txt``에서 확인할 수 있습니다.
+          앱 라이선스: https://github.com/$($env:AMD_REPOSITORY)/blob/$($env:AMD_SOURCE_COMMIT)/LICENSE
 
           ## 배포 파일
 
@@ -353,21 +401,18 @@ jobs:
 
           실제 Aruba 장비 출력과 사내 SSH 환경, 코드 서명, Python 미설치 클린 Windows 11,
           실제 100%/125%/150% DPI 및 조직 정책이 적용된 알림 검증은 별도 현장 확인이 필요합니다.
-
-          ## 게시 차단
-
-          이 자산은 저작권자 검토를 위한 비공개 Draft입니다. 앱 자체 배포 조건과 함께 제공되는
-          LGPL/CPython 구성요소의 요구사항에 대한 소유자 결정 및 필요한 법률 검토가 완료되기
-          전에는 GitHub UI 또는 API로 공개 게시하지 마십시오.
+          실제 장비 설정을 변경하는 명령은 지원하지 않지만, 운영망 적용 전 읽기 전용 계정과
+          호스트 키 정책을 현장 기준으로 다시 확인하십시오.
           "@
           $notesText = $notesText -replace '(?m)^          ', ''
           [System.IO.File]::WriteAllText($notesPath, $notesText, (New-Object System.Text.UTF8Encoding($false)))
 
           $draftCreated = $false
+          $releasePublished = $false
           $releaseId = $null
           $releaseUrl = $null
           try {
-            Assert-ReleaseTagUnchanged
+            Assert-ReleaseSourceUnchanged
             $existing = @(Get-MatchingReleases)
             if ($existing.Count -gt 0) {
               throw 'A release or draft already exists for this tag; no existing asset will be replaced.'
@@ -393,7 +438,8 @@ jobs:
               if ($matching.Count -gt 1) { throw 'More than one matching release exists; automatic mutation is forbidden.' }
               if ($matching.Count -eq 1) {
                 $candidate = $matching[0]
-                if (-not $candidate.draft -or -not $candidate.prerelease -or [string]$candidate.html_url -ne $releaseUrl) {
+                if (-not $candidate.draft -or -not $candidate.prerelease -or
+                    [string]$candidate.html_url -ne $releaseUrl) {
                   throw 'The matching release is not the exact prerelease draft created by this run.'
                 }
                 $draft = $candidate
@@ -416,50 +462,86 @@ jobs:
               if ($LASTEXITCODE -ne 0) { throw 'Prerelease draft lookup by ID failed.' }
               $draft = ($draftJson -join "`n") | ConvertFrom-Json
               if ([long]$draft.id -ne $releaseId -or $draft.tag_name -ne $env:AMD_RELEASE_TAG -or
-                  [string]$draft.html_url -ne $releaseUrl -or -not $draft.draft -or -not $draft.prerelease) {
+                  [string]$draft.html_url -ne $releaseUrl -or
+                  -not $draft.draft -or -not $draft.prerelease) {
                 throw 'Prerelease draft identity changed after asset upload.'
               }
-              $remoteNames = @($draft.assets | ForEach-Object { [string]$_.name } | Sort-Object)
-              $assetsVerified = ($remoteNames -join '|') -eq ($publicNames -join '|')
-              if ($assetsVerified) {
-                foreach ($path in $publicPaths) {
-                  $name = Split-Path -Leaf $path
-                  $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-                  $length = (Get-Item -LiteralPath $path).Length
-                  $asset = @($draft.assets | Where-Object { $_.name -eq $name })
-                  if ($asset.Count -ne 1 -or $asset[0].state -ne 'uploaded' -or
-                      [long]$asset[0].size -ne $length -or [string]$asset[0].digest -ne "sha256:$hash") {
-                    $assetsVerified = $false
-                    break
-                  }
-                }
-              }
+              $assetsVerified = Test-ExactRemoteAssets -Release $draft
               if ($assetsVerified) { break }
               if ($attempt -lt 8) { Start-Sleep -Seconds 3 }
             }
             if (-not $assetsVerified) { throw 'Uploaded asset names, sizes, or SHA-256 digests do not match local files.' }
 
-            Assert-ReleaseTagUnchanged
-            if ($env:AMD_RELEASE_MODE -ne 'draft-prerelease') {
+            Assert-ReleaseSourceUnchanged
+            if ($env:AMD_RELEASE_MODE -eq 'draft-prerelease') {
+              Write-Host "Verified prerelease draft created: $releaseUrl"
+            }
+            elseif ($env:AMD_RELEASE_MODE -eq 'publish-prerelease') {
+              Assert-ReleaseSourceUnchanged
+              $publishJson = gh api --method PATCH "repos/$($env:AMD_REPOSITORY)/releases/$releaseId" `
+                -F draft=false `
+                -F prerelease=true
+              if ($LASTEXITCODE -ne 0) { throw 'Publishing the verified prerelease draft failed.' }
+              $published = ($publishJson -join "`n") | ConvertFrom-Json
+              if ([long]$published.id -ne $releaseId -or $published.tag_name -ne $env:AMD_RELEASE_TAG -or
+                  [string]$published.html_url -ne $releaseUrl -or
+                  $published.draft -or -not $published.prerelease -or -not $published.published_at) {
+                throw 'GitHub did not return the exact published prerelease expected by this run.'
+              }
+              $releasePublished = $true
+
+              $publishedVerified = $false
+              foreach ($attempt in 1..8) {
+                $publishedJson = gh api "repos/$($env:AMD_REPOSITORY)/releases/$releaseId"
+                if ($LASTEXITCODE -ne 0) { throw 'Published prerelease lookup by ID failed.' }
+                $published = ($publishedJson -join "`n") | ConvertFrom-Json
+                if ([long]$published.id -ne $releaseId -or $published.tag_name -ne $env:AMD_RELEASE_TAG -or
+                    [string]$published.html_url -ne $releaseUrl -or
+                    $published.draft -or -not $published.prerelease -or -not $published.published_at) {
+                  throw 'Published prerelease identity changed during final verification.'
+                }
+                $publishedVerified = Test-ExactRemoteAssets -Release $published
+                if ($publishedVerified) { break }
+                if ($attempt -lt 8) { Start-Sleep -Seconds 3 }
+              }
+              if (-not $publishedVerified) {
+                throw 'Published prerelease assets no longer match the exact verified ZIP and checksum files.'
+              }
+              Assert-ReleaseSourceUnchanged
+              Write-Host "Verified public prerelease published: $releaseUrl"
+            }
+            else {
               throw "Unexpected release mode: $($env:AMD_RELEASE_MODE)"
             }
-            Assert-ReleaseTagUnchanged
-            Write-Host "Verified private prerelease draft created: $releaseUrl"
           }
           catch {
             $failure = $_
-            if ($draftCreated -and $null -ne $releaseId) {
+            if ($releasePublished) {
+              Write-Warning 'The prerelease was published before final verification failed. It was not deleted or modified automatically; inspect the exact release ID immediately.'
+            }
+            elseif ($draftCreated -and $null -ne $releaseId) {
               $cleanupCompleted = $false
+              $nonDraftObserved = $false
               $cleanupJson = gh api "repos/$($env:AMD_REPOSITORY)/releases/$releaseId" 2>$null
               if ($LASTEXITCODE -eq 0 -and $cleanupJson) {
                 try {
                   $cleanup = ($cleanupJson -join "`n") | ConvertFrom-Json
-                  if ([long]$cleanup.id -eq $releaseId -and $cleanup.tag_name -eq $env:AMD_RELEASE_TAG -and
-                      [string]$cleanup.html_url -eq $releaseUrl -and $cleanup.draft -and $cleanup.prerelease) {
-                    gh api --method DELETE "repos/$($env:AMD_REPOSITORY)/releases/$releaseId" *> $null
-                    if ($LASTEXITCODE -eq 0) {
-                      $cleanupCompleted = $true
-                      Write-Warning 'Removed the exact unpublished prerelease draft after a verification failure; the pre-existing tag was preserved.'
+                  $cleanupIdentityMatches = (
+                    [long]$cleanup.id -eq $releaseId -and
+                    $cleanup.tag_name -eq $env:AMD_RELEASE_TAG -and
+                    [string]$cleanup.html_url -eq $releaseUrl
+                  )
+                  if ($cleanupIdentityMatches) {
+                    if ($cleanup.draft -and $cleanup.prerelease) {
+                      gh api --method DELETE "repos/$($env:AMD_REPOSITORY)/releases/$releaseId" *> $null
+                      if ($LASTEXITCODE -eq 0) {
+                        $cleanupCompleted = $true
+                        Write-Warning 'Removed the exact unpublished prerelease draft after a verification failure; the pre-existing tag was preserved.'
+                      }
+                    }
+                    elseif (-not $cleanup.draft) {
+                      $nonDraftObserved = $true
+                      Write-Warning 'The exact release is no longer a draft. It was not deleted or modified automatically; inspect it immediately.'
                     }
                   }
                 }
@@ -467,7 +549,7 @@ jobs:
                   Write-Warning 'Could not prove the draft cleanup target; automatic deletion was skipped.'
                 }
               }
-              if (-not $cleanupCompleted) {
+              if (-not $cleanupCompleted -and -not $nonDraftObserved) {
                 Write-Warning 'The unpublished draft may remain; inspect its exact numeric release ID before retrying.'
               }
             }

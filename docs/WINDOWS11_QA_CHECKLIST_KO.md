@@ -26,6 +26,7 @@
 - [ ] 로컬 일반 경로에서 `ArubaMiniDashboard.exe`가 추가 설치 없이 실행됨
 - [ ] 한글·공백 포함 경로에서도 배포 폴더를 손상 없이 실행함
 - [ ] 배포 SHA-256이 빌드 시 생성된 값과 일치함
+- [ ] `LICENSE.txt`가 포함되고 루트 MIT `LICENSE`와 바이트 단위로 동일함
 - [ ] `.py`는 manifest에 고정된 `_internal\PySide6\__init__.py`,
       `_internal\shiboken6\__init__.py`, `_internal\paramiko\*.py`,
       `_internal\scp.py`에만 존재하고 `.pyc`, `.db`, `.log`, `.cred`, `.key`가 없음

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
 import shutil
@@ -12,6 +13,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_SCRIPT = ROOT / "scripts" / "package_release.ps1"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release-windows.yml"
+RELEASE_PROCESS = ROOT / "docs" / "RELEASE_PROCESS_KO.md"
 
 
 def _read(path: Path) -> str:
@@ -51,32 +53,127 @@ def test_release_workflow_pins_python_and_precreates_venv_before_build() -> None
     assert "requirements-lock.txt" in text
 
 
-def test_release_workflow_has_fail_closed_prerelease_contract() -> None:
+def test_release_workflow_has_approved_safe_prerelease_contract() -> None:
     text = _read(RELEASE_WORKFLOW)
 
-    block_index = text.index("PUBLIC_BINARY_DISTRIBUTION_BLOCKED")
     checkout_index = text.index("actions/checkout@")
+    approval_index = text.index("Verify MIT distribution approval in source")
     upload_index = text.index("actions/upload-artifact@")
-    assert 'AMD_PUBLIC_BINARY_DISTRIBUTION_APPROVED: "false"' in text
-    assert block_index < checkout_index < upload_index
-    for mode in ("build-only", "draft-prerelease"):
+    assert "PUBLIC_BINARY_DISTRIBUTION_BLOCKED" not in text
+    assert 'AMD_PUBLIC_BINARY_DISTRIBUTION_APPROVED: "true"' in text
+    assert checkout_index < approval_index < upload_index
+    assert "git ls-files --error-unmatch LICENSE" in text
+    assert "Permission is hereby granted, free of charge" in text
+    assert 'THE SOFTWARE IS PROVIDED \"AS IS\"' in text
+    for mode in ("build-only", "draft-prerelease", "publish-prerelease"):
         assert mode in text
-    assert "publish-prerelease" not in text
     assert "Release tag must be an annotated tag" in text
     assert "must identify the same commit" in text
+    assert "current origin/main must identify the same commit" in text
+    assert "Annotated release tag, packaged source, and origin/main" in text
     assert "must match pyproject.toml" in text
-    assert "confirmation that exactly matches" in text
+    assert "Draft and publish modes require confirmation that exactly matches" in text
     assert "A release or draft already exists" in text
     assert "--verify-tag" in text
     assert "--draft" in text
     assert "--prerelease" in text
     assert "digest -ne \"sha256:$hash\"" in text
-    assert "-F draft=false" not in text
-    assert "Verified private prerelease draft created" in text
-    assert "GitHub UI 또는 API로 공개 게시하지 마십시오" in text
+    assert "-F draft=false" in text
+    assert "-F prerelease=true" in text
+    assert "Verified prerelease draft created" in text
+    assert "Verified public prerelease published" in text
+    assert "Published prerelease assets no longer match" in text
+    assert "MIT License" in text
+    assert "Python 미설치 클린 Windows 11" in text
+    assert "실제 100%/125%/150% DPI" in text
     assert "exact numeric release ID could not be confirmed" in text
+    assert "was not deleted or modified automatically" in text
+    assert "--clobber" not in text
     assert "cleanup-tag" not in text
     assert "git push" not in text
+
+
+def test_release_workflow_job_order_and_asset_contract() -> None:
+    text = _read(RELEASE_WORKFLOW)
+    workflow = yaml.load(text, Loader=yaml.BaseLoader)
+    jobs = workflow["jobs"]
+
+    assert set(jobs) == {"package", "verify-handoff", "release"}
+    assert jobs["verify-handoff"]["needs"] == "package"
+    assert jobs["release"]["needs"] == ["package", "verify-handoff"]
+    assert jobs["release"]["if"] == "needs.package.outputs.release-mode != 'build-only'"
+    assert jobs["release"]["permissions"] == {"contents": "write"}
+
+    assert "Upload MIT-approved public repository release handoff" in text
+    assert "$publicNames = @($env:AMD_ZIP_NAME, $env:AMD_CHECKSUM_NAME) | Sort-Object" in text
+    assert "($remoteNames -join '|') -ne ($publicNames -join '|')" in text
+    assert text.index("Reverify the exact assets before GitHub mutation") < text.index("-F draft=false")
+    assert text.index("Test-ExactRemoteAssets -Release $draft") < text.index("-F draft=false")
+    assert text.index("-F draft=false") < text.index("Test-ExactRemoteAssets -Release $published")
+
+
+@pytest.mark.windows
+def test_release_workflow_powershell_blocks_parse(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+    if powershell is None:
+        pytest.skip("PowerShell is not available")
+
+    workflow = yaml.load(_read(RELEASE_WORKFLOW), Loader=yaml.BaseLoader)
+    blocks: list[tuple[str, str]] = []
+    for job_name, job in workflow["jobs"].items():
+        for index, step in enumerate(job["steps"]):
+            if step.get("shell") == "pwsh" and "run" in step:
+                blocks.append((f"{job_name}-{index}", step["run"]))
+
+    assert blocks
+    parser_command = (
+        "$tokens = $null; $errors = $null; "
+        "[System.Management.Automation.Language.Parser]::ParseFile("
+        "$env:AMD_PWSH_PARSE_PATH, [ref]$tokens, [ref]$errors) | Out-Null; "
+        "if ($errors.Count -gt 0) { "
+        "$errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }; exit 1 }"
+    )
+    for name, block in blocks:
+        script_path = tmp_path / f"{name}.ps1"
+        expanded = re.sub(r"\$\{\{.*?\}\}", "workflow_value", block)
+        script_path.write_text(expanded, encoding="utf-8")
+        env = os.environ.copy()
+        env["AMD_PWSH_PARSE_PATH"] = str(script_path)
+        completed = subprocess.run(
+            [
+                powershell,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                parser_command,
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        assert completed.returncode == 0, f"{name}: {completed.stdout}{completed.stderr}"
+
+
+def test_release_process_documents_mit_publication_and_field_boundaries() -> None:
+    text = _read(RELEASE_PROCESS)
+
+    assert "프로젝트 자체 소스와 배포물의 MIT License 배포를" in text
+    assert "AMD_PUBLIC_BINARY_DISTRIBUTION_APPROVED" not in text
+    for mode in ("build-only", "draft-prerelease", "publish-prerelease"):
+        assert f"`{mode}`" in text
+    assert "Actions artifact로 보관" in text
+    assert "annotated tag, workflow가 시작된 SHA, 현재 `origin/main` HEAD" in text
+    assert "versioned onedir ZIP과 그 ZIP의 `.sha256` 파일 두 개" in text
+    assert "기존 Release와 태그는 자동 삭제하지 않습니다" in text
+    assert "공개된 Prerelease는 후속 검증이 실패해도 자동 삭제하거나 수정하지 않습니다" in text
+    assert "Python 미설치 클린 Windows 11" in text
+    assert "실제 DPI" in text
+    assert "코드 서명" in text
 
 
 def test_package_script_builds_versioned_onedir_zip_and_reverifies_extraction() -> None:

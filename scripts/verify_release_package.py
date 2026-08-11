@@ -27,6 +27,7 @@ import zipfile
 
 REQUIRED_RELEASE_DOCUMENTS = (
     "config.example.json",
+    "LICENSE.txt",
     "LGPL_RUNTIME_INVENTORY.json",
     "LGPL_RUNTIME_REPLACEMENT_KO_EN.md",
     "README.txt",
@@ -37,6 +38,7 @@ REQUIRED_RELEASE_DOCUMENTS = (
 )
 COMMITTED_RELEASE_DOCUMENT_SOURCES = {
     "config.example.json": "config.example.json",
+    "LICENSE.txt": "LICENSE",
     "LGPL_RUNTIME_REPLACEMENT_KO_EN.md": "docs/LGPL_RUNTIME_REPLACEMENT_KO_EN.md",
     "README.txt": "docs/README.txt",
     "QT_THIRD_PARTY_NOTICES.txt": "docs/QT_THIRD_PARTY_NOTICES.txt",

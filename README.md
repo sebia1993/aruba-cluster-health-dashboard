@@ -211,19 +211,23 @@ Python 설치가 필요하지 않도록 구성되어 있습니다.
 [GitHub 보안 정책](.github/SECURITY.md)과 [운영 보안 모델](docs/SECURITY_KO.md)에
 정리되어 있습니다.
 
-Windows 배포물에는 런타임 제3자 고지와 해당 라이선스 문서를 함께
-포함합니다. 저장소 자체의 사용·재배포 라이선스는 별도의 루트 `LICENSE`가
-명시되기 전까지 자동으로 부여되는 것으로 간주하지 마십시오.
-기술적 교체 경로와 아직 저작권자가 결정해야 하는 배포 조건은
-[LGPL 런타임 교체 안내](docs/LGPL_RUNTIME_REPLACEMENT_KO_EN.md)에 구분해
-기록되어 있습니다.
+Aruba Mini Dashboard 자체 코드는 루트 [MIT License](LICENSE)로 배포합니다.
+Windows 배포물에는 그 원문과 바이트 단위로 동일한 `LICENSE.txt`를 포함하며,
+패키지 verifier가 누락이나 변경을 거부합니다. 이 MIT 라이선스는 배포물에 함께
+포함된 제3자 구성요소의 별도 저작권과 라이선스를 대체하지 않습니다. 해당
+고지와 라이선스 원문은 `THIRD_PARTY_NOTICES.txt`,
+`QT_THIRD_PARTY_NOTICES.txt`, `LGPL_RUNTIME_LICENSES\`에서 확인하십시오.
 
-현재 공개 저장소의 Windows 배포 workflow는 Actions artifact를 포함한 바이너리
-전달이 발생하지 않도록 첫 단계에서 fail-closed됩니다. 로컬 패키지 검증만
-허용하며 GitHub Draft와 Prerelease도 만들지 않습니다. 앱 자체 배포 조건,
-LGPL 구성요소의 수정·교체 및 해당 수정 디버깅 권한, CPython Windows 배포
-조건에 대한 저작권자 결정과 필요한 법률 검토가 완료된 뒤 별도 소스 변경으로만
-비공개 검토 또는 공개 경로를 추가해야 합니다.
+Aruba Mini Dashboard의 배포 조건은 사용자가 LGPL 구성요소를 자신의 용도로
+수정하거나 그 수정 사항을 디버깅하기 위해 리버스 엔지니어링하는 것을
+제한하지 않습니다. 기술적 교체·복구 경로와 제3자 권리의 구분은
+[LGPL 런타임 교체 안내](docs/LGPL_RUNTIME_REPLACEMENT_KO_EN.md)에 기록되어
+있습니다.
+
+Windows GitHub 배포는 수동 workflow와 변경 불가능한 버전 태그를 통해서만
+수행하며, 자동 검사·패키지 검증·해시 검증을 모두 통과한 onedir ZIP을
+Prerelease로 게시합니다. 실제 Aruba 장비와 Python 미설치 Windows 11 현장
+검수가 끝나기 전에는 Stable Release로 표시하지 않습니다.
 
 ## 검증 상태와 남은 현장 확인
 

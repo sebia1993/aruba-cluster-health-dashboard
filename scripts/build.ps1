@@ -97,6 +97,7 @@ $releaseRoot = if ($OneFile) { $distDir } else { Join-Path $distDir $name }
 if (-not (Test-Path -LiteralPath $releaseRoot)) { throw "Build output missing: $releaseRoot" }
 
 Copy-Item -LiteralPath (Join-Path $repo "config.example.json") -Destination (Join-Path $releaseRoot "config.example.json")
+Copy-Item -LiteralPath (Join-Path $repo "LICENSE") -Destination (Join-Path $releaseRoot "LICENSE.txt")
 Copy-Item -LiteralPath (Join-Path $repo "docs\README.txt") -Destination (Join-Path $releaseRoot "README.txt")
 Copy-Item -LiteralPath (Join-Path $repo "docs\WINDOWS11_QA_CHECKLIST_KO.md") -Destination (Join-Path $releaseRoot "WINDOWS11_QA_CHECKLIST_KO.md")
 Copy-Item -LiteralPath (Join-Path $repo "docs\THIRD_PARTY_NOTICES.txt") -Destination (Join-Path $releaseRoot "THIRD_PARTY_NOTICES.txt")

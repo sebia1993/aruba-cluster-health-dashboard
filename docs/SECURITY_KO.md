@@ -98,7 +98,11 @@ SSH 인증 실패, timeout, 명령 거부, 빈 출력, 파싱 실패와 일부 �
 manifest에 고정된 PySide6/shiboken6/Paramiko/scp 원본 `.py` 경로만 예외로 허용하며, 각 파일
 해시와 라이선스 증거가 일치하고 같은 모듈이 EXE의 PYZ에 중복 포함되지 않았는지
 확인합니다. Qt `qwindows.dll`, `qsvg.dll`, 검토된 DLL/plugin exact inventory와
-필수 문서도 함께 검사합니다. 또한 Python 관련 환경변수와 PATH 항목을 제거한
+필수 문서도 함께 검사합니다. 루트 MIT `LICENSE`는 배포물의 `LICENSE.txt`와
+바이트 단위로 일치해야 하며 누락이나 변경 시 검증이 실패합니다. MIT 라이선스는
+제3자 구성요소의 별도 저작권·라이선스를 대체하지 않고, 프로젝트 배포 조건도
+LGPL 구성요소의 자체 사용 목적 수정이나 해당 수정 디버깅을 위한 리버스
+엔지니어링을 제한하지 않습니다. 또한 Python 관련 환경변수와 PATH 항목을 제거한
 로컬 환경에서 EXE smoke를 실행합니다. 이 검사는 clean VM 증거를 대신하지
 않으므로 최종 배포 전 Python이 없는 Windows 11 일반 사용자 환경에서 별도
 검수해야 합니다.

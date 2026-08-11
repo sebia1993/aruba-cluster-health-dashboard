@@ -8,10 +8,14 @@
   Virtual Keyboard, PDF, QML/Quick 및 OpenGL 구성 요소를 배포 대상에서 제외
 - Windows 실행 파일에 제품명, 파일 설명, 원본 파일명과 버전 리소스 추가
 - 버전이 포함된 Windows x64 ZIP, SHA-256 파일 및 안전한 압축 해제 검증 경로 추가
-- GitHub 수동 Windows 배포 workflow와 일반 변경 검증 workflow 추가. 배포
-  workflow는 저작권자 조건 결정 전 Actions artifact와 Draft 생성을 포함한 모든
-  바이너리 전달을 첫 단계에서 차단
+- GitHub 수동 Windows Prerelease workflow와 일반 변경 검증 workflow 추가.
+  불변 버전 태그, 테스트, 패키지 검증과 SHA-256 검증을 통과한 onedir ZIP만 게시
 - 배포물의 제3자 고지와 런타임 라이선스 문서 구성 추가
+- Aruba Mini Dashboard 자체 코드에 `Copyright (c) 2026 sebia1993` MIT License를
+  적용하고, 배포물의 바이트 동일 `LICENSE.txt`를 필수 검증하도록 추가. 제3자
+  구성요소의 저작권과 별도 라이선스는 그대로 보존
+- 프로젝트 배포 조건이 LGPL 구성요소의 자체 사용 목적 수정 및 해당 수정
+  디버깅을 위한 리버스 엔지니어링을 제한하지 않음을 문서화
 - PySide6/shiboken6/Paramiko/scp를 PYZ 밖의 교체 가능한 원본 소스로 제공하고 exact source,
   라이선스 해시, Qt runtime inventory 및 교체·복구 안내를 검증하는 onedir 전용
   배포 경계 추가
@@ -31,8 +35,8 @@
 
 - 이 버전도 실제 Aruba 장비, Python 미설치 클린 Windows 11 일반 사용자
   PC/VM, 실제 100%/125%/150% 화면 배율과 조직 정책이 적용된 Windows 알림은
-  별도 현장 검수가 필요하다. 저작권자 배포 조건 결정 전에는 Prerelease도
-  공개하지 않으며, 이후 승인되더라도 현장 검수 전에는 Stable로 표시하지 않는다.
+  별도 현장 검수가 필요하다. 이 검수가 끝나기 전에는 Prerelease로만 공개하며
+  Stable Release로 표시하지 않는다.
 
 ## 0.1.0 - 2026-08-11
 

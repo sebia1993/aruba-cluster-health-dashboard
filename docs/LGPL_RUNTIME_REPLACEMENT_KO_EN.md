@@ -1,16 +1,16 @@
 # LGPL 런타임 교체 및 복구 안내 / LGPL Runtime Replacement and Rollback Guide
 
 이 문서는 Aruba Mini Dashboard Windows **onedir** 패키지에 외부 파일로 함께
-제공되는 LGPL 런타임의 기술적 교체 가능 경로를 설명합니다. 법률 자문이 아니며,
-Aruba Mini Dashboard 자체의 라이선스를 선택하거나 어떠한 권리를 새로 부여하지
-않습니다. 공개 바이너리 배포 전 저작권자는 적용할 배포 조건을 별도로 결정해야
-합니다.
+제공되는 LGPL 런타임의 기술적 교체 가능 경로를 설명합니다. Aruba Mini
+Dashboard 자체 코드는 루트 `LICENSE` 및 배포물의 `LICENSE.txt`에 수록된 MIT
+License로 배포합니다. 이 문서는 법률 자문이 아니며, 함께 제공되는 제3자
+구성요소의 별도 라이선스나 권리를 대체하지 않습니다.
 
 This document describes the technical replacement path for LGPL runtimes shipped
-as external files in the Aruba Mini Dashboard Windows **onedir** package. It is
-not legal advice, does not select a license for Aruba Mini Dashboard, and does not
-grant new rights. Before publishing a binary, the copyright holder must separately
-decide the applicable distribution terms.
+as external files in the Aruba Mini Dashboard Windows **onedir** package. Aruba
+Mini Dashboard's own code is distributed under the MIT License in the root
+`LICENSE` and packaged `LICENSE.txt`. This guide is not legal advice and does not
+replace the separate licenses or rights of bundled third-party components.
 
 ## 검토된 런타임 / Reviewed runtimes
 
@@ -97,22 +97,22 @@ and new verification records.
 4. 스모크 검사와 `--demo` 검사를 다시 실행합니다. / Repeat smoke and demo
    checks.
 
-## 공개 배포 전 저작권자 결정 필요 / Copyright-holder decision required
+## 배포 조건과 권리 보존 / Distribution terms and preservation of rights
 
 이 저장소는 기술적으로 외부 교체 가능한 onedir 구조와 검증 자료를 제공합니다.
-그러나 공개 바이너리 배포 전에 저작권자는 패키지에 포함된 모든 LGPL 구성요소
-(Qt/PySide6/shiboken6, Paramiko, scp)에 관하여 적용 라이선스가 요구하는 범위의
-자체 사용 목적 수정 및 해당 수정 디버깅을 위한 리버스 엔지니어링 허용 문구를
-배포 조건에 포함할지 명시적으로 결정해야 합니다. 이 문서는 그 허용을 대신하지
-않으며, 현재 그러한 권한을 부여한다고 해석해서는 안 됩니다.
+Aruba Mini Dashboard의 MIT 배포 조건은 패키지에 포함된 LGPL 구성요소
+(Qt/PySide6/shiboken6, Paramiko, scp)를 사용자가 자신의 용도로 수정하거나 그
+수정 사항을 디버깅하기 위해 리버스 엔지니어링하는 것을 금지하거나 제한하지
+않습니다. 각 제3자 구성요소에 실제로 적용되는 권리·의무와 라이선스 원문은
+패키지의 고지, 인벤토리 및 라이선스 파일에서 별도로 확인해야 합니다.
 
 The onedir package provides a technical replacement mechanism and verification
-evidence. Before public binary distribution, the copyright holder must explicitly
-decide whether the distribution terms will include the permissions required by
-the applicable licenses for modification for the user's own use and reverse
-engineering for debugging those modifications, covering **all** packaged LGPL
-components (Qt/PySide6/shiboken6, Paramiko, and scp). This guide does not make
-that grant and must not be read as granting those permissions now.
+evidence. Aruba Mini Dashboard's MIT distribution terms do not prohibit or
+restrict a user's modification of packaged LGPL components
+(Qt/PySide6/shiboken6, Paramiko, and scp) for the user's own use, or reverse
+engineering for debugging those modifications. The actual rights, obligations,
+and license texts that apply to each third-party component remain separately
+identified in the packaged notices, inventories, and license files.
 
 ## 출처 / Sources
 
