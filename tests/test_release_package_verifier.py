@@ -98,7 +98,7 @@ def _make_source_bound_documents(root: Path) -> None:
 
 
 @pytest.mark.parametrize("packaged_name", sorted(verifier.COMMITTED_RELEASE_DOCUMENT_SOURCES))
-def test_release_documents_are_byte_bound_to_committed_sources(
+def test_release_documents_are_content_bound_to_committed_sources(
     tmp_path: Path, packaged_name: str
 ) -> None:
     root = tmp_path / NAME
@@ -106,6 +106,51 @@ def test_release_documents_are_byte_bound_to_committed_sources(
     verifier._verify_release_documents(root)
 
     (root / packaged_name).write_bytes(b"tampered but non-empty")
+    with pytest.raises(SystemExit, match="differs from the committed source"):
+        verifier._verify_release_documents(root)
+
+
+@pytest.mark.parametrize("packaged_name", sorted(verifier.COMMITTED_RELEASE_DOCUMENT_SOURCES))
+def test_release_documents_allow_only_crlf_lf_checkout_differences(
+    tmp_path: Path, packaged_name: str
+) -> None:
+    root = tmp_path / NAME
+    _make_source_bound_documents(root)
+    packaged_path = root / packaged_name
+    source_bytes = packaged_path.read_bytes()
+    lf_bytes = source_bytes.replace(b"\r\n", b"\n")
+
+    assert b"\n" in lf_bytes, f"test source has no newline: {packaged_name}"
+    alternate_newlines = (
+        lf_bytes.replace(b"\n", b"\r\n") if source_bytes == lf_bytes else lf_bytes
+    )
+    assert alternate_newlines != source_bytes
+    packaged_path.write_bytes(alternate_newlines)
+
+    verifier._verify_release_documents(root)
+
+
+@pytest.mark.parametrize("mutation", ["bom", "lone-cr", "space", "final-newline"])
+def test_release_document_binding_keeps_non_crlf_bytes_significant(
+    tmp_path: Path, mutation: str
+) -> None:
+    root = tmp_path / NAME
+    _make_source_bound_documents(root)
+    packaged_path = root / "config.example.json"
+    content = packaged_path.read_bytes()
+
+    if mutation == "bom":
+        content = content.removeprefix(b"\xef\xbb\xbf")
+        if content == packaged_path.read_bytes():
+            content = b"\xef\xbb\xbf" + content
+    elif mutation == "lone-cr":
+        content = content.replace(b"\n", b"\r", 1)
+    elif mutation == "space":
+        content = content.replace(b"{", b"{ ", 1)
+    else:
+        content = content[:-1] if content.endswith(b"\n") else content + b"\n"
+
+    packaged_path.write_bytes(content)
     with pytest.raises(SystemExit, match="differs from the committed source"):
         verifier._verify_release_documents(root)
 
