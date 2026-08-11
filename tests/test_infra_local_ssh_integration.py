@@ -45,9 +45,11 @@ class _ServerInterface(paramiko.ServerInterface):
 class LocalArubaSshServer:
     """Small local SSH peer; it accepts only the read-only test dialogue."""
 
-    prompt = "(controller) #"
-
-    def __init__(self) -> None:
+    def __init__(self, *, prompt: str = "(controller) #", enable_secret: str | None = None) -> None:
+        self.prompt = prompt
+        self._enable_secret = enable_secret
+        self._awaiting_enable_secret = False
+        self.enable_secret_submissions = 0
         self.host_key = paramiko.RSAKey.generate(2048)
         self.commands: list[str] = []
         self.errors: list[BaseException] = []
@@ -119,8 +121,20 @@ class LocalArubaSshServer:
         if not command:
             channel.send(("\r\n" + self.prompt).encode("utf-8"))
             return
+        if self._awaiting_enable_secret:
+            self.enable_secret_submissions += 1
+            self._awaiting_enable_secret = False
+            if command == self._enable_secret:
+                self.prompt = self.prompt[:-1] + "#"
+                channel.send(("\r\n" + self.prompt).encode("utf-8"))
+            else:
+                channel.send(("\r\nAuthentication failed\r\n" + self.prompt).encode("utf-8"))
+            return
         self.commands.append(command)
-        if command == "no paging":
+        if command == "enable" and self._enable_secret is not None:
+            self._awaiting_enable_secret = True
+            response = "Password:"
+        elif command == "no paging":
             response = f"{command}\r\n{self.prompt}"
         elif command == SHOW_SWITCHES:
             response = (
@@ -135,9 +149,13 @@ class LocalArubaSshServer:
         channel.send(response.encode("utf-8"))
 
 
-@pytest.mark.integration
-def test_real_netmiko_adapter_against_local_paramiko_server(tmp_path: Path) -> None:
-    server = LocalArubaSshServer()
+def _registered_adapter(
+    server: LocalArubaSshServer,
+    tmp_path: Path,
+    *,
+    enable_required: bool = False,
+    enable_secret: str = "",
+) -> ArubaSshAdapter:
     known_hosts = tmp_path / "known_hosts"
     scanned = ScannedHostKey(
         host="127.0.0.1",
@@ -147,17 +165,28 @@ def test_real_netmiko_adapter_against_local_paramiko_server(tmp_path: Path) -> N
         key=server.host_key,
     )
     register_scanned_host_key(scanned, known_hosts)
-    server.start()
-    adapter = ArubaSshAdapter(
+    return ArubaSshAdapter(
         SshConnectionOptions(
             host="127.0.0.1",
             port=server.port,
             connect_timeout_seconds=5,
             command_timeout_seconds=5,
             known_hosts_path=known_hosts,
+            enable_required=enable_required,
         ),
-        DeviceCredential("integration-user", "integration-password"),
+        DeviceCredential(
+            "integration-user",
+            "integration-password",
+            enable_secret=enable_secret,
+        ),
     )
+
+
+@pytest.mark.integration
+def test_real_netmiko_adapter_against_local_paramiko_server(tmp_path: Path) -> None:
+    server = LocalArubaSshServer()
+    adapter = _registered_adapter(server, tmp_path)
+    server.start()
     try:
         adapter.connect()
         output = adapter.run_read_only(SHOW_SWITCHES)
@@ -169,4 +198,49 @@ def test_real_netmiko_adapter_against_local_paramiko_server(tmp_path: Path) -> N
     assert SHOW_SWITCHES in server.commands
     assert server.commands.count("no paging") >= 1
     assert set(server.commands) <= {"no paging", SHOW_SWITCHES}
+    assert server.errors == []
+
+
+@pytest.mark.integration
+def test_user_exec_prompt_does_not_send_enable_when_not_required(tmp_path: Path) -> None:
+    server = LocalArubaSshServer(prompt="(controller) >", enable_secret="unused-enable-secret")
+    adapter = _registered_adapter(server, tmp_path, enable_secret="unused-enable-secret")
+    server.start()
+    try:
+        adapter.connect()
+        output = adapter.run_read_only(SHOW_SWITCHES)
+    finally:
+        adapter.close()
+        server.close()
+
+    assert "192.0.2.11" in output
+    assert server.commands.count("enable") == 0
+    assert server.commands.count("no paging") == 1
+    assert server.commands.count(SHOW_SWITCHES) == 1
+    assert server.enable_secret_submissions == 0
+    assert server.errors == []
+
+
+@pytest.mark.integration
+def test_enable_required_sends_enable_exactly_once(tmp_path: Path) -> None:
+    server = LocalArubaSshServer(prompt="(controller) >", enable_secret="integration-enable-secret")
+    adapter = _registered_adapter(
+        server,
+        tmp_path,
+        enable_required=True,
+        enable_secret="integration-enable-secret",
+    )
+    server.start()
+    try:
+        adapter.connect()
+        output = adapter.run_read_only(SHOW_SWITCHES)
+    finally:
+        adapter.close()
+        server.close()
+
+    assert "192.0.2.11" in output
+    assert server.commands.count("enable") == 1
+    assert server.commands.count("no paging") == 1
+    assert server.commands.count(SHOW_SWITCHES) == 1
+    assert server.enable_secret_submissions == 1
     assert server.errors == []

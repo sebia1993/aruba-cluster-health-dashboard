@@ -142,7 +142,7 @@ def test_deferred_incident_stays_active_and_is_ineligible_for_repeat() -> None:
     ] == [incident.incident_id]
 
 
-def test_new_connection_event_token_closes_old_event_and_creates_new_one() -> None:
+def test_new_connection_event_supersedes_old_without_recovery_or_acknowledgement() -> None:
     manager = IncidentManager()
     first_signal = signal(
         IncidentType.CONNECTION_TYPE_CHANGED,
@@ -155,16 +155,36 @@ def test_new_connection_event_token_closes_old_event_and_creates_new_one() -> No
         reason="B → C",
         token="controller|member|second",
     )
+    second_health = health(second_signal, checked_at=NOW + timedelta(minutes=1))
+    second_health.deferred_incidents = [
+        DeferredIncidentState(
+            IncidentType.CONNECTION_TYPE_CHANGED,
+            "192.0.2.12",
+            "controller|member|first",
+        )
+    ]
     transitions = manager.process(
-        health(second_signal, checked_at=NOW + timedelta(minutes=1))
+        second_health
     )
     assert {item.kind for item in transitions} == {
         IncidentTransitionKind.ACTIVATED,
-        IncidentTransitionKind.RECOVERED,
+        IncidentTransitionKind.SUPERSEDED,
     }
+    superseded = next(
+        item for item in transitions if item.kind is IncidentTransitionKind.SUPERSEDED
+    )
+    assert superseded.should_notify is False
+    assert superseded.incident.active is False
+    assert superseded.incident.acknowledged is False
+    assert superseded.incident.recovered_at is None
     assert len(manager.events()) == 2
     assert len(manager.active_incidents()) == 1
     assert manager.active_incidents()[0].event_token.endswith("second")
+
+    restored = IncidentManager(manager.events())
+    assert len(restored.events()) == 2
+    assert len(restored.active_incidents()) == 1
+    assert restored.active_incidents()[0].event_token.endswith("second")
 
 
 def test_collection_failure_tokens_keep_different_causes_separate() -> None:

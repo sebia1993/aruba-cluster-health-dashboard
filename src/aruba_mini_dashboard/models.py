@@ -45,6 +45,7 @@ class IncidentTransitionKind(str, Enum):
     UPDATED = "updated"
     RECOVERED = "recovered"
     ACKNOWLEDGED = "acknowledged"
+    SUPERSEDED = "superseded"
 
 
 @dataclass(slots=True, frozen=True)

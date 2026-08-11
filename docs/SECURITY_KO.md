@@ -93,8 +93,12 @@ SSH 인증 실패, timeout, 명령 거부, 빈 출력, 파싱 실패와 일부 �
 
 ## 배포 검사
 
-패키지 verifier는 onedir 산출물에서 `.py`, `.pyc`, `.db`, `.log`, `.cred`,
-`.key` 파일을 거부하고 Qt `qwindows.dll`, `qsvg.dll`과 필수 문서를 확인합니다.
-또한 Python 관련 환경변수와 PATH 항목을 제거한 로컬 환경에서 EXE smoke를
-실행합니다. 이 검사는 clean VM 증거를 대신하지 않으므로 최종 배포 전 Python이
-없는 Windows 11 일반 사용자 환경에서 별도 검수해야 합니다.
+패키지 verifier는 onedir 산출물에서 앱·개발용 `.py`, 모든 `.pyc`, `.db`,
+`.log`, `.cred`, `.key` 파일을 거부합니다. LGPL 런타임을 교체할 수 있도록
+manifest에 고정된 PySide6/shiboken6/Paramiko/scp 원본 `.py` 경로만 예외로 허용하며, 각 파일
+해시와 라이선스 증거가 일치하고 같은 모듈이 EXE의 PYZ에 중복 포함되지 않았는지
+확인합니다. Qt `qwindows.dll`, `qsvg.dll`, 검토된 DLL/plugin exact inventory와
+필수 문서도 함께 검사합니다. 또한 Python 관련 환경변수와 PATH 항목을 제거한
+로컬 환경에서 EXE smoke를 실행합니다. 이 검사는 clean VM 증거를 대신하지
+않으므로 최종 배포 전 Python이 없는 Windows 11 일반 사용자 환경에서 별도
+검수해야 합니다.

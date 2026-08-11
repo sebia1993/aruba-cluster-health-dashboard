@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "components": [
+    {
+      "distribution": "paramiko",
+      "version": "4.0.0",
+      "module_names": [
+        "paramiko"
+      ],
+      "source_scope": "complete-distribution-python",
+      "source_paths": [
+        "_internal/paramiko/__init__.py",
+        "_internal/paramiko/_winapi.py",
+        "_internal/paramiko/agent.py",
+        "_internal/paramiko/auth_handler.py",
+        "_internal/paramiko/auth_strategy.py",
+        "_internal/paramiko/ber.py",
+        "_internal/paramiko/buffered_pipe.py",
+        "_internal/paramiko/channel.py",
+        "_internal/paramiko/client.py",
+        "_internal/paramiko/common.py",
+        "_internal/paramiko/compress.py",
+        "_internal/paramiko/config.py",
+        "_internal/paramiko/ecdsakey.py",
+        "_internal/paramiko/ed25519key.py",
+        "_internal/paramiko/file.py",
+        "_internal/paramiko/hostkeys.py",
+        "_internal/paramiko/kex_curve25519.py",
+        "_internal/paramiko/kex_ecdh_nist.py",
+        "_internal/paramiko/kex_gex.py",
+        "_internal/paramiko/kex_group1.py",
+        "_internal/paramiko/kex_group14.py",
+        "_internal/paramiko/kex_group16.py",
+        "_internal/paramiko/kex_gss.py",
+        "_internal/paramiko/message.py",
+        "_internal/paramiko/packet.py",
+        "_internal/paramiko/pipe.py",
+        "_internal/paramiko/pkey.py",
+        "_internal/paramiko/primes.py",
+        "_internal/paramiko/proxy.py",
+        "_internal/paramiko/rsakey.py",
+        "_internal/paramiko/server.py",
+        "_internal/paramiko/sftp.py",
+        "_internal/paramiko/sftp_attr.py",
+        "_internal/paramiko/sftp_client.py",
+        "_internal/paramiko/sftp_file.py",
+        "_internal/paramiko/sftp_handle.py",
+        "_internal/paramiko/sftp_server.py",
+        "_internal/paramiko/sftp_si.py",
+        "_internal/paramiko/ssh_exception.py",
+        "_internal/paramiko/ssh_gss.py",
+        "_internal/paramiko/transport.py",
+        "_internal/paramiko/util.py",
+        "_internal/paramiko/win_openssh.py",
+        "_internal/paramiko/win_pageant.py"
+      ],
+      "license_source_kind": "installed-distribution",
+      "license_source": "paramiko-4.0.0.dist-info/licenses/LICENSE",
+      "license_output": "LGPL_RUNTIME_LICENSES/paramiko-4.0.0-LICENSE.txt",
+      "license_sha256": "5fa25bf5f395fd26e701c2e1de4ca7d162816986dc791c22f8f4226857ad1bb2"
+    },
+    {
+      "distribution": "scp",
+      "version": "0.16.1",
+      "module_names": [
+        "scp"
+      ],
+      "source_scope": "complete-distribution-python",
+      "source_paths": [
+        "_internal/scp.py"
+      ],
+      "license_source_kind": "installed-distribution",
+      "license_source": "scp-0.16.1.dist-info/licenses/LICENSE.txt",
+      "license_output": "LGPL_RUNTIME_LICENSES/scp-0.16.1-LICENSE.txt",
+      "license_sha256": "2455cf0fc78e13772bf10ef5f209e7eb8625706d671b2f420cc8add37d548c1c"
+    },
+    {
+      "distribution": "pyside6-essentials",
+      "version": "6.11.0",
+      "module_names": [
+        "PySide6"
+      ],
+      "source_scope": "pyinstaller-analyzed-python",
+      "source_paths": [
+        "_internal/pyside6/__init__.py"
+      ],
+      "license_source_kind": "project-supplemental",
+      "license_source": "scripts/license_texts/PySide6-LGPL-3.0-only.txt",
+      "license_output": "LGPL_RUNTIME_LICENSES/PySide6-Essentials-6.11.0-LGPL-3.0-only.txt",
+      "license_sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"
+    },
+    {
+      "distribution": "shiboken6",
+      "version": "6.11.0",
+      "module_names": [
+        "shiboken6"
+      ],
+      "source_scope": "pyinstaller-analyzed-python",
+      "source_paths": [
+        "_internal/shiboken6/__init__.py"
+      ],
+      "license_source_kind": "project-supplemental",
+      "license_source": "scripts/license_texts/PySide6-LGPL-3.0-only.txt",
+      "license_output": "LGPL_RUNTIME_LICENSES/shiboken6-6.11.0-LGPL-3.0-only.txt",
+      "license_sha256": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768"
+    }
+  ]
+}

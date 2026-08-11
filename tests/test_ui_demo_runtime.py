@@ -402,3 +402,95 @@ def test_failover_connection_change_persists_by_member_across_restart(tmp_path: 
     assert event_types.count("activated") == 1
     assert "recovered" not in event_types
     reopened_storage.close()
+
+
+def test_reverted_connection_type_supersedes_old_event_without_recovery_across_restart(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    settings = AppSettings.default()
+    first_storage = SQLiteStorage(paths)
+    first_runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        first_storage,
+        setup_logging(paths),
+    )
+    initial_at = datetime(2026, 8, 11, 6, 0, tzinfo=timezone.utc)
+    first_runtime.correlate(
+        membership_cycle("group_membership_initial.txt", initial_at)
+    )
+    changed = first_runtime.correlate(
+        membership_cycle(
+            "group_membership_changed.txt",
+            initial_at + timedelta(minutes=1),
+        )
+    )
+    original = changed.active_incidents[0]
+    assert original.details["previous"] == "Type-A"
+    assert original.details["current"] == "Type-B"
+
+    reverted = first_runtime.correlate(
+        membership_cycle(
+            "group_membership_initial.txt",
+            initial_at + timedelta(minutes=2),
+        )
+    )
+
+    assert len(reverted.notification_events) == 1
+    replacement = reverted.notification_events[0]
+    assert replacement.incident_id != original.incident_id
+    assert replacement.details["previous"] == "Type-B"
+    assert replacement.details["current"] == "Type-A"
+    assert [item.incident_id for item in reverted.active_incidents] == [
+        replacement.incident_id
+    ]
+
+    persisted = first_storage.load_domain_incidents()
+    persisted_by_id = {item.incident_id: item for item in persisted}
+    superseded = persisted_by_id[original.incident_id]
+    assert superseded.active is False
+    assert superseded.acknowledged is False
+    assert superseded.recovered_at is None
+    assert persisted_by_id[replacement.incident_id].active is True
+    pending = first_storage.load_pending_connection_changes()
+    assert len(pending) == 1
+    assert (pending[0].previous_value, pending[0].current_value) == (
+        "Type-B",
+        "Type-A",
+    )
+    event_types = [
+        item["event_type"] for item in reversed(first_storage.list_events())
+    ]
+    assert event_types == ["activated", "activated", "superseded"]
+    assert "recovered" not in event_types
+    first_storage.close()
+
+    reopened_storage = SQLiteStorage(paths)
+    reopened_runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        reopened_storage,
+        setup_logging(paths),
+    )
+    reconfirmed = reopened_runtime.correlate(
+        membership_cycle(
+            "group_membership_initial.txt",
+            initial_at + timedelta(minutes=3),
+        )
+    )
+
+    assert reconfirmed.notification_events == []
+    assert [item.incident_id for item in reconfirmed.active_incidents] == [
+        replacement.incident_id
+    ]
+    restarted_events = [
+        item["event_type"] for item in reversed(reopened_storage.list_events())
+    ]
+    assert restarted_events == [*event_types, "updated"]
+    assert restarted_events.count("activated") == 2
+    assert restarted_events.count("superseded") == 1
+    assert "recovered" not in restarted_events
+    reopened_storage.close()

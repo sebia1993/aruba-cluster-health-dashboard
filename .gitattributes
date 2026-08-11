@@ -1,0 +1,4 @@
+# Preserve reviewed upstream license texts byte-for-byte. Their authoritative
+# formatting can contain trailing spaces that are meaningful to hash evidence.
+docs/THIRD_PARTY_NOTICES.txt -whitespace
+scripts/license_texts/** -whitespace

@@ -8,7 +8,7 @@
 - 검수 일시:
 - 검수자:
 - 소스 revision 또는 전달 버전:
-- 빌드 모드: onedir windowed / Console / one-file
+- 빌드 모드: onedir windowed / onedir Console
 - EXE SHA-256:
 - Windows edition / version / OS build:
 - Windows 사용자 권한: 일반 사용자 / 관리자
@@ -26,7 +26,17 @@
 - [ ] 로컬 일반 경로에서 `ArubaMiniDashboard.exe`가 추가 설치 없이 실행됨
 - [ ] 한글·공백 포함 경로에서도 배포 폴더를 손상 없이 실행함
 - [ ] 배포 SHA-256이 빌드 시 생성된 값과 일치함
-- [ ] 배포 폴더에 `.py`, `.pyc`, `.db`, `.log`, `.cred`, `.key`가 없음
+- [ ] `.py`는 manifest에 고정된 `_internal\PySide6\__init__.py`,
+      `_internal\shiboken6\__init__.py`, `_internal\paramiko\*.py`,
+      `_internal\scp.py`에만 존재하고 `.pyc`, `.db`, `.log`, `.cred`, `.key`가 없음
+- [ ] `THIRD_PARTY_NOTICES.txt`가 포함되고 비어 있지 않음
+- [ ] `QT_THIRD_PARTY_NOTICES.txt`, `QT_RUNTIME_INVENTORY.json`,
+      `LGPL_RUNTIME_INVENTORY.json`, `LGPL_RUNTIME_LICENSES\`,
+      `LGPL_RUNTIME_REPLACEMENT_KO_EN.md`가 포함됨
+- [ ] `LGPL_RUNTIME_INVENTORY.json`에서 PySide6/shiboken6/Paramiko/scp가
+      external source이고 PYZ 내부 감지 목록이 비어 있음
+- [ ] Qt Virtual Keyboard/PDF/QML/Quick/OpenGL 미사용 구성 요소가 없음
+- [ ] EXE 속성의 제품명·설명·원본 파일명·버전이 전달 버전과 일치함
 
 참고: 패키지 verifier는 Python 환경변수/PATH를 제거한 로컬 smoke에서
 Netmiko·Paramiko·Windows Credential Manager, 동결 fixture 탐색, 데모
