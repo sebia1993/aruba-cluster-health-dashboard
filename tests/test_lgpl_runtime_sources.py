@@ -57,6 +57,28 @@ def test_manifest_matches_complete_and_analyzed_installed_lgpl_sources() -> None
     }
 
 
+def test_lgpl_manifest_evidence_is_independent_of_checkout_line_endings(tmp_path: Path) -> None:
+    source = (ROOT / "scripts" / collector.MANIFEST_NAME).read_text(encoding="utf-8")
+    normalized = source.replace("\r\n", "\n").replace("\r", "\n")
+    evidence: list[bytes] = []
+    verifier_evidence: list[bytes] = []
+
+    for name, newline in (("lf", "\n"), ("crlf", "\r\n")):
+        project = tmp_path / name
+        manifest_path = project / "scripts" / collector.MANIFEST_NAME
+        manifest_path.parent.mkdir(parents=True)
+        manifest_path.write_bytes(normalized.replace("\n", newline).encode("utf-8"))
+        _manifest, raw = collector.load_manifest(project)
+        _reviewed, reviewed_raw = verifier._load_reviewed_manifest(
+            manifest_path, label="LGPL runtime test"
+        )
+        evidence.append(raw)
+        verifier_evidence.append(reviewed_raw)
+
+    assert evidence[0] == evidence[1]
+    assert verifier_evidence == evidence
+
+
 def test_pyinstaller_collects_lgpl_python_modules_as_external_source_only() -> None:
     tree = ast.parse((ROOT / "ArubaMiniDashboard.spec").read_text(encoding="utf-8"))
     analysis = next(

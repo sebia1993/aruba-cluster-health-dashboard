@@ -40,7 +40,8 @@ def _read_json(path: Path) -> tuple[dict[str, Any], bytes]:
         raise LgplRuntimeError(f"Cannot read LGPL runtime manifest: {path}: {exc}") from exc
     if not isinstance(value, dict):
         raise LgplRuntimeError("LGPL runtime manifest root must be an object")
-    return value, raw
+    normalized = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+    return value, normalized
 
 
 def _normal_release_path(value: object, *, label: str) -> str:

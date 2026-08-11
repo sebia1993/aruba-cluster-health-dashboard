@@ -76,9 +76,16 @@ def test_manifest_evidence_hash_is_independent_of_checkout_line_endings(tmp_path
 
     _lf_manifest, lf_evidence = collector.load_manifest(projects[0])
     _crlf_manifest, crlf_evidence = collector.load_manifest(projects[1])
+    _lf_reviewed, lf_verifier_evidence = package_verifier._load_reviewed_manifest(
+        projects[0] / "scripts" / collector.MANIFEST_NAME, label="Qt runtime test"
+    )
+    _crlf_reviewed, crlf_verifier_evidence = package_verifier._load_reviewed_manifest(
+        projects[1] / "scripts" / collector.MANIFEST_NAME, label="Qt runtime test"
+    )
 
     assert lf_evidence == crlf_evidence
     assert collector._sha256(lf_evidence) == collector._sha256(crlf_evidence)
+    assert lf_verifier_evidence == crlf_verifier_evidence == lf_evidence
 
 
 def test_pyinstaller_qt_allowlist_exactly_matches_reviewed_manifest() -> None:

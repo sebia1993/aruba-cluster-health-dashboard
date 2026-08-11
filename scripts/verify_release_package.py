@@ -185,7 +185,8 @@ def _load_reviewed_manifest(path: Path, *, label: str) -> tuple[dict[str, object
         _fail(f"Reviewed {label} manifest cannot be read: {path}: {exc}", cause=exc)
     if not isinstance(value, dict) or value.get("schema_version") != 1:
         _fail(f"Reviewed {label} manifest has an unsupported schema: {path}")
-    return value, raw
+    normalized = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+    return value, normalized
 
 
 def _reviewed_lgpl_manifest() -> tuple[dict[str, object], bytes]:
