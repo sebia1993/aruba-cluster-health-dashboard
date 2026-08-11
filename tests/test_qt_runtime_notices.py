@@ -88,6 +88,14 @@ def test_manifest_evidence_hash_is_independent_of_checkout_line_endings(tmp_path
     assert lf_verifier_evidence == crlf_verifier_evidence == lf_evidence
 
 
+def test_generated_release_evidence_is_checked_out_with_lf() -> None:
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+
+    assert "docs/QT_THIRD_PARTY_NOTICES.txt text eol=lf" in attributes
+    assert "scripts/qt_runtime_manifest.json text eol=lf" in attributes
+    assert "scripts/lgpl_runtime_manifest.json text eol=lf" in attributes
+
+
 def test_pyinstaller_qt_allowlist_exactly_matches_reviewed_manifest() -> None:
     collector = _load_collector()
     manifest, _raw = collector.load_manifest(ROOT)
