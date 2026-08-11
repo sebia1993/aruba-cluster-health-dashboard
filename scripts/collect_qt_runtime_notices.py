@@ -47,6 +47,16 @@ def load_manifest(project_root: Path) -> tuple[dict[str, Any], bytes]:
         raw = manifest_path.read_bytes()
     except OSError as exc:
         raise QtNoticeError(f"Qt runtime manifest is missing: {manifest_path}: {exc}") from exc
+    try:
+        # Git may materialize text files with LF or CRLF depending on the
+        # checkout environment.  Hash the reviewed manifest's normalized
+        # UTF-8 content so Windows developer and GitHub Actions checkouts
+        # produce identical notice evidence.
+        manifest_evidence = (
+            raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+        )
+    except UnicodeDecodeError as exc:
+        raise QtNoticeError(f"Qt runtime manifest is not valid UTF-8: {manifest_path}") from exc
     manifest = _load_json(manifest_path)
     if manifest.get("schema_version") != 1:
         raise QtNoticeError("Unsupported Qt runtime manifest schema")
@@ -143,7 +153,7 @@ def load_manifest(project_root: Path) -> tuple[dict[str, Any], bytes]:
             "Qt license file set contains unreviewed/stale entries: "
             f"unused={sorted(set(license_files) - referenced_licenses)}"
         )
-    return manifest, raw
+    return manifest, manifest_evidence
 
 
 def _copyright_lines(value: object) -> list[str]:

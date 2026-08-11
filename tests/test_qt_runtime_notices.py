@@ -56,6 +56,31 @@ def test_manifest_pins_official_qt_611_sources_and_complete_license_evidence() -
     assert "harfbuzz-ng" in manifest["artifacts"]["pyside6/qt6gui.dll"]
 
 
+def test_manifest_evidence_hash_is_independent_of_checkout_line_endings(tmp_path: Path) -> None:
+    collector = _load_collector()
+    projects: list[Path] = []
+    source_manifest = (ROOT / "scripts" / collector.MANIFEST_NAME).read_text(encoding="utf-8")
+    normalized = source_manifest.replace("\r\n", "\n").replace("\r", "\n")
+
+    for name, newline in (("lf", "\n"), ("crlf", "\r\n")):
+        project = tmp_path / name
+        (project / "scripts").mkdir(parents=True)
+        shutil.copytree(
+            ROOT / "scripts" / "license_texts" / "qt-6.11.0",
+            project / "scripts" / "license_texts" / "qt-6.11.0",
+        )
+        (project / "scripts" / collector.MANIFEST_NAME).write_bytes(
+            normalized.replace("\n", newline).encode("utf-8")
+        )
+        projects.append(project)
+
+    _lf_manifest, lf_evidence = collector.load_manifest(projects[0])
+    _crlf_manifest, crlf_evidence = collector.load_manifest(projects[1])
+
+    assert lf_evidence == crlf_evidence
+    assert collector._sha256(lf_evidence) == collector._sha256(crlf_evidence)
+
+
 def test_pyinstaller_qt_allowlist_exactly_matches_reviewed_manifest() -> None:
     collector = _load_collector()
     manifest, _raw = collector.load_manifest(ROOT)
