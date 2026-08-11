@@ -83,6 +83,8 @@ def test_release_workflow_has_approved_safe_prerelease_contract() -> None:
     assert "Verified prerelease draft created" in text
     assert "Verified public prerelease published" in text
     assert "Published prerelease assets no longer match" in text
+    assert "$publishAttempted = $true" in text
+    assert "automatic draft cleanup is forbidden" in text
     assert "MIT License" in text
     assert "Python 미설치 클린 Windows 11" in text
     assert "실제 100%/125%/150% DPI" in text
@@ -110,6 +112,40 @@ def test_release_workflow_job_order_and_asset_contract() -> None:
     assert text.index("Reverify the exact assets before GitHub mutation") < text.index("-F draft=false")
     assert text.index("Test-ExactRemoteAssets -Release $draft") < text.index("-F draft=false")
     assert text.index("-F draft=false") < text.index("Test-ExactRemoteAssets -Release $published")
+
+
+def test_release_workflow_allows_published_url_change_and_protects_release_first() -> None:
+    text = _read(RELEASE_WORKFLOW)
+    publish_branch_start = text.index("elseif ($env:AMD_RELEASE_MODE -eq 'publish-prerelease')")
+    publish_start = text.index("$publishJson = gh api --method PATCH", publish_branch_start)
+    publish_end = text.index("$publishedVerified = $false", publish_start)
+    publish_response = text[publish_branch_start:publish_end]
+
+    observed_published = "if ([long]$published.id -eq $releaseId -and -not $published.draft)"
+    assert publish_response.index("$publishAttempted = $true") < publish_response.index(
+        "$publishJson = gh api --method PATCH"
+    )
+    protected_index = publish_response.index("$releasePublished = $true")
+    identity_index = publish_response.index("GitHub did not return the exact published prerelease")
+    assert observed_published in publish_response
+    assert protected_index < identity_index
+    assert "[long]$published.id -ne $releaseId" in publish_response
+    assert "$published.tag_name -ne $env:AMD_RELEASE_TAG" in publish_response
+    assert "$published.draft -or -not $published.prerelease" in publish_response
+    assert "[string]$published.html_url -ne $releaseUrl" not in text[publish_start:]
+    assert "$publishedUrl = [string]$published.html_url" in publish_response
+
+    catch_start = text.index("catch {", publish_end)
+    cleanup = text[catch_start:]
+    assert cleanup.index("if ($releasePublished)") < cleanup.index("elseif ($publishAttempted)")
+    assert cleanup.index("elseif ($publishAttempted)") < cleanup.index(
+        "elseif ($draftCreated -and $null -ne $releaseId)"
+    )
+    protect_non_draft = cleanup.index("if ($cleanupIdMatches -and -not $cleanup.draft)")
+    delete_draft = cleanup.index("gh api --method DELETE")
+    assert protect_non_draft < delete_draft
+    assert "$cleanup.draft -and" in cleanup
+    assert "$cleanup.prerelease" in cleanup
 
 
 @pytest.mark.windows
@@ -171,6 +207,9 @@ def test_release_process_documents_mit_publication_and_field_boundaries() -> Non
     assert "versioned onedir ZIP과 그 ZIP의 `.sha256` 파일 두 개" in text
     assert "기존 Release와 태그는 자동 삭제하지 않습니다" in text
     assert "공개된 Prerelease는 후속 검증이 실패해도 자동 삭제하거나 수정하지 않습니다" in text
+    assert "게시 API를 한 번이라도" in text
+    assert "`/releases/untagged/...` URL은 게시 후 `/releases/tag/...` URL로 바뀔 수 있습니다" in text
+    assert "numeric release ID, 태그, Prerelease 상태와 원격" in text
     assert "Python 미설치 클린 Windows 11" in text
     assert "실제 DPI" in text
     assert "코드 서명" in text

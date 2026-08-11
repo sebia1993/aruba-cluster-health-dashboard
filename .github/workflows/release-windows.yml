@@ -408,6 +408,7 @@ jobs:
           [System.IO.File]::WriteAllText($notesPath, $notesText, (New-Object System.Text.UTF8Encoding($false)))
 
           $draftCreated = $false
+          $publishAttempted = $false
           $releasePublished = $false
           $releaseId = $null
           $releaseUrl = $null
@@ -478,27 +479,39 @@ jobs:
             }
             elseif ($env:AMD_RELEASE_MODE -eq 'publish-prerelease') {
               Assert-ReleaseSourceUnchanged
+              $publishAttempted = $true
               $publishJson = gh api --method PATCH "repos/$($env:AMD_REPOSITORY)/releases/$releaseId" `
                 -F draft=false `
                 -F prerelease=true
               if ($LASTEXITCODE -ne 0) { throw 'Publishing the verified prerelease draft failed.' }
               $published = ($publishJson -join "`n") | ConvertFrom-Json
+              if ([long]$published.id -eq $releaseId -and -not $published.draft) {
+                $releasePublished = $true
+              }
               if ([long]$published.id -ne $releaseId -or $published.tag_name -ne $env:AMD_RELEASE_TAG -or
-                  [string]$published.html_url -ne $releaseUrl -or
                   $published.draft -or -not $published.prerelease -or -not $published.published_at) {
                 throw 'GitHub did not return the exact published prerelease expected by this run.'
               }
-              $releasePublished = $true
+              $publishedUrl = [string]$published.html_url
+              if ([string]::IsNullOrWhiteSpace($publishedUrl)) {
+                throw 'GitHub did not return the published prerelease URL.'
+              }
 
               $publishedVerified = $false
               foreach ($attempt in 1..8) {
                 $publishedJson = gh api "repos/$($env:AMD_REPOSITORY)/releases/$releaseId"
                 if ($LASTEXITCODE -ne 0) { throw 'Published prerelease lookup by ID failed.' }
                 $published = ($publishedJson -join "`n") | ConvertFrom-Json
+                if ([long]$published.id -eq $releaseId -and -not $published.draft) {
+                  $releasePublished = $true
+                }
                 if ([long]$published.id -ne $releaseId -or $published.tag_name -ne $env:AMD_RELEASE_TAG -or
-                    [string]$published.html_url -ne $releaseUrl -or
                     $published.draft -or -not $published.prerelease -or -not $published.published_at) {
                   throw 'Published prerelease identity changed during final verification.'
+                }
+                $publishedUrl = [string]$published.html_url
+                if ([string]::IsNullOrWhiteSpace($publishedUrl)) {
+                  throw 'Published prerelease URL is missing during final verification.'
                 }
                 $publishedVerified = Test-ExactRemoteAssets -Release $published
                 if ($publishedVerified) { break }
@@ -508,7 +521,7 @@ jobs:
                 throw 'Published prerelease assets no longer match the exact verified ZIP and checksum files.'
               }
               Assert-ReleaseSourceUnchanged
-              Write-Host "Verified public prerelease published: $releaseUrl"
+              Write-Host "Verified public prerelease published: $publishedUrl"
             }
             else {
               throw "Unexpected release mode: $($env:AMD_RELEASE_MODE)"
@@ -519,6 +532,9 @@ jobs:
             if ($releasePublished) {
               Write-Warning 'The prerelease was published before final verification failed. It was not deleted or modified automatically; inspect the exact release ID immediately.'
             }
+            elseif ($publishAttempted) {
+              Write-Warning 'Publishing was attempted, so automatic draft cleanup is forbidden even when the API result is ambiguous. Inspect the exact release ID immediately.'
+            }
             elseif ($draftCreated -and $null -ne $releaseId) {
               $cleanupCompleted = $false
               $nonDraftObserved = $false
@@ -526,22 +542,26 @@ jobs:
               if ($LASTEXITCODE -eq 0 -and $cleanupJson) {
                 try {
                   $cleanup = ($cleanupJson -join "`n") | ConvertFrom-Json
-                  $cleanupIdentityMatches = (
-                    [long]$cleanup.id -eq $releaseId -and
-                    $cleanup.tag_name -eq $env:AMD_RELEASE_TAG -and
-                    [string]$cleanup.html_url -eq $releaseUrl
-                  )
-                  if ($cleanupIdentityMatches) {
-                    if ($cleanup.draft -and $cleanup.prerelease) {
+                  $cleanupIdMatches = [long]$cleanup.id -eq $releaseId
+                  if ($cleanupIdMatches -and -not $cleanup.draft) {
+                    $releasePublished = $true
+                    $nonDraftObserved = $true
+                    Write-Warning 'The exact release is no longer a draft. It was not deleted or modified automatically; inspect it immediately.'
+                  }
+                  else {
+                    $cleanupDraftIdentityMatches = (
+                      $cleanupIdMatches -and
+                      $cleanup.tag_name -eq $env:AMD_RELEASE_TAG -and
+                      [string]$cleanup.html_url -eq $releaseUrl -and
+                      $cleanup.draft -and
+                      $cleanup.prerelease
+                    )
+                    if ($cleanupDraftIdentityMatches) {
                       gh api --method DELETE "repos/$($env:AMD_REPOSITORY)/releases/$releaseId" *> $null
                       if ($LASTEXITCODE -eq 0) {
                         $cleanupCompleted = $true
                         Write-Warning 'Removed the exact unpublished prerelease draft after a verification failure; the pre-existing tag was preserved.'
                       }
-                    }
-                    elseif (-not $cleanup.draft) {
-                      $nonDraftObserved = $true
-                      Write-Warning 'The exact release is no longer a draft. It was not deleted or modified automatically; inspect it immediately.'
                     }
                   }
                 }

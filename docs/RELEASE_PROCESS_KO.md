@@ -16,10 +16,14 @@ Actions에서 재현 가능하게 빌드하고, 검증된 자산만 GitHub Prere
 - EXE만 따로 배포하거나 ZIP의 `_internal` 파일을 제거하지 않습니다.
 - 실제 IP, Hostname, 계정, 원본 출력, DB, 로그, `known_hosts`, 설정 또는
   자격 증명을 테스트·Actions artifact·Release asset에 포함하지 않습니다.
-- 실패한 실행이 만든 Draft는 numeric release ID, 태그, URL, Draft/Prerelease 상태가
-  모두 일치하는 경우에만 자동 정리합니다. 기존 Release와 태그는 자동 삭제하지 않습니다.
+- 게시를 시도하지 않은 실패 실행이 만든 Draft는 numeric release ID, 태그, 생성 당시 URL,
+  Draft/Prerelease 상태가 모두 일치하는 경우에만 자동 정리합니다. 게시 API를 한 번이라도
+  호출한 뒤에는 응답이 불명확하더라도 자동 정리하지 않습니다. 기존 Release와 태그는 자동 삭제하지 않습니다.
 - 공개된 Prerelease는 후속 검증이 실패해도 자동 삭제하거나 수정하지 않습니다.
   정확한 Release ID를 확인한 뒤 사람이 원인을 조사합니다.
+- Draft의 `/releases/untagged/...` URL은 게시 후 `/releases/tag/...` URL로 바뀔 수 있습니다.
+  게시 후 동일성은 URL 불변이 아니라 numeric release ID, 태그, Prerelease 상태와 원격
+  자산 이름·크기·SHA-256 digest로 확인합니다.
 
 ## 현재 버전 경계
 
@@ -106,7 +110,8 @@ workflow는 다음 순서를 바꿀 수 없도록 구성되어 있습니다.
 9. 새 Draft의 numeric ID와 URL을 확인한 뒤 ZIP과 `.sha256` 두 파일만 업로드
 10. 원격 asset 이름, 상태, 바이트 크기, SHA-256 digest를 로컬 파일과 비교
 11. `publish-prerelease`에서만 동일 태그와 main SHA를 다시 확인하고 Draft 해제
-12. 공개 Prerelease 상태와 두 원격 자산을 마지막으로 다시 검증
+12. 동일 numeric release ID가 공개 상태가 되는 즉시 자동 정리를 금지
+13. URL 변경을 허용하면서 공개 Prerelease의 ID·태그·상태와 두 원격 자산을 마지막으로 재검증
 
 기존 같은 태그의 Release/Draft가 하나라도 있으면 workflow는 중단합니다.
 `draft-prerelease`로 만든 Draft를 나중에 자동 승격하지도 않습니다. 검토용 Draft를

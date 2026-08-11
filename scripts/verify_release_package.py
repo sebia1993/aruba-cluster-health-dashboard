@@ -462,11 +462,25 @@ def _verify_release_documents(root: Path) -> None:
                 f"Release document source binding could not be read: {packaged_name}: {exc}",
                 cause=exc,
             )
-        if packaged_bytes != source_bytes:
+        if _normalize_release_document_newlines(packaged_bytes) != (
+            _normalize_release_document_newlines(source_bytes)
+        ):
             _fail(
                 "Packaged release document differs from the committed source: "
                 f"{packaged_name} != {source_relative}"
             )
+
+
+def _normalize_release_document_newlines(content: bytes) -> bytes:
+    """Normalize only Windows CRLF line endings for source-bound documents.
+
+    GitHub Actions builds on Windows, where the checked-out text files may use
+    CRLF even when a verifier checkout uses LF.  Keep every other byte
+    significant: a UTF-8 BOM, lone CR, whitespace, encoding change, and final
+    newline addition/removal must still fail the committed-source binding.
+    """
+
+    return content.replace(b"\r\n", b"\n")
 
 
 def _read_json_object(path: Path, *, label: str) -> dict[str, object]:
