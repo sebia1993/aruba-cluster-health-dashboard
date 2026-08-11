@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools==75.8.2", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aruba-mini-dashboard"
+version = "0.1.0"
+description = "Offline Windows dashboard for Aruba MM and 7240XM cluster health."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "netmiko==4.6.0",
+  "paramiko==4.0.0",
+  "PySide6==6.11.0",
+  "pywin32==311; sys_platform == 'win32'",
+]
+[project.optional-dependencies]
+dev = [
+  "pyinstaller==6.21.0",
+  "pytest==8.4.2",
+]
+
+[project.scripts]
+aruba-mini-dashboard = "aruba_mini_dashboard.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+aruba_mini_dashboard = ["ui/resources/*.svg"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+  "windows: requires Windows APIs",
+  "integration: local integration test",
+  "gui: Qt GUI test",
+]

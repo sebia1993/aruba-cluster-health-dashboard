@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "mobility_master": {
+    "management_ip": "192.0.2.10",
+    "display_name": "Aruba-MM",
+    "ssh_port": 22,
+    "credential_id": "",
+    "connect_timeout_seconds": 10,
+    "command_timeout_seconds": 20,
+    "retries": 2,
+    "enable_required": false
+  },
+  "cluster": {
+    "name": "Aruba-7240XM-Cluster",
+    "members": [
+      {"ip": "198.51.100.11", "alias": "WLC-01"},
+      {"ip": "198.51.100.12", "alias": "WLC-02"},
+      {"ip": "198.51.100.13", "alias": "WLC-03"},
+      {"ip": "198.51.100.14", "alias": "WLC-04"}
+    ],
+    "primary_controller_ip": "198.51.100.11",
+    "fallback_controller_ips": [
+      "198.51.100.12",
+      "198.51.100.13",
+      "198.51.100.14"
+    ],
+    "ssh_port": 22,
+    "credential_id": "",
+    "connect_timeout_seconds": 10,
+    "command_timeout_seconds": 20,
+    "retries": 2,
+    "enable_required": false
+  },
+  "credentials": {
+    "use_shared_credentials": true,
+    "shared_credential_id": "",
+    "session_only": false
+  },
+  "polling": {
+    "interval_seconds": 60,
+    "automatic_enabled": false,
+    "busy_policy": "skip"
+  },
+  "detection": {
+    "low_client_threshold": 10,
+    "anomaly_cycles": 3,
+    "recovery_cycles": 2,
+    "comparison_mode": "absolute_and_relative",
+    "relative_ratio_percent": 25,
+    "minimum_cluster_active_clients": 50,
+    "minimum_peer_median": 30,
+    "missing_cycles": 3
+  },
+  "notifications": {
+    "notify_new_incidents": true,
+    "repeat_unacknowledged": false,
+    "repeat_interval_minutes": 10,
+    "sound_enabled": false,
+    "recovery_notifications": true
+  },
+  "ui": {
+    "always_on_top": false,
+    "opacity_percent": 100,
+    "window_x": null,
+    "window_y": null,
+    "window_width": 420,
+    "window_height": 320
+  },
+  "ssh_debug_logging": false
+}

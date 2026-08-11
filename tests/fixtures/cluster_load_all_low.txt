@@ -1,0 +1,7 @@
+Switch IP        Active Clients    Standby Clients
+---------        --------------    ---------------
+192.0.2.11       3                 2
+192.0.2.12       1                 2
+192.0.2.13       4                 3
+192.0.2.14       2                 1
+Total: Active Clients 10

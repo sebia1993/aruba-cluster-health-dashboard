@@ -1,0 +1,2 @@
+This is not an Aruba command table.
+The output was truncated before its header and contains no usable rows.

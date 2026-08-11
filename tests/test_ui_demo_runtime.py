@@ -1,0 +1,404 @@
+from __future__ import annotations
+
+import copy
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from aruba_mini_dashboard.config import AppPaths, AppSettings
+from aruba_mini_dashboard.credentials import CredentialService, SessionCredentialStore
+from aruba_mini_dashboard.demo import DEMO_STAGES, DemoPoller, demo_fixture_directory
+from aruba_mini_dashboard.logging_setup import setup_logging
+from aruba_mini_dashboard.main import RuntimePoller
+from aruba_mini_dashboard.models import PollCycleResult
+from aruba_mini_dashboard.parsers import (
+    parse_group_membership,
+    parse_load_distribution,
+    parse_show_switches,
+)
+from aruba_mini_dashboard.storage import SQLiteStorage, StorageBusyError
+
+
+FIXTURE_DIR = Path(__file__).parent / "fixtures"
+EXPECTED_MEMBERS = {
+    f"192.0.2.{number}": f"WLC-{number - 10:02d}" for number in range(11, 15)
+}
+
+
+def membership_cycle(
+    filename: str,
+    checked_at: datetime,
+    *,
+    controller_ip: str = "192.0.2.11",
+) -> PollCycleResult:
+    return PollCycleResult(
+        checked_at=checked_at,
+        expected_cluster_members=EXPECTED_MEMBERS,
+        mm_result=parse_show_switches(
+            (FIXTURE_DIR / "mm_show_switches_normal.txt").read_text(encoding="utf-8")
+        ),
+        load_result=parse_load_distribution(
+            (FIXTURE_DIR / "cluster_load_normal.txt").read_text(encoding="utf-8")
+        ),
+        membership_result=parse_group_membership(
+            (FIXTURE_DIR / filename).read_text(encoding="utf-8")
+        ),
+        requested_cluster_controller_ip="192.0.2.11",
+        actual_cluster_controller_ip=controller_ip,
+    )
+
+
+def test_demo_reads_fixtures_and_replays_full_detection_sequence(tmp_path: Path) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    storage = SQLiteStorage(":memory:")
+    runtime = RuntimePoller(
+        AppSettings.default(),
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        storage,
+        setup_logging(paths),
+    )
+    demo = DemoPoller(runtime, fixture_dir=Path(__file__).parent / "fixtures")
+    results = [demo() for _ in DEMO_STAGES]
+    assert results[0].severity.value == "normal"
+    assert results[1].severity.value == "normal"
+    assert results[2].severity.value == "normal"
+    assert results[3].severity.value == "warning"
+    assert results[3].problem_ips == ["192.0.2.12"]
+    assert results[4].severity.value == "critical"
+    assert results[5].severity.value == "critical"
+    assert results[6].severity.value == "warning"
+    assert results[7].severity.value == "normal"
+    assert all(result.notes[0].startswith("데모 단계") for result in results)
+    wrapped = demo()
+    assert wrapped.severity.value == "normal"
+    assert wrapped.problem_ips == []
+    assert "1/8" in wrapped.notes[0]
+    storage.close()
+
+
+def test_fixture_directory_resolves_source_tree() -> None:
+    path = demo_fixture_directory()
+    assert path.name == "fixtures"
+    assert (path / "mm_show_switches_normal.txt").is_file()
+
+
+def test_demo_members_are_always_derived_from_fixtures_not_configured_endpoints(tmp_path: Path) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    settings = AppSettings.default()
+    for index, member in enumerate(settings.cluster.members, start=11):
+        member.ip = f"198.51.100.{index}"
+        member.alias = f"PROD-{index}"
+    storage = SQLiteStorage(":memory:")
+    runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        storage,
+        setup_logging(paths),
+    )
+    demo = DemoPoller(runtime, fixture_dir=Path(__file__).parent / "fixtures")
+    results = [demo() for _ in range(4)]
+    assert results[-1].problem_ips == ["192.0.2.12"]
+    assert all(not device.ip.startswith("198.51.100.") for device in results[-1].devices)
+    storage.close()
+
+
+def test_membership_event_survives_locked_flush_and_settings_rebuild(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    settings = AppSettings.default()
+    storage = SQLiteStorage(paths)
+    runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        storage,
+        setup_logging(paths),
+    )
+    initial_at = datetime(2026, 8, 11, 1, 0, tzinfo=timezone.utc)
+    runtime.correlate(membership_cycle("group_membership_initial.txt", initial_at))
+    assert storage.get("192.0.2.12").display_value == "Type-A"
+    original_flush = storage.save_cycle_domain_state
+
+    def locked(_baselines, _changes, _acknowledged_members, _incidents, _transitions) -> None:
+        raise StorageBusyError("locked")
+
+    monkeypatch.setattr(storage, "save_cycle_domain_state", locked)
+    changed = runtime.correlate(
+        membership_cycle("group_membership_changed.txt", initial_at + timedelta(minutes=1))
+    )
+    assert changed.device_by_ip("192.0.2.12").connection_type_changed is True
+    assert storage.get("192.0.2.12").display_value == "Type-A"
+    assert storage.load_pending_connection_changes() == []
+
+    updated = copy.deepcopy(settings)
+    updated.polling.interval_seconds = 30
+    runtime.update_settings(updated)
+    monkeypatch.setattr(storage, "save_cycle_domain_state", original_flush)
+    runtime.correlate(
+        membership_cycle("group_membership_changed.txt", initial_at + timedelta(minutes=2))
+    )
+
+    assert storage.get("192.0.2.12").display_value == "Type-B"
+    pending = storage.load_pending_connection_changes()
+    assert len(pending) == 1
+    assert (pending[0].previous_value, pending[0].current_value) == ("Type-A", "Type-B")
+    incidents = storage.load_domain_incidents()
+    assert len(incidents) == 1
+    assert incidents[0].active is True
+    assert incidents[0].event_token == pending[0].event_token
+    events = storage.list_events()
+    assert [item["event_type"] for item in events].count("activated") == 1
+    assert all(item["event_type"] != "recovered" for item in events)
+    storage.close()
+
+
+def test_disabled_new_alert_waits_full_repeat_interval(tmp_path: Path) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    settings = AppSettings.default()
+    settings.notifications.notify_new_incidents = False
+    settings.notifications.repeat_unacknowledged = True
+    settings.notifications.repeat_interval_minutes = 10
+    storage = SQLiteStorage(paths)
+    runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        storage,
+        setup_logging(paths),
+    )
+    initial_at = datetime(2026, 8, 11, 2, 0, tzinfo=timezone.utc)
+    runtime.correlate(membership_cycle("group_membership_initial.txt", initial_at))
+
+    first = runtime.correlate(
+        membership_cycle("group_membership_changed.txt", initial_at + timedelta(minutes=1))
+    )
+    before_interval = runtime.correlate(
+        membership_cycle(
+            "group_membership_changed.txt",
+            initial_at + timedelta(minutes=10, seconds=59),
+        )
+    )
+    at_interval = runtime.correlate(
+        membership_cycle("group_membership_changed.txt", initial_at + timedelta(minutes=11))
+    )
+
+    assert first.notification_events == []
+    assert before_interval.notification_events == []
+    assert len(at_interval.notification_events) == 1
+    assert at_interval.notification_events[0].first_detected_at == initial_at + timedelta(minutes=1)
+    storage.close()
+
+
+def test_failed_atomic_membership_write_restart_has_one_activation_and_no_recovery(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    settings = AppSettings.default()
+    first_storage = SQLiteStorage(paths)
+    first_runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        first_storage,
+        setup_logging(paths),
+    )
+    initial_at = datetime(2026, 8, 11, 3, 0, tzinfo=timezone.utc)
+    first_runtime.correlate(membership_cycle("group_membership_initial.txt", initial_at))
+
+    def locked(_baselines, _changes, _acknowledged_members, _incidents, _transitions) -> None:
+        raise StorageBusyError("locked")
+
+    monkeypatch.setattr(first_storage, "save_cycle_domain_state", locked)
+    failed = first_runtime.correlate(
+        membership_cycle("group_membership_changed.txt", initial_at + timedelta(minutes=1))
+    )
+    assert len(failed.notification_events) == 1
+    assert first_storage.get("192.0.2.12").display_value == "Type-A"
+    assert first_storage.load_pending_connection_changes() == []
+    assert first_storage.load_domain_incidents() == []
+    assert first_storage.list_events() == []
+    first_storage.close()
+
+    reopened_storage = SQLiteStorage(paths)
+    reopened_runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        reopened_storage,
+        setup_logging(paths),
+    )
+    restarted = reopened_runtime.correlate(
+        membership_cycle("group_membership_changed.txt", initial_at + timedelta(minutes=2))
+    )
+
+    assert len(restarted.notification_events) == 1
+    incidents = reopened_storage.load_domain_incidents()
+    assert len(incidents) == 1
+    assert incidents[0].active is True
+    event_types = [item["event_type"] for item in reopened_storage.list_events()]
+    assert event_types == ["activated"]
+    reopened_storage.close()
+
+
+def test_failed_atomic_acknowledgement_restart_does_not_reactivate_change(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    settings = AppSettings.default()
+    first_storage = SQLiteStorage(paths)
+    first_runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        first_storage,
+        setup_logging(paths),
+    )
+    initial_at = datetime(2026, 8, 11, 4, 0, tzinfo=timezone.utc)
+    first_runtime.correlate(membership_cycle("group_membership_initial.txt", initial_at))
+    activated = first_runtime.correlate(
+        membership_cycle("group_membership_changed.txt", initial_at + timedelta(minutes=1))
+    )
+    incident_id = activated.active_incidents[0].incident_id
+    assert [item["event_type"] for item in first_storage.list_events()] == ["activated"]
+
+    def locked(_baselines, _changes, _acknowledged_members, _incidents, _transitions) -> None:
+        raise StorageBusyError("locked")
+
+    monkeypatch.setattr(first_storage, "save_cycle_domain_state", locked)
+    first_runtime.acknowledge_ip("192.0.2.12")
+
+    persisted_before_restart = first_storage.load_domain_incidents()
+    assert len(persisted_before_restart) == 1
+    assert persisted_before_restart[0].incident_id == incident_id
+    assert persisted_before_restart[0].active is True
+    assert persisted_before_restart[0].acknowledged is False
+    assert len(first_storage.load_pending_connection_changes()) == 1
+    assert [item["event_type"] for item in first_storage.list_events()] == ["activated"]
+    first_storage.close()
+
+    reopened_storage = SQLiteStorage(paths)
+    reopened_runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        reopened_storage,
+        setup_logging(paths),
+    )
+    restarted = reopened_runtime.correlate(
+        membership_cycle("group_membership_changed.txt", initial_at + timedelta(minutes=2))
+    )
+
+    assert restarted.active_incidents[0].incident_id == incident_id
+    event_types = [item["event_type"] for item in reversed(reopened_storage.list_events())]
+    assert event_types.count("activated") == 1
+    assert "acknowledged" not in event_types
+    assert event_types[:1] == ["activated"]
+    reopened_storage.close()
+
+
+def test_failed_atomic_acknowledgement_is_retained_for_same_runtime_retry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    settings = AppSettings.default()
+    storage = SQLiteStorage(paths)
+    runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        storage,
+        setup_logging(paths),
+    )
+    initial_at = datetime(2026, 8, 11, 4, 30, tzinfo=timezone.utc)
+    runtime.correlate(membership_cycle("group_membership_initial.txt", initial_at))
+    runtime.correlate(
+        membership_cycle("group_membership_changed.txt", initial_at + timedelta(minutes=1))
+    )
+    original_flush = storage.save_cycle_domain_state
+
+    def locked(_baselines, _changes, _acknowledged_members, _incidents, _transitions) -> None:
+        raise StorageBusyError("locked")
+
+    monkeypatch.setattr(storage, "save_cycle_domain_state", locked)
+    runtime.acknowledge_ip("192.0.2.12")
+    assert runtime._pending_connection_acknowledgements == {"192.0.2.12"}
+    assert len(storage.load_pending_connection_changes()) == 1
+
+    monkeypatch.setattr(storage, "save_cycle_domain_state", original_flush)
+    runtime.correlate(
+        membership_cycle("group_membership_changed.txt", initial_at + timedelta(minutes=2))
+    )
+
+    assert runtime._pending_connection_acknowledgements == set()
+    assert storage.load_pending_connection_changes() == []
+    incident = storage.load_domain_incidents()[0]
+    assert incident.acknowledged is True
+    assert incident.active is False
+    event_types = [item["event_type"] for item in reversed(storage.list_events())]
+    assert event_types == ["activated", "acknowledged"]
+    storage.close()
+
+
+def test_failover_connection_change_persists_by_member_across_restart(tmp_path: Path) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    settings = AppSettings.default()
+    first_storage = SQLiteStorage(paths)
+    first_runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        first_storage,
+        setup_logging(paths),
+    )
+    initial_at = datetime(2026, 8, 11, 5, 0, tzinfo=timezone.utc)
+    first_runtime.correlate(
+        membership_cycle(
+            "group_membership_initial.txt",
+            initial_at,
+            controller_ip="192.0.2.11",
+        )
+    )
+    failover = first_runtime.correlate(
+        membership_cycle(
+            "group_membership_changed.txt",
+            initial_at + timedelta(minutes=1),
+            controller_ip="192.0.2.13",
+        )
+    )
+    incident_id = failover.active_incidents[0].incident_id
+    pending_token = first_storage.load_pending_connection_changes()[0].event_token
+    assert first_storage.get("192.0.2.12").collector_ip == "192.0.2.13"
+    first_storage.close()
+
+    reopened_storage = SQLiteStorage(paths)
+    reopened_runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        reopened_storage,
+        setup_logging(paths),
+    )
+    returned_to_primary = reopened_runtime.correlate(
+        membership_cycle(
+            "group_membership_changed.txt",
+            initial_at + timedelta(minutes=2),
+            controller_ip="192.0.2.11",
+        )
+    )
+
+    assert returned_to_primary.active_incidents[0].incident_id == incident_id
+    pending = reopened_storage.load_pending_connection_changes()
+    assert len(pending) == 1
+    assert pending[0].event_token == pending_token
+    assert pending[0].collector_ip == "192.0.2.13"
+    assert reopened_storage.get("192.0.2.12").collector_ip == "192.0.2.11"
+    event_types = [item["event_type"] for item in reopened_storage.list_events()]
+    assert event_types.count("activated") == 1
+    assert "recovered" not in event_types
+    reopened_storage.close()

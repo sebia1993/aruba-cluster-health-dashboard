@@ -1,0 +1,192 @@
+"""Pre-authentication SSH fingerprint discovery and app-only trust store."""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import os
+import socket
+import tempfile
+import threading
+from time import monotonic
+from dataclasses import dataclass
+from pathlib import Path
+
+
+class SshHostKeyError(RuntimeError):
+    pass
+
+
+class SshHostKeyUntrustedError(SshHostKeyError):
+    pass
+
+
+class SshHostKeyMismatchError(SshHostKeyError):
+    pass
+
+
+class SshHostKeyCancelledError(SshHostKeyError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class ScannedHostKey:
+    host: str
+    port: int
+    algorithm: str
+    fingerprint: str
+    key: object
+
+    @property
+    def target(self) -> str:
+        return known_hosts_target(self.host, self.port)
+
+
+@dataclass(frozen=True, slots=True)
+class HostKeyCheck:
+    status: str
+    scanned: ScannedHostKey
+    expected_fingerprints: tuple[str, ...] = ()
+
+
+def known_hosts_target(host: str, port: int) -> str:
+    normalized = str(host).strip()
+    return normalized if int(port) == 22 else f"[{normalized}]:{int(port)}"
+
+
+def sha256_fingerprint(key: object) -> str:
+    digest = hashlib.sha256(key.asbytes()).digest()
+    return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
+
+
+def scan_ssh_host_key(
+    host: str,
+    port: int,
+    *,
+    timeout: float = 10.0,
+    cancel_event: threading.Event | None = None,
+) -> ScannedHostKey:
+    """Discover a key without sending a user name or credential."""
+
+    try:
+        import paramiko
+    except ImportError as exc:  # pragma: no cover - packaged dependency
+        raise SshHostKeyError("SSH host-key 기능을 사용할 수 없습니다.") from exc
+    bounded_timeout = max(1.0, min(float(timeout), 60.0))
+    if cancel_event is not None and cancel_event.is_set():
+        raise SshHostKeyCancelledError("SSH 지문 확인이 취소되었습니다.")
+    sock: socket.socket | None = None
+    transport = None
+    try:
+        sock = socket.create_connection((str(host).strip(), int(port)), timeout=bounded_timeout)
+        transport = paramiko.Transport(sock)
+        completed = threading.Event()
+        transport.start_client(event=completed, timeout=bounded_timeout)
+        deadline = monotonic() + bounded_timeout
+        while not completed.wait(0.1):
+            if cancel_event is not None and cancel_event.is_set():
+                raise SshHostKeyCancelledError("SSH 지문 확인이 취소되었습니다.")
+            if monotonic() >= deadline:
+                raise TimeoutError("SSH host-key exchange timed out")
+        exception = transport.get_exception()
+        if exception is not None:
+            raise exception
+        key = transport.get_remote_server_key()
+        return ScannedHostKey(
+            host=str(host).strip(),
+            port=int(port),
+            algorithm=key.get_name(),
+            fingerprint=sha256_fingerprint(key),
+            key=key,
+        )
+    except SshHostKeyError:
+        raise
+    except Exception as exc:
+        raise SshHostKeyError("SSH 서버 지문을 확인하지 못했습니다.") from exc
+    finally:
+        if transport is not None:
+            transport.close()
+        elif sock is not None:
+            sock.close()
+
+
+def check_scanned_host_key(scanned: ScannedHostKey, known_hosts_path: Path) -> HostKeyCheck:
+    host_keys = _load_host_keys(known_hosts_path)
+    existing = host_keys.lookup(scanned.target)
+    if not existing:
+        return HostKeyCheck("unregistered", scanned)
+    expected = existing.get(scanned.algorithm)
+    if expected is None:
+        return HostKeyCheck(
+            "unregistered_algorithm",
+            scanned,
+            tuple(sorted(sha256_fingerprint(key) for key in existing.values())),
+        )
+    if expected == scanned.key:
+        return HostKeyCheck("verified", scanned)
+    return HostKeyCheck("mismatch", scanned, (sha256_fingerprint(expected),))
+
+
+def register_scanned_host_key(scanned: ScannedHostKey, known_hosts_path: Path) -> Path:
+    """Atomically register an explicitly approved key; never replace a key."""
+
+    import paramiko
+
+    destination = Path(known_hosts_path)
+    host_keys = _load_host_keys(destination)
+    existing = host_keys.lookup(scanned.target)
+    if existing and scanned.algorithm in existing and existing[scanned.algorithm] != scanned.key:
+        raise SshHostKeyMismatchError("저장된 SSH 키와 새 키가 달라 자동 교체하지 않았습니다.")
+    host_keys.add(scanned.target, scanned.algorithm, scanned.key)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        descriptor, name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
+        os.close(descriptor)
+        temporary = Path(name)
+        host_keys.save(str(temporary))
+        os.replace(temporary, destination)
+        return destination
+    except OSError as exc:
+        raise SshHostKeyError("승인된 SSH 키를 저장하지 못했습니다.") from exc
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink(missing_ok=True)
+
+
+def ensure_approved_host_key(
+    host: str,
+    port: int,
+    known_hosts_path: Path,
+    *,
+    timeout: float = 10.0,
+    approve_unknown=None,
+    cancel_event: threading.Event | None = None,
+) -> HostKeyCheck:
+    scanned = scan_ssh_host_key(host, port, timeout=timeout, cancel_event=cancel_event)
+    check = check_scanned_host_key(scanned, known_hosts_path)
+    if check.status == "verified":
+        return check
+    if check.status == "mismatch":
+        raise SshHostKeyMismatchError("SSH 서버 키가 이전 승인 값과 다릅니다.")
+    if approve_unknown is None or not bool(approve_unknown(check)):
+        raise SshHostKeyUntrustedError("승인되지 않은 SSH 서버 키입니다.")
+    register_scanned_host_key(scanned, known_hosts_path)
+    return HostKeyCheck("registered", scanned)
+
+
+def has_approved_host_key(host: str, port: int, known_hosts_path: Path) -> bool:
+    return bool(_load_host_keys(known_hosts_path).lookup(known_hosts_target(host, port)))
+
+
+def _load_host_keys(path: Path):
+    import paramiko
+
+    host_keys = paramiko.HostKeys()
+    candidate = Path(path)
+    if candidate.is_file():
+        try:
+            host_keys.load(str(candidate))
+        except (OSError, ValueError) as exc:
+            raise SshHostKeyError("앱 전용 known_hosts 파일을 읽을 수 없습니다.") from exc
+    return host_keys

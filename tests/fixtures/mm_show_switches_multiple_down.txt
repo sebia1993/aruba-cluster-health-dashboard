@@ -1,0 +1,6 @@
+Switch IP        Switch Name       Status
+---------        -----------       ------
+192.0.2.11       WLC-01            Up
+192.0.2.12       WLC-02            down
+192.0.2.13       WLC-03            DOWN
+192.0.2.14       WLC-04            Up
