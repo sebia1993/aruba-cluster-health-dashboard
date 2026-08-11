@@ -334,29 +334,13 @@ pyserial==3.5 \
     --hash=sha256:3c77e014170dfffbd816e6ffc205e9842efb10be9f58ec16d3e8675b4925cddb \
     --hash=sha256:c4451db6ba391ca6ca299fb3ec7bae67a5c55dde170964c7a14ceefec02f2cf0
     # via netmiko
-pyside6==6.11.0 \
-    --hash=sha256:1f2735dc4f2bd4ec452ae50502c8a22128bba0aced35358a2bbc58384b820c6f \
-    --hash=sha256:267b344c73580ac938ca63c611881fb42a3922ebfe043e271005f4f06c372c4e \
-    --hash=sha256:9092cb002ca43c64006afb2e0d0f6f51aef17aa737c33a45e502326a081ddcbc \
-    --hash=sha256:b15f39acc2b8f46251a630acad0d97f9a0a0461f2baffcd66d7adfada8eb641e \
-    --hash=sha256:c642e2d25704ca746fd37f56feacf25c5aecc4cd40bef23d18eec81f87d9dc00
-    # via -r requirements.txt
-pyside6-addons==6.11.0 \
-    --hash=sha256:413e6121c24f5ffdce376298059eddecff74aa6d638e94e0f6015b33d29b889e \
-    --hash=sha256:8ffb40222456078930816ebcac2f2511716d2acbc11716dd5acc5c365179a753 \
-    --hash=sha256:aaaee83385977a0fe134b2f4fbfb92b45a880d5b656e4d90a708eef10b1b6de8 \
-    --hash=sha256:ac6fe3d4ef4497dde3efc5e896b0acd53ff6c93be4bf485f045690f919419f35 \
-    --hash=sha256:d5eaa4643302e3a0fa94c5766234bee4073d7d5ab9c2b7fd222692a176faf182
-    # via pyside6
 pyside6-essentials==6.11.0 \
     --hash=sha256:3b3362882ad9389357a80504e600180006a957731fec05786fced7b038461fdf \
     --hash=sha256:4854cb0a1b061e7a576d8fb7bb7cf9f49540d558b1acb7df0742a7afefe61e4e \
     --hash=sha256:81ca603dbf21bc39f89bb42db215c25ebe0c879a1a4c387625c321d2730ec187 \
     --hash=sha256:85d6ca87ef35fa6565d385ede72ae48420dd3f63113929d10fc800f6b0360e01 \
     --hash=sha256:dc20e7afd5fc6fe51297db91cef997ce60844be578f7a49fc61b7ab9657a8849
-    # via
-    #   pyside6
-    #   pyside6-addons
+    # via -r requirements.txt
 pytest==8.4.2 \
     --hash=sha256:86c0d0b93306b961d58d62a4db4879f27fe25513d4b969df351abdddb3c30e01 \
     --hash=sha256:872f880de3fc3a5bdc88a11b39c9710c3497a547cfa9320bc3c5e62fbf272e79
@@ -480,10 +464,7 @@ shiboken6==6.11.0 \
     --hash=sha256:a10dc7718104ea2dc15d5b0b96909b77162ce1c76fcc6968e6df692b947a00e9 \
     --hash=sha256:ad54e64f8192ddbdff0c54ac82b89edcd62ed623f502ea21c960541d19514053 \
     --hash=sha256:d88e8a1eb705f2b9ad21db08a61ae1dc0c773e5cd86a069de0754c4cf1f9b43b
-    # via
-    #   pyside6
-    #   pyside6-addons
-    #   pyside6-essentials
+    # via pyside6-essentials
 textfsm==2.1.0 \
     --hash=sha256:45c18ff2b7c90163dfdff7e20d3f482514cc7aac26bc2547744e79dfa761e458 \
     --hash=sha256:55886490474890fa09ade0e8c9555a913fd325724842293364dc44ea705b3616

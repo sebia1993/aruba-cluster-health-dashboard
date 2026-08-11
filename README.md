@@ -18,7 +18,7 @@ Aruba Mobility Master(MM)와 Aruba 7240XM 클러스터를 읽기 전용 SSH로
 - Windows 시스템 트레이 알림, 선택적 알림음, 확인·반복·복구 알림
 - 항상 위, 40~100% 투명도, 창 위치·크기와 UI 설정 유지
 - 실제 SSH를 사용하지 않는 비식별 fixture Demo 모드
-- PyInstaller onedir 운영 빌드와 선택적 Console/one-file 빌드
+- PyInstaller onedir 운영 빌드와 선택적 Console 빌드
 
 ## 안전 경계
 
@@ -165,12 +165,15 @@ offscreen PySide6 UI를 사용합니다. 실제 장비 출력 파일은 IP, Host
 .\scripts\build.ps1
 ```
 
-진단용 Console 또는 선택적 one-file:
+진단용 Console:
 
 ```powershell
 .\scripts\build.ps1 -Console
-.\scripts\build.ps1 -OneFile
 ```
+
+one-file 빌드는 지원하지 않습니다. LGPL 런타임을 사용자가 교체할 수 있는
+`_internal` 트리와 검증 자료를 영구적으로 제공하기 위해 onedir 폴더 전체만
+배포 단위로 사용합니다. `-OneFile` 요청은 빌드 시작 전에 실패합니다.
 
 빌드 스크립트는 다음 순서로 동작합니다.
 
@@ -179,7 +182,8 @@ offscreen PySide6 UI를 사용합니다. 실제 장비 출력 파일은 IP, Host
 3. 전체 자동화 테스트 실행, 실패 시 중단
 4. PyInstaller 실행
 5. 문서와 설정 예제 복사
-6. 금지 확장자 및 Qt 플러그인 확인
+6. 금지 확장자, Qt exact inventory, PySide6/shiboken6/Paramiko/scp 외부 소스와
+   PYZ 비포함 확인
 7. Python 관련 환경변수와 PATH 항목을 제거한 로컬 EXE smoke 실행
    (Netmiko·Paramiko·Windows Credential Manager 로드, 동결 fixture 탐색,
    정상 데모 1회 파싱·IP 종합 판단 포함)
@@ -189,6 +193,41 @@ offscreen PySide6 UI를 사용합니다. 실제 장비 출력 파일은 IP, Host
 폴더 전체가 배포 단위이며 내부 파일을 임의로 제거하면 안 됩니다. 패키지에는
 실행에 필요한 Python runtime과 라이브러리가 포함되므로 최종 사용자 PC에
 Python 설치가 필요하지 않도록 구성되어 있습니다.
+
+버전이 포함된 GitHub Prerelease용 ZIP과 SHA-256 파일은 다음 명령으로
+생성합니다.
+
+```powershell
+.\scripts\package_release.ps1 -Version 0.1.1
+```
+
+기존 태그나 Release 자산을 덮어쓰지 않는 상세 절차는
+[Windows Prerelease 배포 절차](docs/RELEASE_PROCESS_KO.md)를 참조하십시오.
+
+## 보안 제보와 라이선스
+
+민감한 보안 문제를 공개 Issue에 원문 로그·실제 IP·자격 증명과 함께 올리지
+마십시오. 제보 범위와 안전한 정보 형식은
+[GitHub 보안 정책](.github/SECURITY.md)과 [운영 보안 모델](docs/SECURITY_KO.md)에
+정리되어 있습니다.
+
+Aruba Mini Dashboard 자체 코드는 루트 [MIT License](LICENSE)로 배포합니다.
+Windows 배포물에는 그 원문과 바이트 단위로 동일한 `LICENSE.txt`를 포함하며,
+패키지 verifier가 누락이나 변경을 거부합니다. 이 MIT 라이선스는 배포물에 함께
+포함된 제3자 구성요소의 별도 저작권과 라이선스를 대체하지 않습니다. 해당
+고지와 라이선스 원문은 `THIRD_PARTY_NOTICES.txt`,
+`QT_THIRD_PARTY_NOTICES.txt`, `LGPL_RUNTIME_LICENSES\`에서 확인하십시오.
+
+Aruba Mini Dashboard의 배포 조건은 사용자가 LGPL 구성요소를 자신의 용도로
+수정하거나 그 수정 사항을 디버깅하기 위해 리버스 엔지니어링하는 것을
+제한하지 않습니다. 기술적 교체·복구 경로와 제3자 권리의 구분은
+[LGPL 런타임 교체 안내](docs/LGPL_RUNTIME_REPLACEMENT_KO_EN.md)에 기록되어
+있습니다.
+
+Windows GitHub 배포는 수동 workflow와 변경 불가능한 버전 태그를 통해서만
+수행하며, 자동 검사·패키지 검증·해시 검증을 모두 통과한 onedir ZIP을
+Prerelease로 게시합니다. 실제 Aruba 장비와 Python 미설치 Windows 11 현장
+검수가 끝나기 전에는 Stable Release로 표시하지 않습니다.
 
 ## 검증 상태와 남은 현장 확인
 

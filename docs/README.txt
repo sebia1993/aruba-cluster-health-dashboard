@@ -1,4 +1,4 @@
-Aruba Mini Dashboard 0.1.0
+Aruba Mini Dashboard 0.1.1
 ==========================
 
 용도
@@ -50,6 +50,23 @@ JSON, SQLite, 일반 로그와 배포 폴더에 저장하지 않습니다.
 접속·명령·파싱 실패는 WLC Down이 아닙니다. 화면에 "확인 불가" 또는 부분
 수집으로 표시되면 임의로 특정 장비 장애로 해석하지 말고 오류 코드와 파싱
 상태를 확인하십시오.
+
+배포 폴더의 LICENSE.txt는 Aruba Mini Dashboard 자체에 적용되는 MIT License
+원문이며 루트 LICENSE와 바이트 단위로 동일합니다. 이 라이선스는 함께 제공되는
+제3자 구성요소의 저작권이나 별도 라이선스를 대체하지 않습니다.
+THIRD_PARTY_NOTICES.txt에는 Python, Qt/PySide, SSH 및 암호화 런타임의 제3자
+고지와 라이선스 원문이 포함되어 있습니다. ArubaMiniDashboard.exe와
+`_internal` 라이브러리를 분리하거나 수정해서 다시 배포하기 전에 각각의 적용
+조건을 확인하십시오.
+
+QT_THIRD_PARTY_NOTICES.txt와 QT_RUNTIME_INVENTORY.json은 실제 Qt DLL/plugin
+목록과 해시를 기록합니다. LGPL_RUNTIME_INVENTORY.json과
+LGPL_RUNTIME_LICENSES 폴더는 외부 소스로 제공되는 Paramiko 4.0.0 및 scp
+0.16.1의 파일·버전·라이선스 증거를 기록합니다. Aruba Mini Dashboard의 배포
+조건은 사용자가 LGPL 구성요소를 자신의 용도로 수정하거나 그 수정 사항을
+디버깅하기 위해 리버스 엔지니어링하는 것을 제한하지 않습니다. 교체와 복구
+방법은 LGPL_RUNTIME_REPLACEMENT_KO_EN.md를 확인하십시오. one-file/EXE 단독
+배포는 지원하지 않습니다.
 
 Demo
 ----

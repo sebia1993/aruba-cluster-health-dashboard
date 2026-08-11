@@ -35,6 +35,11 @@ Credential Manager 또는 프로세스 메모리에만 둔다. 외부 전송·�
 8. [x] 항상 위, 투명도, 창 위치, 알림·알림음·확인·복구
 9. [x] 독립 Demo, 단위·통합·UI 자동화, 오류 처리 보강
 10. [x] PyInstaller spec, build/test/package 검증 스크립트, 배포 문서
+11. [x] Essentials 전용 Qt 런타임, 제3자 고지, Windows PE 버전 리소스,
+    versioned ZIP/SHA-256, GitHub Windows CI와 공개 배포 차단 workflow
+12. [x] onedir 전용 배포, Qt exact inventory,
+    PySide6/shiboken6/Paramiko/scp 외부 원본 소스와 PYZ 비포함 검증,
+    LGPL 런타임 교체·복구 안내
 
 ## 자동화 검증 범위
 
@@ -50,6 +55,10 @@ Credential Manager 또는 프로세스 메모리에만 둔다. 외부 전송·�
 - Poll Worker Thread와 중복 점검 skip/coalesce
 - offscreen UI, 투명도·항상 위·트레이 대체 경로, 1.0/1.25/1.5 scale 계산
 - PyInstaller 산출물 구성과 Python 환경을 제거한 로컬 smoke 경로
+- ZIP 안전 경로·대소문자 충돌·민감 파일·미사용 Qt 모듈 차단과 격리 추출
+- 런타임 잠금 파일과 제3자 고지 정합성, Windows PE 제품/버전 메타데이터
+- GitHub Actions의 정확한 Python 3.11.9, immutable annotated tag와 자산 digest
+  재검증 경로
 
 ## 외부 검증 대기 항목
 
@@ -71,3 +80,8 @@ Credential Manager 또는 프로세스 메모리에만 둔다. 외부 전송·�
 - fixture와 로컬 SSH 테스트 결과를 실장비 호환성 증거로 표현하지 않는다.
 - 비밀정보와 운영 원문은 저장·로그·배포 검사에서 fail-closed로 보호한다.
 - Git push, tag와 배포 게시 작업은 별도 승인 없이 수행하지 않는다.
+- 저작권자 배포 조건 결정과 필요한 검토 전에는 Actions artifact, Draft 또는
+  Prerelease를 포함한 GitHub 바이너리 전달을 차단한다.
+- 그 경계를 해제한 뒤에도 실제 장비와 클린 Windows 증거 전에는 GitHub
+  배포를 Stable로 표시하지 않는다.
+- 격리된 `v0.1.0` 태그/Release 자산을 덮어쓰거나 다시 게시하지 않는다.

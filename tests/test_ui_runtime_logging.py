@@ -113,6 +113,20 @@ def test_smoke_output_file_works_without_console(monkeypatch, tmp_path: Path) ->
         assert "WIN32CRED_OK" in smoke_markers
 
 
+def test_ui_smoke_creates_qt_application_without_runtime_state(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("ARUBA_MINI_DASHBOARD_DATA_DIR", str(tmp_path / "must-not-exist"))
+    marker = tmp_path / "ui-smoke" / "result.txt"
+    from aruba_mini_dashboard.main import main
+
+    assert main(["--ui-smoke", "--smoke-output", str(marker)]) == 0
+    assert marker.read_text(encoding="utf-8") == "WINDOWS_QT_UI_OK\n"
+    assert not (tmp_path / "must-not-exist").exists()
+
+
 def test_missing_mm_credential_does_not_discard_successful_cluster_collection(
     monkeypatch,
     tmp_path: Path,

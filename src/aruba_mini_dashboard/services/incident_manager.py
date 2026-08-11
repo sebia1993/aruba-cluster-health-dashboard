@@ -143,11 +143,25 @@ class IncidentManager:
         for key, incident_id in list(self._active_keys.items()):
             if key in current:
                 continue
+            incident = self._incidents[incident_id]
+            if self._is_superseded_connection_event(incident, current):
+                # A trusted newer event is conclusive even if an older token
+                # also appears in a stale deferred-state snapshot.
+                incident.active = False
+                incident.last_seen_at = observed_at
+                del self._active_keys[key]
+                transitions.append(
+                    IncidentTransition(
+                        IncidentTransitionKind.SUPERSEDED,
+                        self._snapshot(incident),
+                        False,
+                    )
+                )
+                continue
             if key in deferred_keys:
                 # An unavailable/partial source or a deliberate low-usage
                 # deferral is not evidence that the prior incident recovered.
                 continue
-            incident = self._incidents[incident_id]
             if not self._recovery_is_confirmed(incident, health):
                 # In particular, an MM transport/parser failure or a missing
                 # row is not evidence that a previously Down switch is Up.
@@ -164,6 +178,20 @@ class IncidentManager:
                 )
             )
         return transitions
+
+    @staticmethod
+    def _is_superseded_connection_event(
+        incident: Incident,
+        current: dict[tuple[IncidentType, str | None, str], HealthSignal],
+    ) -> bool:
+        if incident.incident_type is not IncidentType.CONNECTION_TYPE_CHANGED:
+            return False
+        return any(
+            incident_type is IncidentType.CONNECTION_TYPE_CHANGED
+            and ip == incident.ip
+            and token != incident.event_token
+            for incident_type, ip, token in current
+        )
 
     @staticmethod
     def _recovery_is_confirmed(incident: Incident, health: OverallHealth) -> bool:

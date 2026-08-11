@@ -325,7 +325,8 @@ def test_detail_dialog_shows_ip_filtered_parse_context_and_change_time() -> None
         parsed_results={"show test": parsed},
     )
     summary_text = "\n".join(label.text() for label in dialog.findChildren(type(dialog._selectable(""))))
-    assert "2026-08-11 10:31:00" in summary_text
+    expected_change_time = datetime.fromisoformat("2026-08-11T10:31:00+09:00").astimezone()
+    assert expected_change_time.strftime("%Y-%m-%d %H:%M:%S") in summary_text
     parsed_text = dialog.tabs.widget(1).toPlainText()
     assert "192.0.2.12" in parsed_text
     assert "192.0.2.11" not in parsed_text

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from .collectors.base import (
     SHOW_CLIENT_DISTRIBUTION,
@@ -865,6 +865,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Aruba MM/WLC 상태 미니 대시보드")
     parser.add_argument("--demo", action="store_true", help="실제 SSH 없이 fixture 시나리오 실행")
     parser.add_argument("--smoke", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--ui-smoke", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--smoke-output", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--demo-fixtures", type=Path, help=argparse.SUPPRESS)
     return parser
@@ -911,6 +912,33 @@ def _run_frozen_smoke(fixture_dir: Path | None = None) -> str:
     return "\n".join(markers) + "\n"
 
 
+def _run_qt_ui_smoke(output_path: Path | None) -> int:
+    """Create a real Qt window briefly without touching runtime state or network."""
+
+    os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+    app = QApplication.instance() or QApplication([sys.argv[0]])
+    app.setApplicationName("ArubaMiniDashboardUiSmoke")
+    window = QWidget()
+    window.setWindowTitle("Aruba Mini Dashboard UI Smoke")
+    window.resize(240, 120)
+    marker = "WINDOWS_QT_UI_OK\n"
+    completed = False
+
+    def finish() -> None:
+        nonlocal completed
+        if output_path is not None:
+            _write_atomic_text(output_path, marker)
+        completed = True
+        window.close()
+        app.quit()
+
+    window.show()
+    QTimer.singleShot(100, finish)
+    QTimer.singleShot(5000, app.quit)
+    exit_code = int(app.exec())
+    return exit_code if completed else 2
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.smoke:
@@ -920,6 +948,8 @@ def main(argv: list[str] | None = None) -> int:
         if sys.stdout is not None:
             print(marker.rstrip(), flush=True)
         return 0
+    if args.ui_smoke:
+        return _run_qt_ui_smoke(args.smoke_output)
 
     paths = AppPaths.from_environment().ensure()
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")

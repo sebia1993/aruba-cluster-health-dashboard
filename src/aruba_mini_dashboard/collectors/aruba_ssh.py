@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
+import re
 import socket
 import threading
-import re
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Callable
@@ -59,6 +59,13 @@ class ArubaSshAdapter:
         self._check_cancelled()
         if self._connection is not None:
             return
+        if self.options.enable_required and not self._credential.enable_secret:
+            raise SshOperationError(
+                "ENABLE_SECRET_MISSING",
+                "Enable 비밀번호가 필요하지만 입력되지 않았습니다.",
+                retryable=False,
+                operation="enable",
+            )
         known_hosts = Path(self.options.known_hosts_path)
         try:
             known_hosts.parent.mkdir(parents=True, exist_ok=True)
@@ -73,6 +80,7 @@ class ArubaSshAdapter:
                 operation="connect",
             ) from exc
         factory = self._connection_factory
+        deferred_netmiko_session = factory is None
         if factory is None:
             try:
                 from netmiko import ConnectHandler
@@ -101,17 +109,18 @@ class ArubaSshAdapter:
             "use_keys": False,
             "allow_agent": False,
         }
+        if deferred_netmiko_session:
+            # ArubaOsSSH.session_preparation() always calls enable().  Create
+            # the standard driver without opening it so this adapter can apply
+            # the configured optional-enable policy before any CLI command is
+            # sent.  Netmiko explicitly supports auto_connect=False.
+            params["auto_connect"] = False
         try:
             self._connection = factory(**params)
+            if deferred_netmiko_session:
+                self._open_netmiko_session(self._connection)
             self._check_cancelled()
-            if self.options.enable_required:
-                if not self._credential.enable_secret:
-                    raise SshOperationError(
-                        "ENABLE_SECRET_MISSING",
-                        "Enable 비밀번호가 필요하지만 입력되지 않았습니다.",
-                        retryable=False,
-                        operation="enable",
-                    )
+            if self.options.enable_required and not deferred_netmiko_session:
                 self._connection.enable()
             self._disable_paging()
         except SshOperationError:
@@ -120,6 +129,60 @@ class ArubaSshAdapter:
         except Exception as exc:
             self.close()
             raise classify_ssh_exception(exc, operation="connect") from exc
+
+    def _open_netmiko_session(self, connection: object) -> None:
+        """Open Netmiko transport while replacing Aruba's forced-enable prep."""
+
+        if not _is_netmiko_connection(connection):
+            raise SshOperationError(
+                "SSH_RUNTIME_INCOMPATIBLE",
+                "SSH 실행 모듈이 필요한 세션 준비 기능을 제공하지 않습니다.",
+                retryable=False,
+                operation="connect",
+            )
+        modify_params = getattr(connection, "_modify_connection_params", None)
+        establish_connection = getattr(connection, "establish_connection", None)
+        test_channel = getattr(connection, "_test_channel_read", None)
+        set_base_prompt = getattr(connection, "set_base_prompt", None)
+        enable = getattr(connection, "enable", None)
+        if not all(callable(value) for value in (modify_params, establish_connection, test_channel, set_base_prompt)):
+            raise SshOperationError(
+                "SSH_RUNTIME_INCOMPATIBLE",
+                "SSH 실행 모듈이 필요한 세션 준비 기능을 제공하지 않습니다.",
+                retryable=False,
+                operation="connect",
+            )
+        if self.options.enable_required and not callable(enable):
+            raise SshOperationError(
+                "SSH_RUNTIME_INCOMPATIBLE",
+                "SSH 실행 모듈이 Enable 세션 준비 기능을 제공하지 않습니다.",
+                retryable=False,
+                operation="enable",
+            )
+
+        try:
+            modify_params()
+            self._check_cancelled()
+            establish_connection()
+            self._check_cancelled()
+
+            # Match the safe parts of Netmiko 4.6 ArubaOsSSH preparation.  The
+            # read_timeout_override supplied above bounds each prompt read.
+            # ANSI cleanup is enabled before reading the first device prompt.
+            setattr(connection, "ansi_escape_codes", True)
+            test_channel(pattern=r"[>#]")
+            self._check_cancelled()
+            set_base_prompt()
+            self._check_cancelled()
+            if self.options.enable_required:
+                enable()
+                self._check_cancelled()
+        except SshOperationError:
+            self._abort_netmiko_transport(connection)
+            raise
+        except Exception:
+            self._abort_netmiko_transport(connection)
+            raise
 
     def _disable_paging(self) -> None:
         connection = self._require_connection()
@@ -346,7 +409,7 @@ class ArubaSshAdapter:
         self._paging_disabled = False
         if connection is not None:
             try:
-                if type(connection).__module__.startswith("netmiko."):
+                if _is_netmiko_connection(connection):
                     # Netmiko's generic disconnect path writes ``exit``.  The
                     # application command boundary intentionally permits only
                     # the three show commands plus session ``no paging`` and

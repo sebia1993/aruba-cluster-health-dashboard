@@ -1,0 +1,10 @@
+# Preserve reviewed upstream license texts byte-for-byte. Their authoritative
+# formatting can contain trailing spaces that are meaningful to hash evidence.
+docs/THIRD_PARTY_NOTICES.txt -whitespace
+scripts/license_texts/** -whitespace
+
+# Release evidence is regenerated with LF and compared byte-for-byte in the
+# extracted Windows package. Keep checkout conversion from changing it.
+docs/QT_THIRD_PARTY_NOTICES.txt text eol=lf
+scripts/qt_runtime_manifest.json text eol=lf
+scripts/lgpl_runtime_manifest.json text eol=lf
