@@ -102,6 +102,7 @@ Copy-Item -LiteralPath (Join-Path $repo "docs\README.txt") -Destination (Join-Pa
 Copy-Item -LiteralPath (Join-Path $repo "docs\WINDOWS11_QA_CHECKLIST_KO.md") -Destination (Join-Path $releaseRoot "WINDOWS11_QA_CHECKLIST_KO.md")
 Copy-Item -LiteralPath (Join-Path $repo "docs\THIRD_PARTY_NOTICES.txt") -Destination (Join-Path $releaseRoot "THIRD_PARTY_NOTICES.txt")
 Copy-Item -LiteralPath (Join-Path $repo "docs\LGPL_RUNTIME_REPLACEMENT_KO_EN.md") -Destination (Join-Path $releaseRoot "LGPL_RUNTIME_REPLACEMENT_KO_EN.md")
+Copy-Item -LiteralPath (Join-Path $repo "docs\PERFORMANCE_REPORT_KO.md") -Destination (Join-Path $releaseRoot "PERFORMANCE_REPORT_KO.md")
 
 & $python (Join-Path $repo "scripts\collect_qt_runtime_notices.py") `
     --package-root $releaseRoot `

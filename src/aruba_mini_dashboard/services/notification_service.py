@@ -40,6 +40,7 @@ class NotificationService(QObject):
         repeat_enabled: bool = False,
         repeat_minutes: int = 10,
         recovery_enabled: bool = True,
+        max_lifecycle_entries: int = 4096,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -48,9 +49,10 @@ class NotificationService(QObject):
         self.repeat_enabled = repeat_enabled
         self.repeat_minutes = max(1, int(repeat_minutes))
         self.recovery_enabled = recovery_enabled
+        self.max_lifecycle_entries = max(1, int(max_lifecycle_entries))
         self._last_shown: dict[tuple[str, str], datetime] = {}
         self._last_active: dict[tuple[str, str], bool] = {}
-        self._acknowledged: set[tuple[str, str]] = set()
+        self._acknowledged: dict[tuple[str, str], None] = {}
 
     def configure(
         self,
@@ -59,6 +61,7 @@ class NotificationService(QObject):
         repeat_enabled: bool | None = None,
         repeat_minutes: int | None = None,
         recovery_enabled: bool | None = None,
+        max_lifecycle_entries: int | None = None,
     ) -> None:
         if sound_enabled is not None:
             self.sound_enabled = bool(sound_enabled)
@@ -68,6 +71,9 @@ class NotificationService(QObject):
             self.repeat_minutes = max(1, int(repeat_minutes))
         if recovery_enabled is not None:
             self.recovery_enabled = bool(recovery_enabled)
+        if max_lifecycle_entries is not None:
+            self.max_lifecycle_entries = max(1, int(max_lifecycle_entries))
+            self._prune_lifecycle_cache()
 
     def should_notify(self, event: NotificationEvent, now: datetime | None = None) -> bool:
         now = now or datetime.now()
@@ -96,11 +102,8 @@ class NotificationService(QObject):
             self.notification_failed.emit("시스템 트레이 알림을 사용할 수 없습니다.")
             return False
         icon = self._message_icon(event.severity, event.active)
-        if event.active and self._last_active.get(event.key) is False:
-            self._acknowledged.discard(event.key)
         self.tray_icon.showMessage(event.title, event.message, icon, 10000)
-        self._last_shown[event.key] = now
-        self._last_active[event.key] = event.active
+        self._record_delivery(event, now)
         if self.sound_enabled:
             QApplication.beep()
         self.notification_shown.emit(event)
@@ -149,16 +152,18 @@ class NotificationService(QObject):
         )
         shown = self.notify(summary)
         if shown:
+            # The synthetic summary is never queried for duplicate decisions;
+            # the individual lifecycle keys below are the suppression source.
+            self.clear_resolved(summary.ip, summary.issue_type)
             now = datetime.now()
             for event in pending:
-                self._last_shown[event.key] = now
-                self._last_active[event.key] = event.active
+                self._record_delivery(event, now)
                 self.notification_shown.emit(event)
         return shown
 
     @Slot(str, str)
     def acknowledge(self, ip: str, issue_type: str) -> None:
-        self._acknowledged.add((ip, issue_type))
+        self._remember_acknowledgement((ip, issue_type))
 
     @Slot(str)
     def acknowledge_ip(self, ip: str) -> None:
@@ -166,13 +171,44 @@ class NotificationService(QObject):
 
         for key in self._last_shown:
             if key[0] == ip:
-                self._acknowledged.add(key)
+                self._remember_acknowledgement(key)
 
     def clear_resolved(self, ip: str, issue_type: str) -> None:
         key = (ip, issue_type)
-        self._acknowledged.discard(key)
+        self._acknowledged.pop(key, None)
         self._last_shown.pop(key, None)
         self._last_active.pop(key, None)
+
+    def _record_delivery(self, event: NotificationEvent, shown_at: datetime) -> None:
+        key = event.key
+        was_recovered = self._last_active.get(key) is False
+        self._last_active.pop(key, None)
+        self._last_active[key] = event.active
+        if event.active:
+            if was_recovered:
+                self._acknowledged.pop(key, None)
+            self._last_shown[key] = shown_at
+        else:
+            # A single recovered marker is enough to suppress duplicate
+            # recovery snapshots and recognize a future fresh activation.
+            self._last_shown.pop(key, None)
+            self._acknowledged.pop(key, None)
+        self._prune_lifecycle_cache()
+
+    def _remember_acknowledgement(self, key: tuple[str, str]) -> None:
+        self._acknowledged.pop(key, None)
+        self._acknowledged[key] = None
+        self._prune_lifecycle_cache()
+
+    def _prune_lifecycle_cache(self) -> None:
+        while len(self._last_active) > self.max_lifecycle_entries:
+            oldest = next(iter(self._last_active))
+            self._last_active.pop(oldest, None)
+            self._last_shown.pop(oldest, None)
+            self._acknowledged.pop(oldest, None)
+        while len(self._acknowledged) > self.max_lifecycle_entries:
+            oldest = next(iter(self._acknowledged))
+            self._acknowledged.pop(oldest, None)
 
     @Slot()
     def test_sound(self) -> None:

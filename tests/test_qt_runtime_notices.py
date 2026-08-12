@@ -213,6 +213,10 @@ def test_release_verifier_rejects_unreviewed_shiboken_binary(
     (shiboken_root / "Shiboken.pyd").write_bytes(b"reviewed")
     (shiboken_root / "shiboken6.abi3.dll").write_bytes(b"reviewed")
     (shiboken_root / "unreviewed-helper.dll").write_bytes(b"unreviewed")
+    translation_root = package_root / "_internal" / "PySide6" / "translations"
+    translation_root.mkdir(parents=True, exist_ok=True)
+    (translation_root / "qt_ko.qm").write_bytes(b"reviewed")
+    (translation_root / "qtbase_ko.qm").write_bytes(b"reviewed")
     monkeypatch.setattr(package_verifier, "_verify_qt_runtime_inventory", lambda _root: None)
 
     with pytest.raises(SystemExit, match="shiboken6 runtime binary boundary mismatch"):

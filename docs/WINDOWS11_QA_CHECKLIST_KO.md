@@ -31,12 +31,16 @@
       `_internal\shiboken6\__init__.py`, `_internal\paramiko\*.py`,
       `_internal\scp.py`에만 존재하고 `.pyc`, `.db`, `.log`, `.cred`, `.key`가 없음
 - [ ] `THIRD_PARTY_NOTICES.txt`가 포함되고 비어 있지 않음
+- [ ] `PERFORMANCE_REPORT_KO.md`가 포함되고 기준선·미측정 범위를 명확히 구분함
 - [ ] `QT_THIRD_PARTY_NOTICES.txt`, `QT_RUNTIME_INVENTORY.json`,
       `LGPL_RUNTIME_INVENTORY.json`, `LGPL_RUNTIME_LICENSES\`,
       `LGPL_RUNTIME_REPLACEMENT_KO_EN.md`가 포함됨
 - [ ] `LGPL_RUNTIME_INVENTORY.json`에서 PySide6/shiboken6/Paramiko/scp가
       external source이고 PYZ 내부 감지 목록이 비어 있음
-- [ ] Qt Virtual Keyboard/PDF/QML/Quick/OpenGL 미사용 구성 요소가 없음
+- [ ] Qt Virtual Keyboard/PDF/QML/Quick/OpenGL 미사용 구성 요소가 없고, Qt 번역은
+      `qt_ko.qm`과 `qtbase_ko.qm`만 포함됨
+- [ ] Netmiko 장비 드라이버와 Paramiko는 유지되며, 배포 실행에 불필요한
+      Netmiko CLI 도구와 rich/ruamel/markdown-it/pygments가 PYZ에 없음
 - [ ] EXE 속성의 제품명·설명·원본 파일명·버전이 전달 버전과 일치함
 
 참고: 패키지 verifier는 Python 환경변수/PATH를 제거한 로컬 smoke에서
@@ -46,8 +50,17 @@ Netmiko·Paramiko·Windows Credential Manager, 동결 fixture 탐색, 데모
 
 ## 첫 실행과 설정
 
-- [ ] 첫 실행 시 메인 창이 열리고 자동 점검은 일시정지 상태임
-- [ ] `설정`을 열어 MM, WLC 4개, Primary/Fallback, timeout과 주기를 저장함
+- [ ] 필수 설정이 없는 첫 실행에서 메인 창과 첫 실행 설정창이 자동으로 열림
+- [ ] `나중에 설정`으로 닫으면 `설정 필요` 안내가 남고 지금 점검·자동 시작은
+      비활성화되지만 설정창과 트레이 종료는 사용할 수 있음
+- [ ] 설정창이 `장비·자격 증명`, `운영`, `알림` 3개 탭으로 구성되고 고급 연결,
+      감지 기준, 반복 알림·진단 항목이 접힌 영역에 있음
+- [ ] 설정 항목의 이름이나 입력란에 마우스를 올리면 용도·기본값·주의사항을
+      설명하는 도움말이 표시됨
+- [ ] MM, WLC 4개와 Primary를 저장하면 Fallback이 나머지 등록 순서로 구성됨
+- [ ] 첫 실행 설정 저장 직후 자동 점검이나 SSH 접속이 시작되지 않으며,
+      메인 화면의 `지금 점검`을 명시적으로 눌러야 첫 수집이 시작됨
+- [ ] 이후 설정에서 timeout과 점검 주기를 변경하고 정상 저장함
 - [ ] 점검 주기 10~3,600초 경계값과 잘못된 값의 한글 오류를 확인함
 - [ ] 공통 계정과 MM/WLC 별도 계정을 각각 확인함
 - [ ] Credential Manager 영구 계정을 저장하고 프로그램 재시작 후 사용함
@@ -74,6 +87,36 @@ Netmiko·Paramiko·Windows Credential Manager, 동결 fixture 탐색, 데모
 - [ ] 한 Controller의 부분 결과와 다른 Controller 결과를 섞지 않음
 - [ ] 모든 수집 Controller 실패 시 Cluster 상태가 확인 불가로 표시됨
 - [ ] MM 인증 실패, timeout, 빈 출력과 파싱 실패가 WLC Down으로 표시되지 않음
+- [ ] 취소 또는 종료 요청 시 재시도 대기가 즉시 해제되고 열린 SSH 세션을 닫음
+
+## 저사양 모드와 성능
+
+- [ ] 일반 모드가 기본값이며 기존 설정 파일에 `performance` 항목이 없어도
+      일반 모드·성능 로그 꺼짐으로 정상 로드됨
+- [ ] 저사양 모드에서 10~119초로 설정한 자동 점검 주기는 실제 120초로 적용됨
+- [ ] 저사양 모드에서 120초 이상으로 설정한 주기는 그대로 적용됨
+- [ ] 저사양 모드에서도 `지금 점검`은 예약 주기를 기다리지 않고 즉시 실행됨
+- [ ] 저사양 모드에서 MM 수집이 끝난 뒤 클러스터 수집이 시작되어 동시에 두
+      장비 수집 작업이 실행되지 않음
+- [ ] 같은 fixture 또는 승인된 현장 출력으로 일반 모드와 저사양 모드의 파싱,
+      감지 사건, 문제 IP와 최종 심각도가 동일함
+- [ ] 창을 트레이로 숨긴 동안 표가 계속 다시 그려지지 않고, 다시 열면 가장
+      최근 결과가 한 번에 표시됨
+- [ ] 점검 중 반복 클릭으로 점검 coordinator worker가 중복 생성되지 않으며
+      앱 전용 Qt worker 풀의 동시 점검은 1개로 제한됨
+- [ ] 선택적 성능 로그가 기본적으로 생성되지 않고, 켰을 때만
+      `logs\performance.log`에 집계 시간·개수가 기록됨
+- [ ] 성능 로그에 IP, Hostname, 사용자 ID, 비밀번호, Enable Secret, credential ID,
+      원본 명령 출력이 없음
+- [ ] 성능 로그가 1MB, 백업 최대 2개로 회전하고 옵션을 끈 뒤 추가 기록이 없음
+- [ ] 동일 조건에서 일반/저사양 모드의 시작 시간, 유휴 CPU, 메모리, 점검 시간,
+      네트워크 요청 횟수와 디스크 쓰기를 각각 기록함
+- [ ] 저전력 CPU·4~8GB RAM·SATA SSD 또는 HDD 환경에서 UI가 응답 없음 상태가
+      되지 않으며 장시간 운전 후 스레드·핸들·메모리가 지속 증가하지 않음
+
+실제 저사양 PC, HDD cold start, 느린 Aruba SSH와 24시간 이상 soak를 실행하지
+않았다면 통과로 표시하지 말고 `PERFORMANCE_REPORT_KO.md`의 미측정 항목으로
+남기십시오.
 
 ## 실제 출력과 판단 규칙
 
@@ -130,7 +173,13 @@ offscreen scale 자동화는 layout 계산 회귀 검사이며 실제 디스플�
 - [ ] `app.db`에 원본 명령 출력과 credential blob이 없음
 - [ ] 일반 로그에 장비 명령 원문과 비밀번호·Enable Secret이 없음
 - [ ] SSH 디버그를 켜고 끌 수 있으며, 기록은 제한된 마스킹 excerpt임
-- [ ] 로그가 파일당 5MB, 백업 최대 5개로 회전함
+- [ ] 일반 모드의 일반/SSH 디버그 로그가 파일당 5MB, 백업 최대 5개로 회전함
+- [ ] 저사양 모드의 일반/SSH 디버그 로그가 파일당 2MB, 백업 최대 2개로 회전함
+- [ ] 활성 장애와 확인 대기 상태는 정리되지 않으며 종료 장애, 일반 사건,
+      확인 완료 Connection-Type 변화와 Failover 이력은 각 테이블에서 최근
+      180일·최대 10,000건으로 제한됨
+- [ ] 외부 SQLite 쓰기 잠금 중에도 설정 미러 쓰기가 0.5초 안에 실패 안전하게
+      반환되고 창 입력과 화면 갱신이 계속됨
 - [ ] 설정 저장 실패나 SQLite lock에도 현재 화면이 종료되지 않음
 - [ ] 종료 중 점검 작업을 취소하고 SSH 세션을 닫음
 - [ ] 종료 후 백그라운드 프로세스가 남지 않음

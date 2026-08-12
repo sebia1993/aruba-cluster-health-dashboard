@@ -7,13 +7,15 @@ import os
 import sys
 import tempfile
 import threading
+import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QThreadPool, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from .collectors.base import (
@@ -49,7 +51,8 @@ from .credentials import (
     DeviceCredential,
     SessionCredentialStore,
 )
-from .logging_setup import LoggingContext, setup_logging
+from .logging_setup import LoggingContext, current_process_metrics, setup_logging
+from .lazy_text_mapping import snapshot_raw_outputs
 from .models import (
     CollectionError,
     ConnectionBaseline,
@@ -87,6 +90,8 @@ _PREFERENCE_PATHS: dict[str, tuple[str, str]] = {
     "notifications.repeat_interval_minutes": ("notifications", "repeat_interval_minutes"),
     "notifications.sound_enabled": ("notifications", "sound_enabled"),
     "notifications.recovery_notifications": ("notifications", "recovery_notifications"),
+    "performance.low_spec_mode": ("performance", "low_spec_mode"),
+    "performance.performance_logging": ("performance", "performance_logging"),
     "ui.always_on_top": ("ui", "always_on_top"),
     "ui.opacity_percent": ("ui", "opacity_percent"),
     "ui.window_maximized": ("ui", "window_maximized"),
@@ -101,8 +106,10 @@ def restore_persisted_preferences(settings: AppSettings, storage: SQLiteStorage)
     """Overlay non-secret SQLite preferences over the JSON configuration."""
 
     restored = copy.deepcopy(settings)
+    keys = ("_base_config_fingerprint", *_PREFERENCE_PATHS)
     try:
-        mirror_fingerprint = storage.get_setting("_base_config_fingerprint", "")
+        persisted = storage.get_preferences(keys)
+        mirror_fingerprint = persisted.get("_base_config_fingerprint", "")
     except Exception:
         LOGGER.warning("SQLite preference restore failed; using JSON settings", exc_info=True)
         return restored
@@ -110,15 +117,10 @@ def restore_persisted_preferences(settings: AppSettings, storage: SQLiteStorage)
         # JSON is authoritative. A mismatched mirror means the last batch was
         # stale, partial, externally superseded, or never completed.
         return restored
-    sentinel = object()
     for key, (section_name, field_name) in _PREFERENCE_PATHS.items():
-        try:
-            candidate = storage.get_setting(key, sentinel)
-        except Exception:
-            LOGGER.warning("SQLite preference restore failed; using JSON settings", exc_info=True)
-            return copy.deepcopy(settings)
-        if candidate is sentinel:
+        if key not in persisted:
             continue
+        candidate = persisted[key]
         section = getattr(restored, section_name)
         current = getattr(section, field_name)
         try:
@@ -153,7 +155,7 @@ def restore_persisted_preferences(settings: AppSettings, storage: SQLiteStorage)
 class RuntimeSnapshot:
     health: Any
     notification_events: list[Any]
-    raw_outputs: dict[str, str] = field(default_factory=dict)
+    raw_outputs: Mapping[str, str] = field(default_factory=dict)
     parse_results: dict[str, Any] = field(default_factory=dict)
     previous_devices: dict[str, Any] = field(default_factory=dict)
     active_incidents: list[Any] = field(default_factory=list)
@@ -184,10 +186,8 @@ class CachedBaselineStore:
         self._dirty: dict[str, ConnectionBaseline] = {}
         self._removed: set[str] = set()
         try:
-            for row in storage.load_connection_baselines():
-                baseline = storage.get(row.member_ip)
-                if baseline is not None:
-                    self._values[baseline.member_ip] = baseline
+            for baseline in storage.load_domain_connection_baselines():
+                self._values[baseline.member_ip] = baseline
         except Exception:
             LOGGER.warning("Connection baseline restore failed; starting with an empty cache", exc_info=True)
 
@@ -335,7 +335,7 @@ class RuntimePoller:
         notifications = self.settings.notifications
         if incidents is None:
             try:
-                incidents = self.storage.load_domain_incidents()
+                incidents = self.storage.load_domain_incidents(active_only=True)
             except Exception:
                 LOGGER.warning("Incident restore failed", exc_info=True)
                 incidents = []
@@ -394,10 +394,26 @@ class RuntimePoller:
             incidents = copy.deepcopy(self.incident_manager.events())
             self._persist_detector_state()
             debug_changed = settings.ssh_debug_logging != self.settings.ssh_debug_logging
+            low_spec_changed = (
+                settings.performance.low_spec_mode
+                != self.settings.performance.low_spec_mode
+            )
+            performance_log_changed = (
+                settings.performance.performance_logging
+                != self.settings.performance.performance_logging
+            )
             try:
                 self.settings = copy.deepcopy(settings)
                 if debug_changed:
                     self.logging_context.set_ssh_debug_enabled(settings.ssh_debug_logging)
+                if low_spec_changed:
+                    self.logging_context.set_low_spec_mode(
+                        settings.performance.low_spec_mode
+                    )
+                if performance_log_changed:
+                    self.logging_context.set_performance_logging_enabled(
+                        settings.performance.performance_logging
+                    )
                 # Preserve streak state but apply the newly selected thresholds.
                 self.detector = self._create_detector(detector_state)
                 self.engine = self._create_engine(pending_changes)
@@ -423,6 +439,20 @@ class RuntimePoller:
                         )
                     except Exception:
                         LOGGER.critical("SSH debug logger rollback failed", exc_info=True)
+                if low_spec_changed:
+                    try:
+                        self.logging_context.set_low_spec_mode(
+                            self.settings.performance.low_spec_mode
+                        )
+                    except Exception:
+                        LOGGER.critical("Log mode rollback failed", exc_info=True)
+                if performance_log_changed:
+                    try:
+                        self.logging_context.set_performance_logging_enabled(
+                            self.settings.performance.performance_logging
+                        )
+                    except Exception:
+                        LOGGER.critical("Performance logger rollback failed", exc_info=True)
                 raise
 
     def can_auto_start(self) -> tuple[bool, str]:
@@ -593,6 +623,7 @@ class RuntimePoller:
         return register_scanned_host_key(scanned, self.paths.known_hosts)
 
     def __call__(self, cancellation_event: threading.Event | None = None):
+        poll_started = time.perf_counter()
         with self._lock:
             settings = copy.deepcopy(self.settings)
         settings.validate_for_monitoring()
@@ -625,46 +656,61 @@ class RuntimePoller:
                 logger=self.logging_context.ssh_logger,
             )
 
-        mm_collector = MmCollector(known_hosts_path=self.paths.known_hosts, adapter_factory=adapter_factory)
+        mm_collector = MmCollector(
+            known_hosts_path=self.paths.known_hosts,
+            adapter_factory=adapter_factory,
+            cancel_event=cancel_event,
+        )
         cluster_collector = ClusterCollector(
             known_hosts_path=self.paths.known_hosts,
             adapter_factory=adapter_factory,
+            cancel_event=cancel_event,
         )
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="aruba-collector") as executor:
-            mm_future = (
-                executor.submit(mm_collector.collect, settings.mobility_master, mm_credential)
-                if mm_credential is not None
-                else None
-            )
-            cluster_future = (
-                executor.submit(cluster_collector.collect, settings.cluster, cluster_credential)
-                if cluster_credential is not None
-                else None
-            )
-            if mm_future is not None:
-                try:
+        def collect_mm() -> CollectionBundle:
+            try:
+                return mm_collector.collect(settings.mobility_master, mm_credential)
+            except Exception:
+                LOGGER.exception("MM collector failed outside the SSH error boundary")
+                return self._source_failure_bundle(
+                    "mm",
+                    settings.mobility_master.management_ip,
+                    (SHOW_SWITCHES,),
+                    "COLLECTOR_INTERNAL_ERROR",
+                    "MM 수집 처리 중 오류가 발생했습니다. 로그를 확인하세요.",
+                )
+
+        def collect_cluster() -> CollectionBundle:
+            try:
+                return cluster_collector.collect(settings.cluster, cluster_credential)
+            except Exception:
+                LOGGER.exception("Cluster collector failed outside the SSH error boundary")
+                return self._source_failure_bundle(
+                    "cluster",
+                    settings.cluster.primary_controller_ip,
+                    (SHOW_CLIENT_DISTRIBUTION, SHOW_GROUP_MEMBERSHIP),
+                    "COLLECTOR_INTERNAL_ERROR",
+                    "Cluster 수집 처리 중 오류가 발생했습니다. 로그를 확인하세요.",
+                )
+
+        if settings.performance.low_spec_mode:
+            if mm_credential is not None:
+                mm_bundle = collect_mm()
+            if cancellation_event is not None and cancellation_event.is_set():
+                raise RuntimeError("점검이 취소되었습니다.")
+            if cluster_credential is not None:
+                cluster_bundle = collect_cluster()
+        else:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="aruba-collector") as executor:
+                mm_future = executor.submit(collect_mm) if mm_credential is not None else None
+                cluster_future = (
+                    executor.submit(collect_cluster)
+                    if cluster_credential is not None
+                    else None
+                )
+                if mm_future is not None:
                     mm_bundle = mm_future.result()
-                except Exception:
-                    LOGGER.exception("MM collector failed outside the SSH error boundary")
-                    mm_bundle = self._source_failure_bundle(
-                        "mm",
-                        settings.mobility_master.management_ip,
-                        (SHOW_SWITCHES,),
-                        "COLLECTOR_INTERNAL_ERROR",
-                        "MM 수집 처리 중 오류가 발생했습니다. 로그를 확인하세요.",
-                    )
-            if cluster_future is not None:
-                try:
+                if cluster_future is not None:
                     cluster_bundle = cluster_future.result()
-                except Exception:
-                    LOGGER.exception("Cluster collector failed outside the SSH error boundary")
-                    cluster_bundle = self._source_failure_bundle(
-                        "cluster",
-                        settings.cluster.primary_controller_ip,
-                        (SHOW_CLIENT_DISTRIBUTION, SHOW_GROUP_MEMBERSHIP),
-                        "COLLECTOR_INTERNAL_ERROR",
-                        "Cluster 수집 처리 중 오류가 발생했습니다. 로그를 확인하세요.",
-                    )
         assert mm_bundle is not None and cluster_bundle is not None
         if cancellation_event is not None and cancellation_event.is_set():
             raise RuntimeError("점검이 취소되었습니다.")
@@ -698,6 +744,19 @@ class RuntimePoller:
         snapshot = self.correlate(cycle)
         health = snapshot.health
         self._persist_result(health, cluster_bundle)
+        if self.logging_context.performance_logging_enabled:
+            self.logging_context.performance_logger.info(
+                "poll_complete duration_ms=%d mode=%s devices=%d errors=%d output_bytes=%d metrics=%s",
+                round((time.perf_counter() - poll_started) * 1000),
+                "low" if settings.performance.low_spec_mode else "normal",
+                len(health.devices),
+                len(errors),
+                sum(
+                    len(value.encode("utf-8", errors="replace"))
+                    for value in cycle.raw_outputs.values()
+                ),
+                current_process_metrics(),
+            )
         return snapshot
 
     def _resolve_credential(
@@ -783,7 +842,10 @@ class RuntimePoller:
             return RuntimeSnapshot(
                 health=health,
                 notification_events=notifications,
-                raw_outputs=dict(cycle.raw_outputs),
+                raw_outputs=snapshot_raw_outputs(
+                    cycle.raw_outputs,
+                    low_spec_mode=self.settings.performance.low_spec_mode,
+                ),
                 parse_results={
                     SHOW_SWITCHES: cycle.mm_result,
                     SHOW_CLIENT_DISTRIBUTION: cycle.load_result,
@@ -839,39 +901,18 @@ class RuntimePoller:
 
     def _persist_detector_state(self) -> None:
         try:
-            for key, counter in self.detector.dump_state().items():
-                detector, separator, ip = key.partition("|")
-                if not separator:
-                    continue
-                self.storage.save_streak(
-                    detector,
-                    ip,
-                    int(counter["anomaly_streak"]),
-                    int(counter["recovery_streak"]),
-                    bool(counter["active"]),
-                )
+            self.storage.save_poll_runtime_state(
+                detector_state=self.detector.dump_state(),
+                device_states=(),
+                observed_at=datetime.now(timezone.utc),
+            )
         except Exception:
             LOGGER.warning("Detector streak persistence deferred", exc_info=True)
 
     def _persist_result(self, health: Any, cluster_bundle: CollectionBundle) -> None:
+        started = time.perf_counter()
         try:
-            self._persist_detector_state()
-            for device in health.devices:
-                self.storage.save_device_state(
-                    device.ip,
-                    device,
-                    observed_at=health.checked_at,
-                    is_normal=device.severity is Severity.NORMAL,
-                )
-                if device.mm_present:
-                    self.storage.save_mm_discovered_device(
-                        device.ip,
-                        alias=device.alias or "",
-                        hostname=device.hostname or "",
-                        last_seen_at=device.last_seen or health.checked_at,
-                        missing_streak=0,
-                        recovery_streak=0,
-                    )
+            failover = None
             if (
                 cluster_bundle.primary_failed
                 and cluster_bundle.complete
@@ -879,17 +920,33 @@ class RuntimePoller:
                 and cluster_bundle.actual_controller_ip != cluster_bundle.requested_controller_ip
             ):
                 first_error = next((attempt.error_code for attempt in cluster_bundle.attempts if not attempt.success), "")
-                self.storage.record_failover(
+                failover = (
                     cluster_bundle.requested_controller_ip,
                     cluster_bundle.actual_controller_ip,
                     first_error or "PRIMARY_FAILED",
-                    collected_at=cluster_bundle.failover_at or health.checked_at,
+                    cluster_bundle.failover_at or health.checked_at,
                 )
+            self.storage.save_poll_runtime_state(
+                detector_state=self.detector.dump_state(),
+                device_states=(
+                    (device, device.severity is Severity.NORMAL)
+                    for device in health.devices
+                ),
+                observed_at=health.checked_at,
+                failover=failover,
+            )
+            self.logging_context.performance_logger.info(
+                "persist_runtime duration_ms=%d devices=%d failover=%d",
+                round((time.perf_counter() - started) * 1000),
+                len(health.devices),
+                int(failover is not None),
+            )
         except Exception:
             LOGGER.exception("상태 저장 중 오류가 발생했습니다. 현재 점검 결과는 화면에 계속 표시합니다.")
 
     def _persist_incidents(self, transitions: list[Any], *, engine: Any | None = None) -> None:
         self._pending_persistence_transitions.extend(transitions)
+        started = time.perf_counter()
         try:
             self.baseline_store.flush(
                 (engine or self.engine).pending_connection_changes(),
@@ -899,6 +956,14 @@ class RuntimePoller:
             )
             self._pending_persistence_transitions.clear()
             self._pending_connection_acknowledgements.clear()
+            compacted = self.incident_manager.compact_inactive()
+            self.logging_context.performance_logger.info(
+                "persist_domain duration_ms=%d active=%d transitions=%d compacted=%d",
+                round((time.perf_counter() - started) * 1000),
+                len(self.incident_manager.active_incidents()),
+                len(transitions),
+                compacted,
+            )
         except Exception:
             LOGGER.exception("상태와 장애 사건의 원자 저장에 실패했습니다. 다음 저장에서 재시도합니다.")
 
@@ -1009,6 +1074,7 @@ def _run_qt_ui_smoke(output_path: Path | None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    startup_started = time.perf_counter()
     args = build_parser().parse_args(argv)
     if args.smoke:
         marker = _run_frozen_smoke(args.demo_fixtures)
@@ -1048,13 +1114,24 @@ def main(argv: list[str] | None = None) -> int:
     settings = restore_persisted_preferences(settings, storage)
     if settings_error or storage_error:
         settings.polling.automatic_enabled = False
-    logging_context = setup_logging(paths, ssh_debug_enabled=settings.ssh_debug_logging)
+    logging_context = setup_logging(
+        paths,
+        ssh_debug_enabled=settings.ssh_debug_logging,
+        low_spec_mode=settings.performance.low_spec_mode,
+        performance_logging_enabled=settings.performance.performance_logging,
+    )
     credentials = (
         CredentialService(persistent=SessionCredentialStore())
         if args.demo
         else CredentialService()
     )
     runtime = RuntimePoller(settings, paths, credentials, storage, logging_context)
+    if logging_context.performance_logging_enabled:
+        logging_context.performance_logger.info(
+            "startup_runtime_ready duration_ms=%d metrics=%s",
+            round((time.perf_counter() - startup_started) * 1000),
+            current_process_metrics(),
+        )
     collect_cycle: Any = runtime
     if args.demo:
         from .demo import DemoPoller
@@ -1063,9 +1140,13 @@ def main(argv: list[str] | None = None) -> int:
             runtime,
             fixture_dir=args.demo_fixtures,
         )
+    worker_pool = QThreadPool(app)
+    worker_pool.setMaxThreadCount(1)
+    worker_pool.setExpiryTimeout(30_000)
     coordinator = PollCoordinator(
         collect_cycle,
-        settings.polling.interval_seconds,
+        settings.effective_poll_interval_seconds,
+        thread_pool=worker_pool,
         connection_tester=runtime.test_connection,
         host_key_approver=runtime.approve_host_key,
         start_guard=None if args.demo else runtime.can_auto_start,
@@ -1085,6 +1166,10 @@ def main(argv: list[str] | None = None) -> int:
         storage=storage,
         settings_apply_handler=runtime.update_settings,
         demo_mode=args.demo,
+        setup_readiness_check=(
+            None if args.demo else (lambda _settings: runtime.can_auto_start())
+        ),
+        startup_issue=bool(settings_error or storage_error),
     )
     window.acknowledge_requested.connect(runtime.acknowledge_ip)
     window.acknowledge_global_requested.connect(runtime.acknowledge_global)
@@ -1109,6 +1194,12 @@ def main(argv: list[str] | None = None) -> int:
 
     app.aboutToQuit.connect(cleanup)
     window.show()
+    if logging_context.performance_logging_enabled:
+        logging_context.performance_logger.info(
+            "startup_window_shown duration_ms=%d metrics=%s",
+            round((time.perf_counter() - startup_started) * 1000),
+            current_process_metrics(),
+        )
     if settings_error or storage_error:
         startup_errors = "\n\n".join(error for error in (settings_error, storage_error) if error)
         QTimer.singleShot(

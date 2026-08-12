@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, is_dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -45,6 +46,8 @@ class DetailDialog(QDialog):
         raw_outputs: Any | None = None,
         parsed_results: Any | None = None,
         previous_device: Any | None = None,
+        raw_outputs_provider: Callable[[], Any] | None = None,
+        parsed_results_provider: Callable[[], Any] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("장비 상세 정보")
@@ -53,19 +56,63 @@ class DetailDialog(QDialog):
         self._device = device
         self._raw_outputs = raw_outputs
         self._parsed_results = parsed_results
+        self._raw_outputs_provider = raw_outputs_provider
+        self._parsed_results_provider = parsed_results_provider
         self._previous_device = previous_device
+        self._parsed_editor: QPlainTextEdit | None = None
+        self._raw_editor: QPlainTextEdit | None = None
 
         root = QVBoxLayout(self)
         self.tabs = QTabWidget(self)
         root.addWidget(self.tabs)
         self._build_summary_tab()
-        self._build_parsed_tab()
-        self._build_raw_tab()
+        self.tabs.addTab(QWidget(self.tabs), "파싱 결과")
+        self.tabs.addTab(QWidget(self.tabs), "원본 출력")
+        self.tabs.currentChanged.connect(self._materialize_tab)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=self)
         buttons.rejected.connect(self.reject)
         buttons.accepted.connect(self.accept)
         root.addWidget(buttons)
+
+    def update_snapshot(
+        self,
+        device: Any,
+        *,
+        raw_outputs: Any | None = None,
+        parsed_results: Any | None = None,
+        previous_device: Any | None = None,
+    ) -> None:
+        """Replace every cycle-bound value as one coherent detail snapshot.
+
+        A dialog may remain open across polls.  Replacing the summary, parsed
+        results, and raw output together prevents an old health summary from
+        being displayed beside a newer command response, while retaining at
+        most the application's current raw-output mapping.
+        """
+
+        selected_tab = self.tabs.currentIndex()
+        self.tabs.blockSignals(True)
+        try:
+            if self._parsed_editor is not None:
+                self._parsed_editor.clear()
+            if self._raw_editor is not None:
+                self._raw_editor.clear()
+            self._device = device
+            self._raw_outputs = raw_outputs
+            self._parsed_results = parsed_results
+            self._raw_outputs_provider = None
+            self._parsed_results_provider = None
+            self._previous_device = previous_device
+            self._parsed_editor = None
+            self._raw_editor = None
+            self._build_summary_tab()
+            self._reset_lazy_tab(1, "파싱 결과")
+            self._reset_lazy_tab(2, "원본 출력")
+            self.tabs.setCurrentIndex(max(0, min(selected_tab, 2)))
+        finally:
+            self.tabs.blockSignals(False)
+        self._materialize_tab(self.tabs.currentIndex())
 
     def _build_summary_tab(self) -> None:
         view = DeviceView.from_source(self._device)
@@ -97,9 +144,18 @@ class DetailDialog(QDialog):
         form.addRow("판단 근거", self._selectable(reasons))
         errors = "\n".join(f"• {item}" for item in flatten_errors(self._device)) or "없음"
         form.addRow("최근 수집 오류", self._selectable(errors))
-        self.tabs.addTab(page, "요약")
+        if self.tabs.count() == 0:
+            self.tabs.addTab(page, "요약")
+        else:
+            previous_page = self.tabs.widget(0)
+            self.tabs.removeTab(0)
+            self.tabs.insertTab(0, page, "요약")
+            if previous_page is not None:
+                previous_page.deleteLater()
 
     def _build_parsed_tab(self) -> None:
+        if self._parsed_editor is not None:
+            return
         parsed = self._filtered_parse_results()
         if parsed is None:
             parsed = value(self._device, "parsed_results", value(self._device, "parsed_result", None))
@@ -118,22 +174,74 @@ class DetailDialog(QDialog):
         editor = QPlainTextEdit(self)
         editor.setReadOnly(True)
         editor.setPlainText(json.dumps(_plain(parsed), ensure_ascii=False, indent=2))
-        self.tabs.addTab(editor, "파싱 결과")
+        self._parsed_editor = editor
+        self._replace_placeholder(1, editor, "파싱 결과")
 
     def _build_raw_tab(self) -> None:
+        if self._raw_editor is not None:
+            return
         editor = QPlainTextEdit(self)
         editor.setReadOnly(True)
         editor.setPlaceholderText("현재 실행의 원본 명령 출력이 메모리에 남아 있지 않습니다.")
-        raw_source = self._device if self._raw_outputs is None else {"raw_outputs": self._raw_outputs}
+        raw_outputs = (
+            self._raw_outputs_provider()
+            if self._raw_outputs_provider is not None
+            else self._raw_outputs
+        )
+        raw_source = self._device if raw_outputs is None else {"raw_outputs": raw_outputs}
         editor.setPlainText(safe_raw_output(raw_source))
-        self.tabs.addTab(editor, "원본 출력")
+        self._raw_editor = editor
+        self._replace_placeholder(2, editor, "원본 출력")
+
+    @Slot(int)
+    def _materialize_tab(self, index: int) -> None:
+        if index == 1:
+            self._build_parsed_tab()
+        elif index == 2:
+            self._build_raw_tab()
+
+    def _replace_placeholder(self, index: int, widget: QWidget, title: str) -> None:
+        placeholder = self.tabs.widget(index)
+        self.tabs.removeTab(index)
+        self.tabs.insertTab(index, widget, title)
+        self.tabs.setCurrentIndex(index)
+        if placeholder is not None:
+            placeholder.deleteLater()
+
+    def _reset_lazy_tab(self, index: int, title: str) -> None:
+        previous_page = self.tabs.widget(index)
+        self.tabs.removeTab(index)
+        self.tabs.insertTab(index, QWidget(self.tabs), title)
+        if previous_page is not None:
+            previous_page.deleteLater()
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
+        # QPlainTextDocument keeps its own large character buffer. Clearing it
+        # before dropping the snapshot references makes closure deterministic
+        # during long-running monitoring sessions.
+        if self._parsed_editor is not None:
+            self._parsed_editor.clear()
+        if self._raw_editor is not None:
+            self._raw_editor.clear()
+        self._device = None
+        self._raw_outputs = None
+        self._parsed_results = None
+        self._raw_outputs_provider = None
+        self._parsed_results_provider = None
+        self._previous_device = None
+        super().closeEvent(event)
 
     def _filtered_parse_results(self) -> dict[str, Any] | None:
-        if not isinstance(self._parsed_results, dict):
+        parsed_results = (
+            self._parsed_results_provider()
+            if self._parsed_results_provider is not None
+            else self._parsed_results
+        )
+        if not isinstance(parsed_results, dict):
             return None
         ip = display(value(self._device, "ip", ""), "")
         results: dict[str, Any] = {}
-        for command, parsed in self._parsed_results.items():
+        for command, parsed in parsed_results.items():
             if parsed is None:
                 results[str(command)] = {"status": "수집 결과 없음", "rows": [], "issues": []}
                 continue

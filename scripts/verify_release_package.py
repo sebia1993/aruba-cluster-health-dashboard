@@ -30,6 +30,7 @@ REQUIRED_RELEASE_DOCUMENTS = (
     "LICENSE.txt",
     "LGPL_RUNTIME_INVENTORY.json",
     "LGPL_RUNTIME_REPLACEMENT_KO_EN.md",
+    "PERFORMANCE_REPORT_KO.md",
     "README.txt",
     "QT_RUNTIME_INVENTORY.json",
     "QT_THIRD_PARTY_NOTICES.txt",
@@ -40,6 +41,7 @@ COMMITTED_RELEASE_DOCUMENT_SOURCES = {
     "config.example.json": "config.example.json",
     "LICENSE.txt": "LICENSE",
     "LGPL_RUNTIME_REPLACEMENT_KO_EN.md": "docs/LGPL_RUNTIME_REPLACEMENT_KO_EN.md",
+    "PERFORMANCE_REPORT_KO.md": "docs/PERFORMANCE_REPORT_KO.md",
     "README.txt": "docs/README.txt",
     "QT_THIRD_PARTY_NOTICES.txt": "docs/QT_THIRD_PARTY_NOTICES.txt",
     "THIRD_PARTY_NOTICES.txt": "docs/THIRD_PARTY_NOTICES.txt",
@@ -62,6 +64,17 @@ REQUIRED_SMOKE_MARKERS = {
     "PARAMIKO_OK",
     "FIXTURE_DISCOVERY_OK",
     "DEMO_CORRELATION_OK",
+}
+APPROVED_QT_TRANSLATIONS = {
+    "_internal/pyside6/translations/qt_ko.qm",
+    "_internal/pyside6/translations/qtbase_ko.qm",
+}
+PROHIBITED_FROZEN_MODULE_ROOTS = {
+    "markdown_it",
+    "netmiko.cli_tools",
+    "pygments",
+    "rich",
+    "ruamel",
 }
 
 MAX_ZIP_ENTRIES = 10_000
@@ -512,6 +525,17 @@ def _verify_onedir_qt_contract(root: Path, files: list[Path]) -> None:
     for runtime_path in (*REQUIRED_QT_PLUGIN_PATHS, *REQUIRED_QT_BINDING_PATHS):
         if _portable_fold(runtime_path) not in relative_files:
             _fail(f"Qt/PySide binding is missing from its required path: {runtime_path}")
+    actual_translations = {
+        path.relative_to(root).as_posix().casefold()
+        for path in files
+        if path.suffix.casefold() == ".qm"
+    }
+    if actual_translations != APPROVED_QT_TRANSLATIONS:
+        _fail(
+            "Qt translation boundary mismatch: "
+            f"missing={sorted(APPROVED_QT_TRANSLATIONS - actual_translations)}, "
+            f"unreviewed={sorted(actual_translations - APPROVED_QT_TRANSLATIONS)}"
+        )
     shiboken_root = root / "_internal" / "shiboken6"
     actual_shiboken_binaries = {
         path.relative_to(root).as_posix().casefold()
@@ -850,6 +874,18 @@ def _verify_release_directory(
     _verify_release_documents(root)
     _verify_onedir_qt_contract(root, files)
     _verify_lgpl_runtime_contract(root, files, executable)
+    frozen_modules = _embedded_pyz_module_names(executable)
+    prohibited = sorted(
+        module
+        for module in frozen_modules
+        if any(
+            module.casefold() == root_name
+            or module.casefold().startswith(f"{root_name}.")
+            for root_name in PROHIBITED_FROZEN_MODULE_ROOTS
+        )
+    )
+    if prohibited:
+        _fail("Unused CLI-only modules are frozen in PYZ: " + ", ".join(prohibited))
     _verify_pe_metadata(executable, name, expected_version)
     return executable
 

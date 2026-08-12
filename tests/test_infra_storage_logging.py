@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -325,6 +326,153 @@ def test_external_sqlite_write_lock_has_bounded_retry(tmp_path: Path) -> None:
         storage.close()
 
 
+def test_preferences_are_loaded_in_one_batch(tmp_path: Path) -> None:
+    with SQLiteStorage(make_paths(tmp_path)) as storage:
+        storage.set_preferences({"one": 1, "two": False, "three": "value"})
+        assert storage.get_preferences(("one", "three", "missing")) == {
+            "one": 1,
+            "three": "value",
+        }
+
+
+def test_poll_runtime_state_is_one_transaction_and_rolls_back_together(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from aruba_mini_dashboard.models import DeviceHealth
+
+    storage = SQLiteStorage(make_paths(tmp_path))
+    observed = datetime(2026, 8, 12, 1, 0, tzinfo=timezone.utc)
+    state = {
+        "client|192.0.2.12": {
+            "anomaly_streak": 3,
+            "recovery_streak": 0,
+            "active": True,
+        }
+    }
+    devices = [(DeviceHealth(ip="192.0.2.12", mm_present=True), False)]
+    write_calls = 0
+    original_write = storage._write
+
+    def counted(operation):
+        nonlocal write_calls
+        write_calls += 1
+        return original_write(operation)
+
+    monkeypatch.setattr(storage, "_write", counted)
+    storage.save_poll_runtime_state(
+        detector_state=state,
+        device_states=devices,
+        observed_at=observed,
+        failover=("192.0.2.11", "192.0.2.13", "TCP_TIMEOUT", observed),
+    )
+    assert write_calls == 1
+    assert storage.get_streak("client", "192.0.2.12") is not None
+    assert "192.0.2.12" in storage.load_device_states()
+
+    bad_devices = [
+        (DeviceHealth(ip="192.0.2.14"), False),
+        ({"password": "must-not-persist"}, False),
+    ]
+    with pytest.raises((AttributeError, ValueError)):
+        storage.save_poll_runtime_state(
+            detector_state={},
+            device_states=bad_devices,
+            observed_at=observed,
+        )
+    assert "192.0.2.14" not in storage.load_device_states()
+    storage.close()
+
+
+def test_history_retention_preserves_active_incident_and_bounds_closed_history(
+    tmp_path: Path,
+) -> None:
+    storage = SQLiteStorage(make_paths(tmp_path))
+    now = datetime(2026, 8, 12, 1, 0, tzinfo=timezone.utc)
+    old = now - timedelta(days=181)
+    for index in range(5):
+        storage.upsert_incident(
+            f"closed-{index}",
+            "192.0.2.12",
+            "client_distribution",
+            f"closed-{index}",
+            first_detected_at=old,
+            last_seen_at=old,
+            active=False,
+            resolved_at=old,
+        )
+        storage.append_event(
+            "recovered",
+            incident_id=f"closed-{index}",
+            occurred_at=old,
+        )
+        storage.record_failover("192.0.2.11", "192.0.2.13", "TIMEOUT", collected_at=old)
+    storage.upsert_incident(
+        "active-old",
+        "192.0.2.14",
+        "mm_down",
+        "down",
+        first_detected_at=old,
+        last_seen_at=old,
+        active=True,
+    )
+    storage.append_event("activated", incident_id="active-old", occurred_at=old)
+    for index in range(4):
+        change = ConnectionChange(
+            collector_ip="192.0.2.11",
+            member_ip=f"192.0.2.{20 + index}",
+            previous_value="Type-A",
+            current_value="Type-B",
+            first_detected_at=old + timedelta(seconds=index),
+            last_confirmed_at=old + timedelta(seconds=index),
+        )
+        storage.save_connection_change(change)
+        storage.acknowledge_connection_change(event_token=change.event_token)
+    pending = ConnectionChange(
+        collector_ip="192.0.2.11",
+        member_ip="192.0.2.99",
+        previous_value="Type-A",
+        current_value="Type-B",
+        first_detected_at=old,
+        last_confirmed_at=old,
+    )
+    storage.save_connection_change(pending)
+
+    removed = storage.maintain_history(now=now, max_rows=2, force=True)
+
+    assert removed["incidents"] == 5
+    assert storage.list_incidents(active_only=True)[0].incident_id == "active-old"
+    assert storage.list_events(limit=20)[0]["incident_id"] == "active-old"
+    assert storage._read(
+        lambda db: db.execute("SELECT COUNT(*) FROM failover_collections").fetchone()[0]
+    ) == 0
+    assert removed["connection_changes"] == 4
+    assert storage.load_pending_connection_changes() == [pending]
+    storage.close()
+
+
+def test_default_sqlite_contention_budget_prevents_multi_second_ui_stalls(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "app.db"
+    storage = SQLiteStorage(database)
+    blocker = sqlite3.connect(database, timeout=0, isolation_level=None)
+    blocker.execute("BEGIN IMMEDIATE")
+    started = time.perf_counter()
+    try:
+        with pytest.raises(StorageBusyError):
+            storage.set_preferences({"ui.opacity_percent": 80})
+    finally:
+        elapsed = time.perf_counter() - started
+        blocker.rollback()
+        blocker.close()
+        storage.close()
+
+    # The preference mirror is best effort and must never inherit SQLite's
+    # multi-second default wait on the GUI thread.
+    assert elapsed < 0.5
+
+
 def test_logging_redacts_registered_and_key_value_secrets(tmp_path: Path) -> None:
     paths = make_paths(tmp_path)
     sentinel = "registered-secret-value"
@@ -364,3 +512,49 @@ def test_ssh_debug_log_can_be_enabled_and_disabled_at_runtime(tmp_path: Path) ->
     context.set_ssh_debug_enabled(False)
     context.ssh_logger.debug("disabled-again")
     assert "disabled-again" not in paths.ssh_debug_log.read_text(encoding="utf-8")
+
+
+def test_performance_log_is_optional_sanitized_and_bounded(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    context = setup_logging(
+        paths,
+        low_spec_mode=True,
+        performance_logging_enabled=False,
+    )
+    assert not paths.performance_log.exists()
+    app_handler = context.logger.handlers[0]
+    assert app_handler.maxBytes == 2 * 1024 * 1024
+    assert app_handler.backupCount == 2
+
+    context.set_performance_logging_enabled(True)
+    context.performance_logger.info("poll_complete duration_ms=12 password=hidden")
+    for handler in context.performance_logger.handlers:
+        handler.flush()
+        assert handler.maxBytes == 1024 * 1024
+        assert handler.backupCount == 2
+    content = paths.performance_log.read_text(encoding="utf-8")
+    assert "duration_ms=12" in content
+    assert "hidden" not in content
+    assert "[REDACTED]" in content
+
+
+def test_python_exception_inside_write_rolls_back_and_keeps_connection_usable(
+    tmp_path: Path,
+) -> None:
+    storage = SQLiteStorage(tmp_path / "app.db")
+
+    def fail_after_statement(db) -> None:
+        db.execute(
+            "INSERT INTO preferences(key, value_json, updated_at) VALUES (?, ?, ?)",
+            ("partial", '"must-rollback"', "2026-08-12T00:00:00+00:00"),
+        )
+        raise ValueError("synthetic serialization failure")
+
+    with pytest.raises(ValueError, match="synthetic serialization failure"):
+        storage._write(fail_after_statement)
+
+    assert storage._read(lambda db: db.in_transaction) is False
+    assert storage.get_setting("partial") is None
+    storage.set_setting("after_failure", "usable")
+    assert storage.get_setting("after_failure") == "usable"
+    storage.close()

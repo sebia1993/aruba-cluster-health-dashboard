@@ -120,6 +120,8 @@ _MALFORMED_SCHEMA_VALUES = (
     (("notifications", "repeat_interval_minutes"), True),
     (("notifications", "sound_enabled"), "false"),
     (("notifications", "recovery_notifications"), None),
+    (("performance", "low_spec_mode"), "false"),
+    (("performance", "performance_logging"), 1),
     (("ui", "always_on_top"), "false"),
     (("ui", "window_maximized"), "false"),
     (("ui", "opacity_percent"), True),
@@ -169,6 +171,8 @@ def test_settings_schema_types_are_fail_closed(
         ("notifications", "repeat_unacknowledged"),
         ("notifications", "sound_enabled"),
         ("notifications", "recovery_notifications"),
+        ("performance", "low_spec_mode"),
+        ("performance", "performance_logging"),
         ("ui", "always_on_top"),
         (None, "ssh_debug_logging"),
     ),
@@ -234,6 +238,22 @@ def test_settings_validate_bounds_and_monitoring_completeness() -> None:
     settings.polling.interval_seconds = 60
     with pytest.raises(SettingsValidationError, match="MM 관리 IP"):
         settings.validate_for_monitoring()
+
+
+def test_performance_settings_are_additive_and_low_mode_has_effective_interval() -> None:
+    legacy = AppSettings.default().to_dict()
+    legacy.pop("performance")
+    loaded = AppSettings.from_dict(legacy)
+
+    assert loaded.performance.low_spec_mode is False
+    assert loaded.performance.performance_logging is False
+    assert loaded.effective_poll_interval_seconds == 60
+
+    loaded.performance.low_spec_mode = True
+    assert loaded.polling.interval_seconds == 60
+    assert loaded.effective_poll_interval_seconds == 120
+    loaded.polling.interval_seconds = 300
+    assert loaded.effective_poll_interval_seconds == 300
 
 
 def test_windows_credential_store_round_trip_uses_generic_blob() -> None:

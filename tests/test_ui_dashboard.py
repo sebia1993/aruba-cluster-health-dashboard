@@ -118,8 +118,11 @@ def _health() -> OverallHealth:
 
 
 def test_dashboard_renders_summary_and_device_rows() -> None:
-    _app()
+    app = _app()
     window = MainWindow(FakeCoordinator(), AppSettings.default())
+    window.resize(1000, 500)
+    window.show()
+    app.processEvents()
     window.update_snapshot(_health())
     assert window.status_label.text() == "장애"
     assert "192.0.2.12" in window.problem_label.text()
@@ -173,12 +176,14 @@ def test_opacity_clamps_and_always_on_top_preserves_geometry() -> None:
     window.close()
 
 
-def test_quick_window_options_are_persisted_immediately(tmp_path) -> None:
+def test_quick_window_options_are_debounced_and_force_flushed(tmp_path) -> None:
     _app()
     storage = SQLiteStorage(tmp_path / "app.db")
     window = MainWindow(FakeCoordinator(), AppSettings.default(), storage=storage)
     window.set_opacity_percent(65)
     window.set_always_on_top(True)
+    assert storage.get_setting("ui.opacity_percent") is None
+    window._flush_preference_mirror()
     assert storage.get_setting("ui.opacity_percent") == 65
     assert storage.get_setting("ui.always_on_top") is True
     window._quitting = True
@@ -286,6 +291,8 @@ def test_detail_dialog_masks_password_prompt() -> None:
         "raw_output": "show switches\npassword: should-not-appear\nWLC 192.0.2.12 Down",
     }
     dialog = DetailDialog(device)
+    assert not hasattr(dialog.tabs.widget(2), "toPlainText")
+    dialog.tabs.setCurrentIndex(2)
     raw_editor = dialog.tabs.widget(2)
     assert "should-not-appear" not in raw_editor.toPlainText()
     assert "[REDACTED]" in raw_editor.toPlainText()
@@ -327,10 +334,12 @@ def test_detail_dialog_shows_ip_filtered_parse_context_and_change_time() -> None
     summary_text = "\n".join(label.text() for label in dialog.findChildren(type(dialog._selectable(""))))
     expected_change_time = datetime.fromisoformat("2026-08-11T10:31:00+09:00").astimezone()
     assert expected_change_time.strftime("%Y-%m-%d %H:%M:%S") in summary_text
+    dialog.tabs.setCurrentIndex(1)
     parsed_text = dialog.tabs.widget(1).toPlainText()
     assert "192.0.2.12" in parsed_text
     assert "192.0.2.11" not in parsed_text
     assert "ROW_SKIPPED" in parsed_text
+    dialog.tabs.setCurrentIndex(2)
     raw_text = dialog.tabs.widget(2).toPlainText()
     assert "do-not-show" not in raw_text
     assert "[REDACTED]" in raw_text
@@ -644,8 +653,11 @@ def test_dashboard_surfaces_low_usage_and_maps_multiple_ip_reasons() -> None:
 
 
 def test_ack_button_never_acknowledges_selected_normal_row() -> None:
-    _app()
+    app = _app()
     window = MainWindow(FakeCoordinator(), AppSettings.default())
+    window.resize(1000, 500)
+    window.show()
+    app.processEvents()
     window.update_snapshot(_health())
     spy = QSignalSpy(window.acknowledge_requested)
     window.table.selectRow(0)  # 192.0.2.11 is normal

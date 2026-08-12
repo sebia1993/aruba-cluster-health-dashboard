@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Iterable, Mapping, Sequence, TypeVar
 
 from aruba_mini_dashboard.models import ParseIssue, ParseResult, ParseStatus
@@ -27,6 +28,11 @@ FOOTER_RE = re.compile(
     r"^\s*(?:total(?:\s+\w+)*\s*:|number\s+of\s+|entries\s*:|displayed\s*:)",
     re.IGNORECASE,
 )
+TRAILING_LINE_WHITESPACE_RE = re.compile(r"[^\S\n]+(?=\n|$)")
+HEADER_SEPARATOR_RE = re.compile(r"[\s_-]+")
+HEADER_SEGMENT_RE = re.compile(r"\S(?:.*?\S)?(?=\s{2,}|$)")
+NONNEGATIVE_INT_RE = re.compile(r"\d+")
+LOOSE_IPV4_RE = re.compile(r"\d+\.\d+\.\d+\.\d+")
 
 
 def _apply_backspaces(value: str) -> str:
@@ -54,6 +60,19 @@ def sanitize_output(output: str | bytes | None) -> str:
         value = output.decode("utf-8", errors="replace")
     else:
         value = str(output)
+
+    # Most device output is already clean. Avoid allocating a second multi-MB
+    # string when no newline normalization, terminal cleanup, redaction, pager
+    # removal, or per-line rstrip is required. The existing regexes remain
+    # authoritative, so the fast path cannot bypass secret redaction.
+    if not any(marker in value for marker in ("\r", "\x00", "\x1b", "\b")):
+        if (
+            PAGER_RE.search(value) is None
+            and CREDENTIAL_LINE_RE.search(value) is None
+            and TRAILING_LINE_WHITESPACE_RE.search(value) is None
+        ):
+            return value
+
     value = value.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
     value = ANSI_CSI_RE.sub("", value)
     value = _apply_backspaces(value)
@@ -69,8 +88,9 @@ def output_excerpt(output: str, limit: int = 2_048) -> str:
     return clean[: limit - 1] + "…"
 
 
+@lru_cache(maxsize=512)
 def normalize_header(value: str) -> str:
-    return re.sub(r"[\s_-]+", "", value).casefold()
+    return HEADER_SEPARATOR_RE.sub("", value).casefold()
 
 
 def normalize_connection_type(value: str) -> str:
@@ -106,7 +126,7 @@ def find_ipv4(value: str) -> str | None:
 
 def parse_nonnegative_int(value: str) -> int | None:
     candidate = value.strip().replace(",", "")
-    if not re.fullmatch(r"\d+", candidate):
+    if not NONNEGATIVE_INT_RE.fullmatch(candidate):
         return None
     return int(candidate)
 
@@ -136,7 +156,7 @@ class HeaderLayout:
 
 
 def _header_segments(line: str) -> list[tuple[str, int, int | None]]:
-    matches = list(re.finditer(r"\S(?:.*?\S)?(?=\s{2,}|$)", line))
+    matches = list(HEADER_SEGMENT_RE.finditer(line))
     segments: list[tuple[str, int, int | None]] = []
     for index, match in enumerate(matches):
         next_start = matches[index + 1].start() if index + 1 < len(matches) else None
@@ -159,6 +179,7 @@ def _map_segment_headers(
     return columns
 
 
+@lru_cache(maxsize=128)
 def _alias_pattern(alias: str) -> re.Pattern[str]:
     words = [part for part in re.split(r"[\s_-]+", alias.strip()) if part]
     body = r"[\s_-]+".join(re.escape(word) for word in words)
@@ -217,7 +238,7 @@ def is_ignorable_table_line(line: str) -> bool:
 def probable_data_line(line: str) -> bool:
     if IPV4_CANDIDATE_RE.search(line):
         return True
-    return bool(re.search(r"\d+\.\d+\.\d+\.\d+", line))
+    return bool(LOOSE_IPV4_RE.search(line))
 
 
 def finalize_result(

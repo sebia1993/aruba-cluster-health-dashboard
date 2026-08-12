@@ -23,6 +23,9 @@ from .base import (
 MAX_COMMAND_OUTPUT_CHARACTERS = 4 * 1024 * 1024
 MAX_COMMAND_OUTPUT_LINES = 50_000
 MAX_PAGER_CONTINUATIONS = 1_000
+PAGER_SEARCH_WINDOW_CHARACTERS = 65_536
+RETRY_BACKOFF_INITIAL_SECONDS = 0.5
+RETRY_BACKOFF_MAX_SECONDS = 2.0
 PAGING_MARKERS = ("--more--", "-- more --", "press any key", "press <space>", "<--- more --->")
 COMMAND_REJECTION_MARKERS = (
     "unknown command",
@@ -35,6 +38,69 @@ COMMAND_REJECTION_MARKERS = (
 _PAGING_MARKER_PATTERN = re.compile(
     r"(?i)(?:--\s*more\s*--|press\s+(?:any\s+key|<space>)[^\r\n]*|<---\s*more\s*--->)"
 )
+
+
+class _BoundedOutputAccumulator:
+    """Collect text chunks with O(1)-per-chunk limit accounting.
+
+    A split CRLF sequence represents one logical line break even when ``\r``
+    and ``\n`` arrive in separate SSH reads.  The accumulated text is joined
+    only once when the caller has observed the command prompt.
+    """
+
+    __slots__ = ("_character_count", "_line_count", "_parts", "_previous_ended_with_cr")
+
+    def __init__(self) -> None:
+        self._parts: list[str] = []
+        self._character_count = 0
+        self._line_count = 1
+        self._previous_ended_with_cr = False
+
+    @property
+    def character_count(self) -> int:
+        return self._character_count
+
+    @property
+    def line_count(self) -> int:
+        return self._line_count
+
+    def append(self, chunk: object) -> None:
+        if not isinstance(chunk, str):
+            raise SshOperationError(
+                "INVALID_OUTPUT",
+                "장비가 올바르지 않은 형식의 응답을 반환했습니다.",
+                retryable=True,
+                operation="command",
+            )
+
+        character_count = self._character_count + len(chunk)
+        line_count = self._line_count + _logical_line_break_count(chunk)
+        if self._previous_ended_with_cr and chunk.startswith("\n"):
+            line_count -= 1
+        if character_count > MAX_COMMAND_OUTPUT_CHARACTERS or line_count > MAX_COMMAND_OUTPUT_LINES:
+            raise SshOperationError(
+                "OUTPUT_LIMIT_EXCEEDED",
+                "명령 결과가 안전한 최대 크기를 초과했습니다.",
+                retryable=False,
+                operation="command",
+            )
+
+        if chunk:
+            self._parts.append(chunk)
+        self._character_count = character_count
+        self._line_count = line_count
+        self._previous_ended_with_cr = chunk.endswith("\r") if chunk else self._previous_ended_with_cr
+
+    def build(self, *, allow_empty: bool = False) -> str:
+        output = "".join(self._parts)
+        if not allow_empty and not output.strip():
+            raise SshOperationError(
+                "EMPTY_OUTPUT",
+                "장비가 빈 명령 결과를 반환했습니다.",
+                retryable=True,
+                operation="command",
+            )
+        return output
 
 
 class ArubaSshAdapter:
@@ -197,6 +263,7 @@ class ArubaSshAdapter:
                     cmd_verify=False,
                     read_timeout=self.options.command_timeout_seconds,
                 )
+            self._check_cancelled()
             validate_bounded_output(output, allow_empty=True)
             if command_was_rejected(output):
                 raise SshOperationError(
@@ -206,6 +273,16 @@ class ArubaSshAdapter:
                     operation="paging",
                 )
             self._paging_disabled = True
+        except SshOperationError as exc:
+            if exc.code == "CANCELLED":
+                raise
+            # Older Aruba releases and restricted read-only roles may reject
+            # ``no paging``. Continue with the bounded marker/Space loop.
+            self._paging_disabled = False
+            self._logger.info(
+                "Session paging command unavailable; using bounded pager handling (%s)",
+                type(exc).__name__,
+            )
         except Exception as exc:
             # Older Aruba releases and restricted read-only roles may reject
             # ``no paging``.  Continue with an explicitly bounded marker/Space
@@ -232,6 +309,7 @@ class ArubaSshAdapter:
                 )
             else:
                 output = self._run_bounded_pager_command(connection, command)
+            self._check_cancelled()
             validate_bounded_output(output)
             if contains_paging_marker(output):
                 raise SshOperationError(
@@ -267,21 +345,18 @@ class ArubaSshAdapter:
             prompt_pattern = prompt_handler(False)
             if not isinstance(prompt_pattern, str) or not prompt_pattern:
                 raise ValueError("prompt boundary is empty")
-            re.compile(prompt_pattern)
+            compiled_prompt = re.compile(prompt_pattern)
             buffered = _take_stored_read_buffer(connection)
-            stale_parts: list[str] = []
+            stale_output = _BoundedOutputAccumulator()
             if buffered:
-                stale_parts.append(buffered)
+                stale_output.append(buffered)
             # Drain only immediately available stale data. A permanently busy
             # pre-command channel is rejected rather than read without bound.
             for index in range(128):
                 chunk = read_buffer()
                 if not chunk:
                     break
-                if not isinstance(chunk, str):
-                    raise TypeError("SSH channel returned non-text data")
-                stale_parts.append(chunk)
-                _validate_stream_parts(stale_parts)
+                stale_output.append(chunk)
             else:
                 raise SshOperationError(
                     "OUTPUT_LIMIT_EXCEEDED",
@@ -298,7 +373,7 @@ class ArubaSshAdapter:
             raise classify_ssh_exception(exc, operation="command") from exc
 
         deadline = monotonic() + self.options.command_timeout_seconds
-        output_parts: list[str] = []
+        output_parts = _BoundedOutputAccumulator()
         search_window = ""
         pages = 0
         while monotonic() < deadline:
@@ -317,12 +392,17 @@ class ArubaSshAdapter:
                     operation="command",
                 )
             if not chunk:
-                sleep(0.025)
+                if self._cancel_event is not None:
+                    self._cancel_event.wait(0.025)
+                else:
+                    sleep(0.025)
                 continue
-            output_parts.append(chunk)
             try:
-                _validate_stream_parts(output_parts)
-                normalized_window = _normalize_netmiko_output(connection, (search_window + chunk)[-65536:])
+                output_parts.append(chunk)
+                normalized_window = _normalize_netmiko_output(
+                    connection,
+                    (search_window + chunk)[-PAGER_SEARCH_WINDOW_CHARACTERS:],
+                )
             except SshOperationError:
                 self._abort_netmiko_transport(connection)
                 raise
@@ -343,8 +423,11 @@ class ArubaSshAdapter:
                 search_window = ""
                 continue
             search_window = normalized_window
-            if re.search(prompt_pattern, normalized_window):
-                output = _normalize_netmiko_output(connection, "".join(output_parts))
+            if compiled_prompt.search(normalized_window):
+                output = _normalize_netmiko_output(
+                    connection,
+                    output_parts.build(allow_empty=(command == NO_PAGING)),
+                )
                 return strip_paging_markers(validate_bounded_output(output, allow_empty=(command == NO_PAGING)))
         self._abort_netmiko_transport(connection)
         raise SshOperationError(
@@ -353,9 +436,12 @@ class ArubaSshAdapter:
 
     def _run_bounded_pager_command(self, connection: object, command: str) -> str:
         deadline = monotonic() + self.options.command_timeout_seconds
-        output = self._timing_read(connection, command, deadline=deadline, normalize=True)
+        first_chunk = self._timing_read(connection, command, deadline=deadline, normalize=True)
+        output_parts = _BoundedOutputAccumulator()
+        output_parts.append(first_chunk)
+        search_window = first_chunk[-PAGER_SEARCH_WINDOW_CHARACTERS:]
         pages = 0
-        while contains_paging_marker(output):
+        while contains_paging_marker(search_window):
             self._check_cancelled()
             pages += 1
             if pages > MAX_PAGER_CONTINUATIONS:
@@ -365,7 +451,6 @@ class ArubaSshAdapter:
                     retryable=False,
                     operation="command",
                 )
-            output = strip_paging_markers(output)
             next_chunk = self._timing_read(connection, PAGER_CONTINUE, deadline=deadline, normalize=False)
             if not next_chunk:
                 raise SshOperationError(
@@ -374,9 +459,14 @@ class ArubaSshAdapter:
                     retryable=True,
                     operation="command",
                 )
-            output += next_chunk
-            validate_bounded_output(output)
-        output = strip_paging_markers(output)
+            output_parts.append(next_chunk)
+            # Keep marker detection bounded while retaining a suffix from the
+            # preceding page so markers split across SSH chunks are detected.
+            search_window = (
+                strip_paging_markers(search_window) + next_chunk
+            )[-PAGER_SEARCH_WINDOW_CHARACTERS:]
+        output = strip_paging_markers(output_parts.build())
+        validate_bounded_output(output)
         base_prompt = str(getattr(connection, "base_prompt", "") or "").strip()
         if base_prompt and base_prompt not in output[-4096:]:
             raise SshOperationError(
@@ -388,6 +478,7 @@ class ArubaSshAdapter:
         return output
 
     def _timing_read(self, connection: object, command: str, *, deadline: float, normalize: bool) -> str:
+        self._check_cancelled()
         remaining = deadline - monotonic()
         if remaining <= 0:
             raise SshOperationError(
@@ -402,6 +493,7 @@ class ArubaSshAdapter:
             last_read=min(1.0, max(0.1, remaining)),
             read_timeout=max(0.1, remaining),
         )
+        self._check_cancelled()
         return validate_bounded_output(output, allow_empty=(command == PAGER_CONTINUE))
 
     def close(self) -> None:
@@ -475,7 +567,10 @@ def validate_bounded_output(output: object, *, allow_empty: bool = False) -> str
         raise SshOperationError(
             "INVALID_OUTPUT", "장비가 올바르지 않은 형식의 응답을 반환했습니다.", retryable=True, operation="command"
         )
-    if len(output) > MAX_COMMAND_OUTPUT_CHARACTERS or output.count("\n") + 1 > MAX_COMMAND_OUTPUT_LINES:
+    if (
+        len(output) > MAX_COMMAND_OUTPUT_CHARACTERS
+        or _logical_line_break_count(output) + 1 > MAX_COMMAND_OUTPUT_LINES
+    ):
         raise SshOperationError(
             "OUTPUT_LIMIT_EXCEEDED",
             "명령 결과가 안전한 최대 크기를 초과했습니다.",
@@ -551,30 +646,29 @@ def _normalize_netmiko_output(connection: object, output: str) -> str:
     return output
 
 
-def _validate_stream_parts(parts: list[str]) -> None:
-    character_count = sum(len(part) for part in parts)
-    if character_count > MAX_COMMAND_OUTPUT_CHARACTERS:
-        raise SshOperationError(
-            "OUTPUT_LIMIT_EXCEEDED",
-            "명령 결과가 안전한 최대 크기를 초과했습니다.",
-            retryable=False,
-            operation="command",
-        )
-    line_count = 1
-    previous_ended_with_cr = False
-    for part in parts:
-        breaks = part.count("\n") + part.count("\r") - part.count("\r\n")
-        if previous_ended_with_cr and part.startswith("\n"):
-            breaks -= 1
-        line_count += breaks
-        previous_ended_with_cr = part.endswith("\r")
-    if line_count > MAX_COMMAND_OUTPUT_LINES:
-        raise SshOperationError(
-            "OUTPUT_LIMIT_EXCEEDED",
-            "명령 결과가 안전한 최대 줄 수를 초과했습니다.",
-            retryable=False,
-            operation="command",
-        )
+def _logical_line_break_count(output: str) -> int:
+    """Count LF, CR and CRLF as logical line breaks in one bounded scan."""
+
+    return output.count("\n") + output.count("\r") - output.count("\r\n")
+
+
+def wait_for_retry_backoff(
+    cancel_event: threading.Event | None,
+    failed_attempt_number: int,
+) -> bool:
+    """Wait before retrying the same endpoint; return whether cancelled.
+
+    The first failed attempt waits 0.5 seconds, the second 1 second, and
+    subsequent failures at most 2 seconds.  ``Event.wait`` makes shutdown
+    interrupt the delay without another polling loop.
+    """
+
+    exponent = min(max(int(failed_attempt_number) - 1, 0), 2)
+    delay = min(RETRY_BACKOFF_INITIAL_SECONDS * (2**exponent), RETRY_BACKOFF_MAX_SECONDS)
+    if cancel_event is None:
+        sleep(delay)
+        return False
+    return bool(cancel_event.wait(delay))
 
 
 def classify_ssh_exception(exc: BaseException, *, operation: str) -> SshOperationError:
