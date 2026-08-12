@@ -1,3 +1,3 @@
 """Aruba MM and WLC health mini dashboard."""
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
