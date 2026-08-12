@@ -3,13 +3,17 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtGui import QBrush, QColor, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
     QComboBox,
     QSizePolicy,
     QSlider,
     QSpinBox,
+    QStyledItemDelegate,
+    QStyle,
+    QStyleOptionViewItem,
     QTabWidget,
+    QTableWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -185,6 +189,169 @@ QTabBar::tab:selected:focus {{
             self._tab_style_revision += 1
         finally:
             self._tab_style_refreshing = False
+
+
+class _SubtleSelectionItemDelegate(QStyledItemDelegate):
+    """Paint a neutral selection while retaining each item's foreground and icon."""
+
+    def __init__(self, table: "SubtleSelectionTableWidget") -> None:
+        super().__init__(table)
+        self._table = table
+
+    @staticmethod
+    def _foreground_brush(
+        option: QStyleOptionViewItem,
+        index: Any,
+        group: QPalette.ColorGroup,
+        fallback: QColor,
+    ) -> QBrush:
+        foreground = index.data(Qt.ForegroundRole)
+        if isinstance(foreground, QBrush) and foreground.style() != Qt.NoBrush:
+            return QBrush(foreground)
+        if isinstance(foreground, QColor) and foreground.isValid():
+            return QBrush(foreground)
+        # The semantic fallback was contrast-corrected against the neutral
+        # selection fill. The source palette's Text brush may be the same
+        # low-contrast value that required correction.
+        return QBrush(fallback)
+
+    def _selection_option(
+        self,
+        option: QStyleOptionViewItem,
+        index: Any,
+    ) -> tuple[QStyleOptionViewItem, QColor, bool]:
+        styled = QStyleOptionViewItem(option)
+        active = bool(option.state & QStyle.State_Active)
+        group = QPalette.Active if active else QPalette.Inactive
+        prefix = "active" if active else "inactive"
+        colors = self._table.selection_style_colors
+        background = QColor(colors[f"{prefix}_background"])
+        fallback_text = QColor(colors[f"{prefix}_text"])
+        boundary = QColor(colors[f"{prefix}_boundary"])
+        palette = QPalette(styled.palette)
+        palette.setBrush(group, QPalette.Highlight, QBrush(background))
+        palette.setBrush(
+            group,
+            QPalette.HighlightedText,
+            self._foreground_brush(styled, index, group, fallback_text),
+        )
+        palette.setCurrentColorGroup(group)
+        styled.palette = palette
+        had_focus = bool(styled.state & QStyle.State_HasFocus)
+        # Native focus painting can reintroduce the Windows accent color. Draw
+        # an explicit neutral focus boundary after the normal item instead.
+        styled.state &= ~QStyle.State_HasFocus
+        return styled, boundary, had_focus
+
+    def paint(
+        self,
+        painter: QPainter,
+        option: QStyleOptionViewItem,
+        index: Any,
+    ) -> None:
+        if not option.state & QStyle.State_Selected:
+            super().paint(painter, option, index)
+            return
+
+        styled, boundary, had_focus = self._selection_option(option, index)
+        super().paint(painter, styled, index)
+
+        painter.save()
+        try:
+            rect = option.rect.adjusted(0, 0, -1, -1)
+            painter.setPen(QPen(boundary, 1))
+            painter.drawLine(rect.topLeft(), rect.topRight())
+            painter.drawLine(rect.bottomLeft(), rect.bottomRight())
+            if had_focus:
+                painter.setPen(QPen(boundary, 1, Qt.DotLine))
+                painter.drawRect(rect)
+        finally:
+            painter.restore()
+
+
+class SubtleSelectionTableWidget(QTableWidget):
+    """Palette-aware table with a light neutral row-selection treatment."""
+
+    _STYLE_CHANGE_EVENTS = {
+        QEvent.ApplicationPaletteChange,
+        QEvent.PaletteChange,
+        QEvent.StyleChange,
+    }
+
+    def __init__(
+        self,
+        rows: int = 0,
+        columns: int = 0,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(rows, columns, parent)
+        self._selection_style_refreshing = False
+        self._selection_style_revision = 0
+        self._selection_style_colors: dict[str, str] = {}
+        self.refresh_selection_style()
+        self._subtle_selection_delegate = _SubtleSelectionItemDelegate(self)
+        self.setItemDelegate(self._subtle_selection_delegate)
+
+    @property
+    def selection_style_revision(self) -> int:
+        """Expose refreshes for deterministic palette/style regression tests."""
+
+        return self._selection_style_revision
+
+    @property
+    def selection_style_colors(self) -> dict[str, str]:
+        """Return semantic active and inactive selection colors."""
+
+        return dict(self._selection_style_colors)
+
+    def changeEvent(self, event: Any) -> None:  # noqa: N802 - Qt API
+        super().changeEvent(event)
+        if (
+            event.type() in self._STYLE_CHANGE_EVENTS
+            and hasattr(self, "_selection_style_refreshing")
+        ):
+            self.refresh_selection_style()
+
+    def refresh_selection_style(self) -> None:
+        """Rebuild neutral selection colors from the active Windows/Qt palette."""
+
+        if self._selection_style_refreshing:
+            return
+        self._selection_style_refreshing = True
+        try:
+            palette = self.palette()
+            colors: dict[str, str] = {}
+            group_specs = (
+                (QPalette.Active, "active", 0.12, 0.55),
+                (QPalette.Inactive, "inactive", 0.08, 0.50),
+            )
+            for group, prefix, fill_weight, boundary_weight in group_specs:
+                base = palette.color(group, QPalette.Base)
+                text = palette.color(group, QPalette.Text)
+                fallback_text = palette.color(group, QPalette.WindowText)
+                background = _blend_colors(base, text, fill_weight)
+                readable_text = _ensure_minimum_contrast(
+                    text,
+                    background,
+                    fallback_text,
+                    minimum=4.5,
+                )
+                boundary = _blend_colors(base, readable_text, boundary_weight)
+                boundary = _ensure_minimum_contrast(
+                    boundary,
+                    background,
+                    readable_text,
+                    minimum=3.0,
+                )
+                colors[f"{prefix}_background"] = background.name()
+                colors[f"{prefix}_text"] = readable_text.name()
+                colors[f"{prefix}_boundary"] = boundary.name()
+
+            self._selection_style_colors = colors
+            self._selection_style_revision += 1
+            self.viewport().update()
+        finally:
+            self._selection_style_refreshing = False
 
 
 class _ClickArmedWheelMixin:

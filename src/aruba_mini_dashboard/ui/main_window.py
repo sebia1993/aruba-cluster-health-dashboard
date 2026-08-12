@@ -39,7 +39,7 @@ from .detail_dialog import DetailDialog
 from .resources import status_icon
 from .settings_dialog import SettingsDialog
 from .view_models import DashboardView, DeviceView, display, sequence, severity_key, value
-from .widgets import NoWheelSlider
+from .widgets import NoWheelSlider, SubtleSelectionTableWidget
 
 
 LOGGER = logging.getLogger(__name__)
@@ -244,7 +244,7 @@ class MainWindow(QMainWindow):
             controls.setColumnStretch(column, 1)
         root.addLayout(controls)
 
-        self.table = QTableWidget(0, len(self.COLUMNS), page)
+        self.table = SubtleSelectionTableWidget(0, len(self.COLUMNS), page)
         self.table.setHorizontalHeaderLabels(self.COLUMNS)
         self._configure_table(self.table)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
@@ -299,7 +299,7 @@ class MainWindow(QMainWindow):
             controls.addWidget(button, 1)
         root.addLayout(controls)
 
-        self.compact_table = QTableWidget(0, len(self.COMPACT_COLUMNS), page)
+        self.compact_table = SubtleSelectionTableWidget(0, len(self.COMPACT_COLUMNS), page)
         self.compact_table.setHorizontalHeaderLabels(self.COMPACT_COLUMNS)
         self._configure_table(self.compact_table)
         self.compact_table.setSortingEnabled(False)
