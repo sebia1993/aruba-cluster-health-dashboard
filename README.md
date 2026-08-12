@@ -274,7 +274,7 @@ Python 설치가 필요하지 않도록 구성되어 있습니다.
 생성합니다.
 
 ```powershell
-.\scripts\package_release.ps1 -Version 0.3.1
+.\scripts\package_release.ps1 -Version 0.3.2
 ```
 
 기존 태그나 Release 자산을 덮어쓰지 않는 상세 절차는

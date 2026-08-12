@@ -79,6 +79,10 @@ def test_release_workflow_has_approved_safe_prerelease_contract() -> None:
     assert "must match pyproject.toml" in text
     assert "Draft and publish modes require confirmation that exactly matches" in text
     assert "A release or draft already exists" in text
+    assert "release(tagName: $tag)" in text
+    assert "databaseId" in text
+    assert "$releaseId = [long]$draftIdentity.databaseId" in text
+    assert "Prerelease draft lookup by exact numeric ID failed" in text
     assert "--verify-tag" in text
     assert "--draft" in text
     assert "--prerelease" in text
@@ -98,6 +102,50 @@ def test_release_workflow_has_approved_safe_prerelease_contract() -> None:
     assert "--clobber" not in text
     assert "cleanup-tag" not in text
     assert "git push" not in text
+
+
+def test_release_workflow_finds_drafts_by_exact_tag_and_reverifies_numeric_id() -> None:
+    text = _read(RELEASE_WORKFLOW)
+
+    assert text.count("release(tagName: $tag)") == 2
+    assert "releases?per_page=100" not in text
+    assert "Get-MatchingReleases" not in text
+    assert "function Get-ReleaseIdentityByTag" in text
+    assert "GitHub exact-tag release lookup failed" in text
+    assert "GitHub exact-tag response could not prove the repository identity" in text
+
+    preflight_start = text.index("Refuse an existing release or draft before building")
+    preflight_end = text.index("Set up exact build Python", preflight_start)
+    preflight = text[preflight_start:preflight_end]
+    assert "gh api graphql" in preflight
+    assert "databaseId" in preflight
+    assert "tagName" in preflight
+    assert "isDraft" in preflight
+    assert "isPrerelease" in preflight
+    assert "url" in preflight
+    assert "$null -ne $response.errors" in preflight
+    assert "$null -eq $response.data.repository" in preflight
+    assert "if ($null -ne $identity)" in preflight
+
+    create_index = text.index("$createOutput = @(gh release create")
+    candidate_index = text.index("$candidate = Get-ReleaseIdentityByTag", create_index)
+    numeric_id_index = text.index("$releaseId = [long]$draftIdentity.databaseId", candidate_index)
+    rest_lookup_index = text.index(
+        'gh api "repos/$($env:AMD_REPOSITORY)/releases/$releaseId"',
+        numeric_id_index,
+    )
+    upload_index = text.index("gh release upload", rest_lookup_index)
+    assert create_index < candidate_index < numeric_id_index < rest_lookup_index < upload_index
+
+    identity_checks = text[candidate_index:upload_index]
+    assert "$candidate.tagName -ne $env:AMD_RELEASE_TAG" in identity_checks
+    assert "-not $candidate.isDraft" in identity_checks
+    assert "-not $candidate.isPrerelease" in identity_checks
+    assert "[string]$candidate.url -ne $releaseUrl" in identity_checks
+    assert "[long]$draft.id -ne $releaseId" in identity_checks
+    assert "$draft.tag_name -ne $env:AMD_RELEASE_TAG" in identity_checks
+    assert "[string]$draft.html_url -ne $releaseUrl" in identity_checks
+    assert "-not $draft.draft -or -not $draft.prerelease" in identity_checks
 
 
 def test_release_workflow_job_order_and_asset_contract() -> None:
