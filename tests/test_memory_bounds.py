@@ -55,14 +55,14 @@ def test_large_raw_output_is_lazy_lossless_and_mapping_compatible(monkeypatch) -
     large = "Aruba output line\r\n" * 20_000
     source = {"small": "ok", "large": large}
     calls = 0
-    original_decompress = lazy_text_mapping.zlib.decompress
+    original_decompressobj = lazy_text_mapping.zlib.decompressobj
 
-    def counted_decompress(payload: bytes) -> bytes:
+    def counted_decompressobj():
         nonlocal calls
         calls += 1
-        return original_decompress(payload)
+        return original_decompressobj()
 
-    monkeypatch.setattr(lazy_text_mapping.zlib, "decompress", counted_decompress)
+    monkeypatch.setattr(lazy_text_mapping.zlib, "decompressobj", counted_decompressobj)
     result = LazyCompressedTextMapping(source)
 
     assert list(result) == ["small", "large"]

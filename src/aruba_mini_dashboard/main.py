@@ -892,25 +892,20 @@ class RuntimePoller:
                     "Cluster 수집 처리 중 오류가 발생했습니다. 로그를 확인하세요.",
                 )
 
-        if settings.performance.low_spec_mode:
-            if mm_credential is not None:
-                mm_bundle = collect_mm()
-            if cancellation_event is not None and cancellation_event.is_set():
-                raise RuntimeError("점검이 취소되었습니다.")
-            if cluster_credential is not None:
-                cluster_bundle = collect_cluster()
-        else:
-            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="aruba-collector") as executor:
-                mm_future = executor.submit(collect_mm) if mm_credential is not None else None
-                cluster_future = (
-                    executor.submit(collect_cluster)
-                    if cluster_credential is not None
-                    else None
-                )
-                if mm_future is not None:
-                    mm_bundle = mm_future.result()
-                if cluster_future is not None:
-                    cluster_bundle = cluster_future.result()
+        # MM and cluster are independent read-only sources. Keep both modes on
+        # the same bounded executor so one slow source cannot delay the other;
+        # low-spec mode still caps collection concurrency at two workers.
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="aruba-collector") as executor:
+            mm_future = executor.submit(collect_mm) if mm_credential is not None else None
+            cluster_future = (
+                executor.submit(collect_cluster)
+                if cluster_credential is not None
+                else None
+            )
+            if mm_future is not None:
+                mm_bundle = mm_future.result()
+            if cluster_future is not None:
+                cluster_bundle = cluster_future.result()
         assert mm_bundle is not None and cluster_bundle is not None
         if cancellation_event is not None and cancellation_event.is_set():
             raise RuntimeError("점검이 취소되었습니다.")

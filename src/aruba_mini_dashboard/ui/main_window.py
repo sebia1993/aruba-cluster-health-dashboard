@@ -85,6 +85,7 @@ class MainWindow(QMainWindow):
     FULL_MODE = "full"
     FULL_ENTER_WIDTH = 1000
     COMPACT_ENTER_WIDTH = 900
+    LOW_SPEC_FULL_PAGE_SIZE = 250
 
     def __init__(
         self,
@@ -128,6 +129,11 @@ class MainWindow(QMainWindow):
         self._table_dirty = {self.COMPACT_MODE: True, self.FULL_MODE: True}
         self._full_row_signatures: dict[str, tuple[Any, ...]] = {}
         self._compact_row_signatures: dict[str, tuple[Any, ...]] = {}
+        self._full_page_index = 0
+        self._full_sort_column = 0
+        self._full_sort_order = Qt.AscendingOrder
+        self._updating_full_sort = False
+        self._pending_full_selection_ip = ""
         self._hidden_to_tray = False
         self._initial_setup_offer_scheduled = False
         self._initial_setup_offered = False
@@ -146,6 +152,7 @@ class MainWindow(QMainWindow):
         self._connect_coordinator()
         self._restore_ui_settings()
         self._set_empty_state()
+        self._refresh_performance_indicator()
         self._apply_responsive_mode(force=True)
         self._refresh_setup_state()
 
@@ -244,13 +251,44 @@ class MainWindow(QMainWindow):
             controls.setColumnStretch(column, 1)
         root.addLayout(controls)
 
+        self.full_page_bar = QWidget(page)
+        self.full_page_bar.setAccessibleName("전체 장비 페이지 이동")
+        page_layout = QHBoxLayout(self.full_page_bar)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(5)
+        self.full_page_range_label = QLabel("", self.full_page_bar)
+        self.full_page_range_label.setAccessibleName("현재 표시 장비 범위")
+        page_layout.addWidget(self.full_page_range_label)
+        page_layout.addStretch(1)
+        self.full_previous_button = QPushButton("이전", self.full_page_bar)
+        self.full_previous_button.setAccessibleName("이전 장비 페이지")
+        self.full_previous_button.setToolTip("이전 250대 장비를 표시합니다.")
+        self.full_page_count_label = QLabel("", self.full_page_bar)
+        self.full_page_count_label.setAlignment(Qt.AlignCenter)
+        self.full_page_count_label.setAccessibleName("현재 페이지")
+        self.full_next_button = QPushButton("다음", self.full_page_bar)
+        self.full_next_button.setAccessibleName("다음 장비 페이지")
+        self.full_next_button.setToolTip("다음 250대 장비를 표시합니다.")
+        page_layout.addWidget(self.full_previous_button)
+        page_layout.addWidget(self.full_page_count_label)
+        page_layout.addWidget(self.full_next_button)
+        self.full_page_bar.hide()
+        root.addWidget(self.full_page_bar)
+
         self.table = SubtleSelectionTableWidget(0, len(self.COLUMNS), page)
         self.table.setHorizontalHeaderLabels(self.COLUMNS)
         self._configure_table(self.table)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setSortingEnabled(True)
-        self.table.sortItems(0, Qt.AscendingOrder)
+        # The complete DeviceView list is sorted before a page slice is taken.
+        # Native QTableWidget sorting would only reorder the visible page.
+        self.table.setSortingEnabled(False)
+        self.table.horizontalHeader().setSectionsClickable(True)
+        self.table.horizontalHeader().setSortIndicatorShown(True)
+        self.table.horizontalHeader().setSortIndicator(0, Qt.AscendingOrder)
+        self.table.horizontalHeader().sortIndicatorChanged.connect(self._full_sort_changed)
+        self.full_previous_button.clicked.connect(lambda: self._change_full_page(-1))
+        self.full_next_button.clicked.connect(lambda: self._change_full_page(1))
         root.addWidget(self.table, 1)
         return page
 
@@ -408,9 +446,17 @@ class MainWindow(QMainWindow):
         self._dashboard_mode = target
         target_page = self.full_page if target == self.FULL_MODE else self.compact_page
         self.dashboard_stack.setCurrentWidget(target_page)
+        if target == self.FULL_MODE and selected_ip:
+            self._move_full_page_to_ip(selected_ip)
         self._render_active_table_if_needed()
         if selected_ip:
-            self._select_ip(self._active_table(), selected_ip)
+            selected = self._select_ip(self._active_table(), selected_ip)
+            if target == self.COMPACT_MODE and not selected:
+                # An unregistered full-view inventory row must not remain an
+                # actionable hidden selection after entering compact mode.
+                self.table.clearSelection()
+                self.compact_table.clearSelection()
+                self._selection_changed()
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt API
         super().showEvent(event)
@@ -640,6 +686,10 @@ class MainWindow(QMainWindow):
             self._devices_by_ip.setdefault(device.ip, device.source)
         self._table_dirty[self.FULL_MODE] = True
         self._table_dirty[self.COMPACT_MODE] = True
+        if selected_ip:
+            self._move_full_page_to_ip(selected_ip)
+        else:
+            self._clamp_full_page()
         if not self._hidden_to_tray and self.isVisible():
             self._render_active_table_if_needed()
         if selected_ip:
@@ -667,9 +717,7 @@ class MainWindow(QMainWindow):
             )
 
     def _populate_full_table(self, devices: list[DeviceView]) -> None:
-        devices = sorted(devices, key=lambda item: item.ip)
         rows: list[tuple[DeviceView, bool, str, str, tuple[str, ...]]] = []
-        signatures: dict[str, tuple[Any, ...]] = {}
         for device in devices:
             registered = self._device_is_registered(device)
             display_status = device.status if registered else "감시 제외"
@@ -686,42 +734,177 @@ class MainWindow(QMainWindow):
                 "등록" if registered else "미등록 · 감시 제외",
                 device.distribution_status,
             )
-            signature = (*values, registered, display_status_key)
-            signatures[device.ip] = signature
             rows.append((device, registered, display_status, display_status_key, values))
-        identities = [device.ip for device in devices]
+
+        rows = self._sort_full_rows(rows)
+        total = len(rows)
+        if self._pending_full_selection_ip and self._full_paging_enabled(total):
+            selected_index = next(
+                (
+                    index
+                    for index, row in enumerate(rows)
+                    if row[0].ip == self._pending_full_selection_ip
+                ),
+                None,
+            )
+            if selected_index is not None:
+                self._full_page_index = selected_index // self.LOW_SPEC_FULL_PAGE_SIZE
+        self._pending_full_selection_ip = ""
+        page_count = self._full_page_count(total)
+        self._full_page_index = min(self._full_page_index, max(0, page_count - 1))
+        paged = self._full_paging_enabled(total)
+        if paged:
+            start = self._full_page_index * self.LOW_SPEC_FULL_PAGE_SIZE
+            visible_rows = rows[start : start + self.LOW_SPEC_FULL_PAGE_SIZE]
+        else:
+            start = 0
+            visible_rows = rows
+        self._update_full_page_bar(total, start, len(visible_rows), page_count, paged)
+
+        signatures = {
+            device.ip: (*values, registered, display_status_key)
+            for device, registered, _display_status, display_status_key, values in visible_rows
+        }
+        identities = [device.ip for device, *_rest in visible_rows]
         shape_changed = self._ensure_table_shape(self.table, identities, len(self.COLUMNS))
         if not shape_changed and signatures == self._full_row_signatures:
             return
         self.table.setUpdatesEnabled(False)
-        self.table.setSortingEnabled(False)
-        for row, (device, registered, _display_status, display_status_key, values) in enumerate(rows):
-            if not shape_changed and self._full_row_signatures.get(device.ip) == signatures[device.ip]:
-                continue
-            foreground, _background, _accent = STATUS_STYLES.get(
-                display_status_key, STATUS_STYLES["unknown"]
+        self._updating_full_sort = True
+        try:
+            for row, (device, registered, _display_status, display_status_key, values) in enumerate(
+                visible_rows
+            ):
+                if (
+                    not shape_changed
+                    and self._full_row_signatures.get(device.ip) == signatures[device.ip]
+                ):
+                    continue
+                foreground, _background, _accent = STATUS_STYLES.get(
+                    display_status_key, STATUS_STYLES["unknown"]
+                )
+                for column, text in enumerate(values):
+                    item = self.table.item(row, column) or QTableWidgetItem()
+                    if item.text() != text:
+                        item.setText(text)
+                    item.setData(Qt.UserRole, device.ip)
+                    item.setToolTip(str(text))
+                    if column == 6:
+                        item.setForeground(QColor(foreground))
+                        font = item.font()
+                        font.setBold(True)
+                        item.setFont(font)
+                        item.setIcon(status_icon(display_status_key))
+                    elif column == 8 and not registered:
+                        item.setForeground(QColor(STATUS_STYLES["unknown"][0]))
+                    if self.table.item(row, column) is None:
+                        self.table.setItem(row, column, item)
+            self.table.horizontalHeader().setSortIndicator(
+                self._full_sort_column,
+                self._full_sort_order,
             )
-            for column, text in enumerate(values):
-                item = self.table.item(row, column) or QTableWidgetItem()
-                if item.text() != text:
-                    item.setText(text)
-                item.setData(Qt.UserRole, device.ip)
-                item.setToolTip(str(text))
-                if column == 6:
-                    item.setForeground(QColor(foreground))
-                    font = item.font()
-                    font.setBold(True)
-                    item.setFont(font)
-                    item.setIcon(status_icon(display_status_key))
-                elif column == 8 and not registered:
-                    item.setForeground(QColor(STATUS_STYLES["unknown"][0]))
-                if self.table.item(row, column) is None:
-                    self.table.setItem(row, column, item)
-        if shape_changed:
-            self.table.sortItems(0, Qt.AscendingOrder)
-        self.table.setSortingEnabled(True)
-        self.table.setUpdatesEnabled(True)
+        finally:
+            self._updating_full_sort = False
+            self.table.setUpdatesEnabled(True)
         self._full_row_signatures = signatures
+
+    def _sort_full_rows(
+        self,
+        rows: list[tuple[DeviceView, bool, str, str, tuple[str, ...]]],
+    ) -> list[tuple[DeviceView, bool, str, str, tuple[str, ...]]]:
+        """Sort the complete device set before applying a low-spec page slice."""
+
+        column = min(max(self._full_sort_column, 0), len(self.COLUMNS) - 1)
+        ordered = sorted(rows, key=lambda row: row[0].ip.casefold())
+        ordered.sort(
+            key=lambda row: str(row[4][column]).casefold(),
+            reverse=self._full_sort_order == Qt.DescendingOrder,
+        )
+        return ordered
+
+    def _full_paging_enabled(self, total: int | None = None) -> bool:
+        if total is None:
+            total = len(self._latest_display_devices)
+        performance = getattr(self.settings, "performance", None)
+        return bool(
+            getattr(performance, "low_spec_mode", False)
+            and total > self.LOW_SPEC_FULL_PAGE_SIZE
+        )
+
+    def _full_page_count(self, total: int | None = None) -> int:
+        if total is None:
+            total = len(self._latest_display_devices)
+        if not self._full_paging_enabled(total):
+            return 1
+        return max(1, (total + self.LOW_SPEC_FULL_PAGE_SIZE - 1) // self.LOW_SPEC_FULL_PAGE_SIZE)
+
+    def _clamp_full_page(self) -> None:
+        self._full_page_index = min(
+            max(0, self._full_page_index),
+            self._full_page_count() - 1,
+        )
+
+    def _update_full_page_bar(
+        self,
+        total: int,
+        start: int,
+        visible_count: int,
+        page_count: int,
+        paged: bool,
+    ) -> None:
+        self.full_page_bar.setVisible(paged)
+        if not paged:
+            self.full_page_range_label.clear()
+            self.full_page_count_label.clear()
+            return
+        end = start + visible_count
+        self.full_page_range_label.setText(f"{start + 1}–{end} / 전체 {total}대")
+        self.full_page_count_label.setText(f"{self._full_page_index + 1} / {page_count}")
+        self.full_previous_button.setEnabled(self._full_page_index > 0)
+        self.full_next_button.setEnabled(self._full_page_index + 1 < page_count)
+        self.full_page_bar.setAccessibleDescription(
+            f"전체 {total}대 중 {start + 1}대부터 {end}대까지 표시"
+        )
+
+    @Slot(int)
+    def _change_full_page(self, offset: int) -> None:
+        page_count = self._full_page_count()
+        target = min(max(0, self._full_page_index + offset), page_count - 1)
+        if target == self._full_page_index:
+            return
+        self.table.clearSelection()
+        self.compact_table.clearSelection()
+        self._full_page_index = target
+        self._table_dirty[self.FULL_MODE] = True
+        self._render_active_table_if_needed()
+        self._selection_changed()
+
+    @Slot(int, Qt.SortOrder)
+    def _full_sort_changed(self, column: int, order: Qt.SortOrder) -> None:
+        if self._updating_full_sort:
+            return
+        selected_ip = self._selected_ip()
+        self._full_sort_column = column
+        self._full_sort_order = order
+        if selected_ip:
+            self._move_full_page_to_ip(selected_ip)
+        else:
+            self._clamp_full_page()
+        self._table_dirty[self.FULL_MODE] = True
+        self._render_active_table_if_needed()
+        if selected_ip:
+            self._select_ip(self.table, selected_ip)
+
+    def _move_full_page_to_ip(self, ip: str) -> None:
+        if not self._full_paging_enabled():
+            self._full_page_index = 0
+            self._pending_full_selection_ip = ""
+            return
+        # Resolve the selected IP while the already-required full render sorts
+        # the complete dataset. Hidden/tray snapshot updates therefore avoid a
+        # second full-device transformation merely to calculate a page.
+        self._pending_full_selection_ip = ip
+        self._table_dirty[self.FULL_MODE] = True
 
     def _populate_compact_table(self, devices: list[DeviceView]) -> None:
         rows: list[tuple[DeviceView, str, tuple[str, ...], str, str]] = []
@@ -1033,8 +1216,7 @@ class MainWindow(QMainWindow):
 
     @Slot(bool)
     def _busy_changed(self, busy: bool) -> None:
-        self.busy_label.setText("● 점검 중" if busy else "")
-        self.compact_busy_label.setText("● 점검 중" if busy else "")
+        self._refresh_performance_indicator(busy=busy)
         self.settings_button.setEnabled(not busy)
         self.compact_settings_action.setEnabled(not busy)
         if hasattr(self, "tray_settings_action"):
@@ -1194,12 +1376,7 @@ class MainWindow(QMainWindow):
             settings.polling.interval_seconds,
         )
         self.coordinator.set_interval(effective_interval)
-        if effective_interval != settings.polling.interval_seconds:
-            self.statusBar().showMessage(
-                f"저사양 모드: 자동 점검 주기를 {effective_interval}초로 적용했습니다. "
-                "‘지금 점검’은 즉시 실행됩니다.",
-                8000,
-            )
+        self._refresh_performance_indicator()
         self.set_opacity_percent(settings.ui.opacity_percent, persist=False)
         self.set_always_on_top(settings.ui.always_on_top, persist=False)
         if self._current_view is not None:
@@ -1223,8 +1400,43 @@ class MainWindow(QMainWindow):
         elif not settings.polling.automatic_enabled and previous_auto:
             self.coordinator.pause_automatic()
         self.settings_saved.emit(settings)
-        self.statusBar().showMessage("설정을 저장했습니다.", 5000)
+        if self.demo_mode:
+            message = "Demo 모드: 설정을 영구 저장하지 않고 이번 실행에만 적용했습니다."
+        else:
+            message = "설정을 저장했습니다."
+        if getattr(getattr(settings, "performance", None), "low_spec_mode", False):
+            message += (
+                f" · 저사양 모드 자동 점검 {effective_interval}초 적용"
+                " · ‘지금 점검’은 즉시 실행"
+            )
+        self.statusBar().showMessage(message, 8000)
         return True
+
+    def _refresh_performance_indicator(self, *, busy: bool | None = None) -> None:
+        if busy is None:
+            busy = bool(getattr(self.coordinator, "busy", False))
+        low_spec = bool(
+            getattr(getattr(self.settings, "performance", None), "low_spec_mode", False)
+        )
+        effective_interval = getattr(
+            self.settings,
+            "effective_poll_interval_seconds",
+            self.settings.polling.interval_seconds,
+        )
+        if busy:
+            text = "● 점검 중 · 저사양" if low_spec else "● 점검 중"
+        else:
+            text = f"저사양 · 자동 {effective_interval}초" if low_spec else ""
+        description = (
+            f"저사양 모드 사용 중, 자동 점검 {effective_interval}초"
+            if low_spec
+            else "현재 점검 상태"
+        )
+        for label in (self.busy_label, self.compact_busy_label):
+            label.setText(text)
+            label.setAccessibleName("점검 및 저사양 모드 상태")
+            label.setAccessibleDescription(description)
+            label.setToolTip(description if low_spec else "")
 
     def _mark_scope_change_pending(
         self,

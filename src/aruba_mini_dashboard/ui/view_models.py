@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Iterable, Mapping
+
+from ..lazy_text_mapping import RAW_OUTPUT_CORRUPTED_MESSAGE, RawOutputCorruptedError
 
 
 def value(source: Any, name: str, default: Any = None) -> Any:
@@ -287,14 +291,44 @@ def flatten_errors(source: Any) -> list[str]:
     return [message for message in messages if message]
 
 
-def safe_raw_output(source: Any) -> str:
+_AUTH_PROMPT_PATTERN = re.compile(
+    r"^\s*(password|passwd|enable secret)\s*[:=].*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _redact_raw_output(text: Any) -> str:
+    return _AUTH_PROMPT_PATTERN.sub(r"\1: [REDACTED]", display(text, ""))
+
+
+def iter_safe_raw_output_chunks(source: Any) -> Iterator[str]:
+    """Yield redacted raw output one command at a time.
+
+    Keeping command sections separate lets the detail view populate its text
+    document without first constructing a second, combined copy of every raw
+    response. A corrupt compressed command becomes one sanitized section and
+    does not prevent later commands from being displayed.
+    """
+
     raw = value(source, "raw_output", value(source, "raw_outputs", ""))
     if isinstance(raw, Mapping):
-        raw = "\n\n".join(f"[{key}]\n{item}" for key, item in raw.items())
-    text = display(raw, "")
-    # Aruba command output should never contain secrets, but defensively mask
-    # common authentication prompts before presenting it.
-    import re
+        first = True
+        for key in raw:
+            if not first:
+                yield "\n\n"
+            first = False
+            yield f"[{key}]\n"
+            try:
+                item = raw[key]
+            except RawOutputCorruptedError:
+                yield RAW_OUTPUT_CORRUPTED_MESSAGE
+                continue
+            yield _redact_raw_output(item)
+        return
+    yield _redact_raw_output(raw)
 
-    text = re.sub(r"(?im)^\s*(password|passwd|enable secret)\s*[:=].*$", r"\1: [REDACTED]", text)
-    return text
+
+def safe_raw_output(source: Any) -> str:
+    """Return the legacy combined representation of sanitized raw output."""
+
+    return "".join(iter_safe_raw_output_chunks(source))

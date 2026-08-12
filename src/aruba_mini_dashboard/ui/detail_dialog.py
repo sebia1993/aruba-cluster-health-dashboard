@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt, Signal, Slot
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QTextCursor
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -17,7 +17,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .view_models import DeviceView, display, flatten_errors, safe_raw_output, sequence, value
+from .view_models import (
+    DeviceView,
+    display,
+    flatten_errors,
+    iter_safe_raw_output_chunks,
+    sequence,
+    value,
+)
 from .widgets import SubtleTabWidget
 
 
@@ -182,6 +189,7 @@ class DetailDialog(QDialog):
             return
         editor = QPlainTextEdit(self)
         editor.setReadOnly(True)
+        editor.setUndoRedoEnabled(False)
         editor.setPlaceholderText("현재 실행의 원본 명령 출력이 메모리에 남아 있지 않습니다.")
         raw_outputs = (
             self._raw_outputs_provider()
@@ -189,7 +197,16 @@ class DetailDialog(QDialog):
             else self._raw_outputs
         )
         raw_source = self._device if raw_outputs is None else {"raw_outputs": raw_outputs}
-        editor.setPlainText(safe_raw_output(raw_source))
+        cursor = editor.textCursor()
+        cursor.beginEditBlock()
+        try:
+            for chunk in iter_safe_raw_output_chunks(raw_source):
+                cursor.insertText(chunk)
+        finally:
+            cursor.endEditBlock()
+        cursor.movePosition(QTextCursor.Start)
+        editor.setTextCursor(cursor)
+        editor.ensureCursorVisible()
         self._raw_editor = editor
         self._replace_placeholder(2, editor, "원본 출력")
 

@@ -6,6 +6,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from aruba_mini_dashboard.collectors.base import (
     SHOW_CLIENT_DISTRIBUTION,
     SHOW_GROUP_MEMBERSHIP,
@@ -191,7 +193,7 @@ def test_missing_mm_credential_does_not_discard_successful_cluster_collection(
     storage.close()
 
 
-def test_low_spec_collection_is_sequential_but_preserves_results_and_request_counts(
+def test_low_spec_collection_is_bounded_parallel_and_preserves_runtime_parity(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -202,8 +204,10 @@ def test_low_spec_collection_is_sequential_but_preserves_results_and_request_cou
         encoding="utf-8"
     )
 
-    def exercise(low_spec_mode: bool):
-        paths = AppPaths.from_environment(tmp_path / ("low" if low_spec_mode else "normal")).ensure()
+    def exercise(low_spec_mode: bool, *, cluster_fails: bool):
+        mode = "low" if low_spec_mode else "normal"
+        scenario = "failure" if cluster_fails else "success"
+        paths = AppPaths.from_environment(tmp_path / f"{mode}-{scenario}").ensure()
         persistent = SessionCredentialStore()
         credentials = CredentialService(persistent=persistent)
         credential_id = credentials.save(
@@ -218,7 +222,10 @@ def test_low_spec_collection_is_sequential_but_preserves_results_and_request_cou
             member.alias = f"WLC-{index - 10:02d}"
         settings.cluster.primary_controller_ip = "192.0.2.11"
         settings.performance.low_spec_mode = low_spec_mode
+        settings.detection.anomaly_cycles = 1
+        settings.detection.missing_cycles = 1
         calls: list[str] = []
+        requests: list[str] = []
         concurrency_lock = threading.Lock()
         active = 0
         maximum_active = 0
@@ -239,6 +246,7 @@ def test_low_spec_collection_is_sequential_but_preserves_results_and_request_cou
         def collect_mm(_self, _settings, _credential):
             enter("mm")
             try:
+                requests.append(SHOW_SWITCHES)
                 return CollectionBundle(
                     source="mm",
                     requested_controller_ip="192.0.2.10",
@@ -251,6 +259,28 @@ def test_low_spec_collection_is_sequential_but_preserves_results_and_request_cou
         def collect_cluster(_self, _settings, _credential):
             enter("cluster")
             try:
+                requests.extend((SHOW_CLIENT_DISTRIBUTION, SHOW_GROUP_MEMBERSHIP))
+                if cluster_fails:
+                    return CollectionBundle(
+                        source="cluster",
+                        requested_controller_ip="192.0.2.11",
+                        commands={
+                            SHOW_CLIENT_DISTRIBUTION: CommandResult(
+                                SHOW_CLIENT_DISTRIBUTION,
+                                False,
+                                error_code="COMMAND_TIMEOUT",
+                                error_message="sanitized timeout",
+                            ),
+                            SHOW_GROUP_MEMBERSHIP: CommandResult(
+                                SHOW_GROUP_MEMBERSHIP,
+                                False,
+                                error_code="COMMAND_TIMEOUT",
+                                error_message="sanitized timeout",
+                            ),
+                        },
+                        terminal_error_code="COMMAND_TIMEOUT",
+                        terminal_error_message="sanitized timeout",
+                    )
                 return CollectionBundle(
                     source="cluster",
                     requested_controller_ip="192.0.2.11",
@@ -282,25 +312,146 @@ def test_low_spec_collection_is_sequential_but_preserves_results_and_request_cou
         monkeypatch.setattr(storage, "_write", counted_write)
         snapshot = runtime()
         result = {
-            device.ip: (
-                device.mm_status,
-                device.active_clients,
-                device.standby_clients,
-                device.connection_type,
-                device.severity,
-            )
-            for device in snapshot.devices
+            "devices": {
+                device.ip: (
+                    device.mm_status,
+                    device.active_clients,
+                    device.standby_clients,
+                    device.connection_type,
+                    device.severity,
+                )
+                for device in snapshot.devices
+            },
+            "partial": snapshot.partial,
+            "errors": sorted(
+                (error.source, error.code, error.target_ip)
+                for error in snapshot.collection_errors
+            ),
+            "incidents": sorted(
+                (
+                    incident.incident_type.value,
+                    incident.severity.value,
+                    incident.ip,
+                    incident.active,
+                )
+                for incident in snapshot.active_incidents
+            ),
+            "notifications": sorted(
+                (
+                    incident.incident_type.value,
+                    incident.severity.value,
+                    incident.ip,
+                    incident.active,
+                )
+                for incident in snapshot.notification_events
+            ),
         }
         storage.close()
         credentials.close()
-        return result, calls, maximum_active, writes
+        return result, calls, requests, maximum_active, writes
 
-    normal, normal_calls, _normal_concurrency, normal_writes = exercise(False)
-    low, low_calls, low_concurrency, low_writes = exercise(True)
+    for cluster_fails in (False, True):
+        normal, normal_calls, normal_requests, normal_concurrency, normal_writes = exercise(
+            False, cluster_fails=cluster_fails
+        )
+        low, low_calls, low_requests, low_concurrency, low_writes = exercise(
+            True, cluster_fails=cluster_fails
+        )
 
-    assert low == normal
-    assert sorted(low_calls) == sorted(normal_calls) == ["cluster", "mm"]
-    assert low_calls == ["mm", "cluster"]
-    assert low_concurrency == 1
-    assert normal_writes <= 2
-    assert low_writes <= 2
+        assert low == normal
+        assert sorted(low_calls) == sorted(normal_calls) == ["cluster", "mm"]
+        assert sorted(low_requests) == sorted(normal_requests) == sorted(
+            (SHOW_SWITCHES, SHOW_CLIENT_DISTRIBUTION, SHOW_GROUP_MEMBERSHIP)
+        )
+        assert normal_concurrency == low_concurrency == 2
+        assert normal_writes <= 2
+        assert low_writes <= 2
+        if cluster_fails:
+            assert len(normal["errors"]) == 2
+            assert normal["incidents"]
+            assert normal["notifications"]
+        else:
+            assert normal["errors"] == []
+            assert normal["incidents"] == []
+            assert normal["notifications"] == []
+
+
+def test_low_spec_slow_mm_does_not_delay_cluster_collection(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    fixture_dir = Path(__file__).parent / "fixtures"
+    mm_output = (fixture_dir / "mm_show_switches_normal.txt").read_text(encoding="utf-8")
+    load_output = (fixture_dir / "cluster_load_normal.txt").read_text(encoding="utf-8")
+    membership_output = (fixture_dir / "group_membership_initial.txt").read_text(
+        encoding="utf-8"
+    )
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    credentials = CredentialService(persistent=SessionCredentialStore())
+    credential_id = credentials.save(
+        DeviceCredential("operator", "session-secret"),
+        session_only=False,
+    )
+    settings = AppSettings.default()
+    settings.credentials.shared_credential_id = credential_id
+    settings.mobility_master.management_ip = "192.0.2.10"
+    for index, member in enumerate(settings.cluster.members, start=11):
+        member.ip = f"192.0.2.{index}"
+        member.alias = f"WLC-{index - 10:02d}"
+    settings.cluster.primary_controller_ip = "192.0.2.11"
+    settings.performance.low_spec_mode = True
+    cluster_started = threading.Event()
+    overlap_observed = threading.Event()
+
+    def collect_mm(_self, _settings, _credential):
+        if cluster_started.wait(timeout=1):
+            overlap_observed.set()
+        return CollectionBundle(
+            source="mm",
+            requested_controller_ip="192.0.2.10",
+            actual_controller_ip="192.0.2.10",
+            commands={SHOW_SWITCHES: CommandResult(SHOW_SWITCHES, True, output=mm_output)},
+        )
+
+    def collect_cluster(_self, _settings, _credential):
+        cluster_started.set()
+        return CollectionBundle(
+            source="cluster",
+            requested_controller_ip="192.0.2.11",
+            actual_controller_ip="192.0.2.11",
+            commands={
+                SHOW_CLIENT_DISTRIBUTION: CommandResult(
+                    SHOW_CLIENT_DISTRIBUTION, True, output=load_output
+                ),
+                SHOW_GROUP_MEMBERSHIP: CommandResult(
+                    SHOW_GROUP_MEMBERSHIP, True, output=membership_output
+                ),
+            },
+        )
+
+    monkeypatch.setattr("aruba_mini_dashboard.main.MmCollector.collect", collect_mm)
+    monkeypatch.setattr("aruba_mini_dashboard.main.ClusterCollector.collect", collect_cluster)
+    storage = SQLiteStorage(paths)
+    runtime = RuntimePoller(settings, paths, credentials, storage, setup_logging(paths))
+
+    snapshot = runtime()
+
+    assert overlap_observed.is_set()
+    assert snapshot.partial is False
+    assert len(snapshot.devices) == 4
+
+    cancellation_event = threading.Event()
+
+    def cancel_during_cluster_collection(_self, _settings, _credential):
+        cancellation_event.set()
+        return collect_cluster(_self, _settings, _credential)
+
+    monkeypatch.setattr(
+        "aruba_mini_dashboard.main.ClusterCollector.collect",
+        cancel_during_cluster_collection,
+    )
+    with pytest.raises(RuntimeError, match="취소"):
+        runtime(cancellation_event)
+
+    storage.close()
+    credentials.close()
