@@ -68,6 +68,11 @@ d=SettingsDialog(AppSettings.default(), initial_setup=True)
 d.show(); app.processEvents()
 assert d.width() >= d.minimumWidth() and d.height() >= d.minimumHeight()
 assert d.tabs.count() == 3
+tab_bar=d.tabs.tabBar()
+for index in range(d.tabs.count()):
+    rect=tab_bar.tabRect(index)
+    assert rect.width() >= tab_bar.fontMetrics().horizontalAdvance(d.tabs.tabText(index)) + 12
+    assert rect.height() >= tab_bar.fontMetrics().height() + 4
 for button in (
     d.buttons.button(QDialogButtonBox.Save),
     d.buttons.button(QDialogButtonBox.Cancel),
