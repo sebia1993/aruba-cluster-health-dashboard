@@ -37,7 +37,11 @@ Actions에서 재현 가능하게 빌드하고, 검증된 자산만 GitHub Prere
   선택적 성능 로그와 내부 성능 최적화를 추가한 Prerelease입니다. 감지 규칙과
   결과 정확성은 유지하며 새 annotated tag와 새 Release로만 게시합니다.
 - `v0.3.1`: 단일 실행 보호, 오래된 미등록 장비 인벤토리 보관 한도, 설정 파일·
-  비밀값 메모리 경계와 Node.js 24 기반 Actions를 보강한 patch Prerelease입니다.
+  비밀값 메모리 경계와 Node.js 24 기반 Actions를 보강했습니다. 첫 게시 시도에서
+  GitHub REST 목록이 새 Draft를 반환하지 않아 공개 Release 없이 annotated tag만
+  보존합니다. 이 태그를 이동하거나 다시 사용하지 않습니다.
+- `v0.3.2`: 태그별 GraphQL 조회와 REST numeric-ID 재검증으로 Draft 식별을
+  보강한 patch Prerelease입니다. `v0.3.1` 기능을 그대로 포함합니다.
 
 ## 로컬 검증
 
@@ -45,21 +49,21 @@ CPython 3.11.9 x64와 Windows PowerShell 5.1 환경에서 실행합니다.
 
 ```powershell
 .\scripts\run_tests.ps1
-.\scripts\package_release.ps1 -Version 0.3.1
+.\scripts\package_release.ps1 -Version 0.3.2
 ```
 
 성공하면 `dist\release`에는 다음 두 파일만 생성됩니다.
 
 ```text
-ArubaMiniDashboard-v0.3.1-windows-x64.zip
-ArubaMiniDashboard-v0.3.1-windows-x64.zip.sha256
+ArubaMiniDashboard-v0.3.2-windows-x64.zip
+ArubaMiniDashboard-v0.3.2-windows-x64.zip.sha256
 ```
 
 다른 위치로 전달된 자산은 다시 빌드하지 않고 다음과 같이 검증할 수 있습니다.
 
 ```powershell
 .\scripts\package_release.ps1 `
-  -Version 0.3.1 `
+  -Version 0.3.2 `
   -OutputDirectory artifacts\release `
   -VerifyOnly
 ```
@@ -79,8 +83,8 @@ Qt exact inventory와 한국어 번역 2개, PySide6/shiboken6/Paramiko/scp 외�
 ```powershell
 git switch main
 git pull --ff-only
-git tag -a v0.3.1 -m "Aruba Mini Dashboard v0.3.1"
-git push origin v0.3.1
+git tag -a v0.3.2 -m "Aruba Mini Dashboard v0.3.2"
+git push origin v0.3.2
 ```
 
 태그가 잘못된 커밋을 가리키면 Release workflow를 실행하지 않습니다. 게시된
@@ -96,7 +100,7 @@ Workflow가 사용하는 공식 Actions는 Node.js 24 기반 버전의 검토된
 사용하려면 runner `2.327.1` 이상이 필요합니다. 구형 Node 런타임을 강제로 허용하는
 환경 변수로 우회하지 않습니다.
 
-- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.3.1`
+- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.3.2`
 - `release_mode`:
   - `build-only`: 빌드·검증 후 Actions artifact만 생성
   - `draft-prerelease`: 검증된 두 자산을 새 Prerelease Draft에 업로드하고 정지
@@ -116,11 +120,12 @@ workflow는 다음 순서를 바꿀 수 없도록 구성되어 있습니다.
 2. checkout된 소스에서 tracked `LICENSE`와 MIT 본문, 승인된 source gate 확인
 3. 버전 형식과 소스 버전 일치 확인
 4. origin의 annotated tag object, tag commit, workflow SHA, `origin/main` HEAD 일치 확인
-5. 같은 태그의 기존 Release 또는 Draft가 없는지 전체 페이지 조회
+5. 태그별 GraphQL 조회로 같은 태그의 기존 Release 또는 Draft가 없는지 확인
 6. CPython 3.11.9 환경에서 테스트·onedir 빌드·ZIP·checksum 생성 및 검증
 7. Actions artifact로 전달한 두 파일을 다른 job에서 다시 다운로드하여 검증
 8. Draft 생성 직전 같은 태그·main SHA를 다시 확인
-9. 새 Draft의 numeric ID와 URL을 확인한 뒤 ZIP과 `.sha256` 두 파일만 업로드
+9. 새 Draft의 태그별 GraphQL numeric ID와 URL을 확인하고 REST numeric-ID 조회로
+   동일성을 재검증한 뒤 ZIP과 `.sha256` 두 파일만 업로드
 10. 원격 asset 이름, 상태, 바이트 크기, SHA-256 digest를 로컬 파일과 비교
 11. `publish-prerelease`에서만 동일 태그와 main SHA를 다시 확인하고 Draft 해제
 12. 동일 numeric release ID가 공개 상태가 되는 즉시 자동 정리를 금지

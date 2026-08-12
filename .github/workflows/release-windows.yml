@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing annotated release tag, for example v0.3.1"
+        description: "Existing annotated release tag, for example v0.3.2"
         required: true
         type: string
       release_mode:
@@ -165,12 +165,35 @@ jobs:
           AMD_RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
           AMD_REPOSITORY: ${{ github.repository }}
         run: |
-          $pagesJson = gh api --paginate --slurp "repos/$($env:AMD_REPOSITORY)/releases?per_page=100"
+          $ErrorActionPreference = 'Stop'
+          if ($env:AMD_REPOSITORY -notmatch '^(?<owner>[^/]+)/(?<name>[^/]+)$') {
+            throw 'GitHub repository identity is invalid.'
+          }
+          $query = @'
+          query($owner: String!, $name: String!, $tag: String!) {
+            repository(owner: $owner, name: $name) {
+              release(tagName: $tag) {
+                databaseId
+                tagName
+                isDraft
+                isPrerelease
+                url
+              }
+            }
+          }
+          '@
+          $identityJson = gh api graphql `
+            -f query=$query `
+            -F owner=$($Matches.owner) `
+            -F name=$($Matches.name) `
+            -F tag=$env:AMD_RELEASE_TAG
           if ($LASTEXITCODE -ne 0) { throw 'GitHub release preflight lookup failed.' }
-          $pages = ($pagesJson -join "`n") | ConvertFrom-Json
-          $matching = @($pages | ForEach-Object { $_ } | ForEach-Object { $_ } |
-            Where-Object { $_.tag_name -eq $env:AMD_RELEASE_TAG })
-          if ($matching.Count -gt 0) {
+          $response = ($identityJson -join "`n") | ConvertFrom-Json
+          if ($null -ne $response.errors -or $null -eq $response.data.repository) {
+            throw 'GitHub release preflight response could not prove the repository identity.'
+          }
+          $identity = $response.data.repository.release
+          if ($null -ne $identity) {
             throw 'A release or draft already exists for this tag; assets are immutable in this workflow.'
           }
 
@@ -341,12 +364,34 @@ jobs:
             }
           }
 
-          function Get-MatchingReleases {
-            $pagesJson = gh api --paginate --slurp "repos/$($env:AMD_REPOSITORY)/releases?per_page=100"
-            if ($LASTEXITCODE -ne 0) { throw 'GitHub release lookup failed.' }
-            $pages = ($pagesJson -join "`n") | ConvertFrom-Json
-            return @($pages | ForEach-Object { $_ } | ForEach-Object { $_ } |
-              Where-Object { $_.tag_name -eq $env:AMD_RELEASE_TAG })
+          function Get-ReleaseIdentityByTag {
+            if ($env:AMD_REPOSITORY -notmatch '^(?<owner>[^/]+)/(?<name>[^/]+)$') {
+              throw 'GitHub repository identity is invalid.'
+            }
+            $query = @'
+          query($owner: String!, $name: String!, $tag: String!) {
+            repository(owner: $owner, name: $name) {
+              release(tagName: $tag) {
+                databaseId
+                tagName
+                isDraft
+                isPrerelease
+                url
+              }
+            }
+          }
+          '@
+            $identityJson = gh api graphql `
+              -f query=$query `
+              -F owner=$($Matches.owner) `
+              -F name=$($Matches.name) `
+              -F tag=$env:AMD_RELEASE_TAG
+            if ($LASTEXITCODE -ne 0) { throw 'GitHub exact-tag release lookup failed.' }
+            $response = ($identityJson -join "`n") | ConvertFrom-Json
+            if ($null -ne $response.errors -or $null -eq $response.data.repository) {
+              throw 'GitHub exact-tag response could not prove the repository identity.'
+            }
+            return $response.data.repository.release
           }
 
           function Test-ExactRemoteAssets {
@@ -419,8 +464,8 @@ jobs:
           $releaseUrl = $null
           try {
             Assert-ReleaseSourceUnchanged
-            $existing = @(Get-MatchingReleases)
-            if ($existing.Count -gt 0) {
+            $existing = Get-ReleaseIdentityByTag
+            if ($null -ne $existing) {
               throw 'A release or draft already exists for this tag; no existing asset will be replaced.'
             }
 
@@ -438,23 +483,32 @@ jobs:
             $releaseUrl = $outputLines[-1]
             $draftCreated = $true
 
-            $draft = $null
+            $draftIdentity = $null
             foreach ($attempt in 1..8) {
-              $matching = @(Get-MatchingReleases)
-              if ($matching.Count -gt 1) { throw 'More than one matching release exists; automatic mutation is forbidden.' }
-              if ($matching.Count -eq 1) {
-                $candidate = $matching[0]
-                if (-not $candidate.draft -or -not $candidate.prerelease -or
-                    [string]$candidate.html_url -ne $releaseUrl) {
-                  throw 'The matching release is not the exact prerelease draft created by this run.'
+              $candidate = Get-ReleaseIdentityByTag
+              if ($null -ne $candidate) {
+                if ([long]$candidate.databaseId -le 0 -or
+                    $candidate.tagName -ne $env:AMD_RELEASE_TAG -or
+                    -not $candidate.isDraft -or -not $candidate.isPrerelease -or
+                    [string]$candidate.url -ne $releaseUrl) {
+                  throw 'The exact-tag release is not the prerelease draft created by this run.'
                 }
-                $draft = $candidate
+                $draftIdentity = $candidate
                 break
               }
               if ($attempt -lt 8) { Start-Sleep -Seconds 2 }
             }
-            if ($null -eq $draft) { throw 'The created prerelease draft could not be identified safely.' }
-            $releaseId = [long]$draft.id
+            if ($null -eq $draftIdentity) { throw 'The created prerelease draft could not be identified safely.' }
+            $releaseId = [long]$draftIdentity.databaseId
+
+            $draftJson = gh api "repos/$($env:AMD_REPOSITORY)/releases/$releaseId"
+            if ($LASTEXITCODE -ne 0) { throw 'Prerelease draft lookup by exact numeric ID failed.' }
+            $draft = ($draftJson -join "`n") | ConvertFrom-Json
+            if ([long]$draft.id -ne $releaseId -or $draft.tag_name -ne $env:AMD_RELEASE_TAG -or
+                [string]$draft.html_url -ne $releaseUrl -or
+                -not $draft.draft -or -not $draft.prerelease) {
+              throw 'The numeric release ID does not identify the exact prerelease draft created by this run.'
+            }
             if (@($draft.assets).Count -ne 0) { throw 'The new prerelease draft unexpectedly contains assets.' }
 
             foreach ($path in $publicPaths) {
