@@ -564,6 +564,142 @@ def test_runtime_settings_failure_rolls_back_authoritative_json_and_ui(
     window.close()
 
 
+def test_runtime_and_immediate_file_rollback_failure_recovers_on_restart(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _app()
+    monkeypatch.setattr("aruba_mini_dashboard.ui.main_window.QMessageBox.warning", lambda *args: None)
+
+    class DeferredRollbackStore(SettingsStore):
+        def begin_update(self, settings):
+            update = super().begin_update(settings)
+
+            class Wrapper:
+                def commit(self):
+                    return update.commit()
+
+                def rollback(self):
+                    raise OSError("simulated rollback write failure")
+
+            return Wrapper()
+
+    path = tmp_path / "settings.json"
+    seed = SettingsStore(path)
+    original = AppSettings.default()
+    original.polling.interval_seconds = 90
+    seed.save(original)
+    store = DeferredRollbackStore(path)
+
+    def fail_apply(_settings) -> None:
+        raise RuntimeError("simulated runtime apply failure")
+
+    window = MainWindow(
+        FakeCoordinator(),
+        original,
+        settings_store=store,
+        settings_apply_handler=fail_apply,
+    )
+    candidate = AppSettings.default()
+    candidate.polling.interval_seconds = 30
+
+    assert window.apply_settings(candidate) is False
+    assert window.settings.polling.interval_seconds == 90
+    # The candidate may still be the visible file, but the durable marker makes
+    # the next startup restore the exact authoritative original first.
+    assert SettingsStore(path).load().polling.interval_seconds == 90
+    window._quitting = True
+    window.close()
+
+
+def test_transactional_runtime_cleanup_commits_only_after_json_commit(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _app()
+    monkeypatch.setattr("aruba_mini_dashboard.ui.main_window.QMessageBox.warning", lambda *args: None)
+    events: list[str] = []
+
+    class OrderedStore(SettingsStore):
+        def begin_update(self, settings):
+            events.append("json-stage")
+            update = super().begin_update(settings)
+
+            class OrderedUpdate:
+                def commit(self):
+                    events.append("json-commit")
+                    update.commit()
+
+                def rollback(self):
+                    events.append("json-rollback")
+                    update.rollback()
+
+            return OrderedUpdate()
+
+    class RuntimeUpdate:
+        def commit(self):
+            events.append("runtime-commit")
+
+        def rollback(self):
+            events.append("runtime-rollback")
+
+    def stage_runtime(_settings):
+        events.append("runtime-stage")
+        return RuntimeUpdate()
+
+    store = OrderedStore(tmp_path / "settings.json")
+    original = AppSettings.default()
+    store.save(original)
+    window = MainWindow(
+        FakeCoordinator(),
+        original,
+        settings_store=store,
+        settings_apply_handler=stage_runtime,
+    )
+    candidate = AppSettings.default()
+    candidate.polling.interval_seconds = 30
+
+    assert window.apply_settings(candidate) is True
+    assert events[:4] == ["json-stage", "runtime-stage", "json-commit", "runtime-commit"]
+    assert store.load() == candidate
+    window._quitting = True
+    window.close()
+
+
+def test_runtime_cleanup_commit_failure_keeps_automatic_polling_paused(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _app()
+    monkeypatch.setattr("aruba_mini_dashboard.ui.main_window.QMessageBox.warning", lambda *args: None)
+
+    class FailingRuntimeUpdate:
+        def commit(self):
+            raise RuntimeError("injected cleanup failure")
+
+        def rollback(self):
+            raise AssertionError("JSON already committed; runtime must not roll back")
+
+    store = SettingsStore(tmp_path / "settings.json")
+    original = AppSettings.default()
+    store.save(original)
+    coordinator = FakeCoordinator()
+    window = MainWindow(
+        coordinator,
+        original,
+        settings_store=store,
+        settings_apply_handler=lambda _settings: FailingRuntimeUpdate(),
+    )
+    candidate = AppSettings.default()
+    candidate.polling.automatic_enabled = True
+
+    assert window.apply_settings(candidate) is True
+    assert coordinator.automatic is False
+    assert store.load().polling.automatic_enabled is True
+    window._quitting = True
+    window.close()
+
+
 def test_session_credential_mode_is_restored_and_requires_reentry_to_migrate() -> None:
     _app()
     service = CredentialService(persistent=SessionCredentialStore())

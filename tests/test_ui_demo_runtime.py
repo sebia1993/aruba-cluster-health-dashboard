@@ -4,7 +4,9 @@ import copy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from aruba_mini_dashboard.config import AppPaths, AppSettings
+import pytest
+
+from aruba_mini_dashboard.config import AppPaths, AppSettings, SettingsStore
 from aruba_mini_dashboard.credentials import CredentialService, SessionCredentialStore
 from aruba_mini_dashboard.demo import DEMO_STAGES, DemoPoller, demo_fixture_directory
 from aruba_mini_dashboard.logging_setup import setup_logging
@@ -80,6 +82,77 @@ def test_fixture_directory_resolves_source_tree() -> None:
     path = demo_fixture_directory()
     assert path.name == "fixtures"
     assert (path / "mm_show_switches_normal.txt").is_file()
+
+
+def test_runtime_prunes_stale_unregistered_inventory_before_restoring_it(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    storage = SQLiteStorage(paths)
+    old = datetime.now(timezone.utc) - timedelta(days=181)
+    registered = "192.0.2.11"
+    stale = "192.0.2.99"
+    for ip in (registered, stale):
+        storage.save_device_state(
+            ip,
+            {"ip": ip, "hostname": f"WLC-{ip.rsplit('.', 1)[-1]}"},
+            observed_at=old,
+            is_normal=True,
+        )
+        storage.save_mm_discovered_device(
+            ip,
+            hostname=f"WLC-{ip.rsplit('.', 1)[-1]}",
+            last_seen_at=old,
+        )
+    settings = AppSettings.default()
+    for member, ip in zip(settings.cluster.members, EXPECTED_MEMBERS, strict=True):
+        member.ip = ip
+
+    runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        storage,
+        setup_logging(paths),
+    )
+
+    assert set(storage.load_device_states()) == {registered}
+    assert set(runtime._last_devices) == {registered}
+    assert runtime.engine.dump_known_mm_devices() == {registered: "WLC-11"}
+    storage.close()
+
+
+def test_incomplete_settings_never_prune_recoverable_inventory_on_startup(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    storage = SQLiteStorage(paths)
+    stale = "192.0.2.99"
+    old = datetime.now(timezone.utc) - timedelta(days=181)
+    storage.save_device_state(
+        stale,
+        {"ip": stale, "hostname": "RECOVERABLE-WLC"},
+        observed_at=old,
+        is_normal=True,
+    )
+    storage.save_mm_discovered_device(
+        stale,
+        hostname="RECOVERABLE-WLC",
+        last_seen_at=old,
+    )
+
+    runtime = RuntimePoller(
+        AppSettings.default(),
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        storage,
+        setup_logging(paths),
+    )
+
+    assert stale in storage.load_device_states()
+    assert stale in runtime._last_devices
+    assert runtime.engine.dump_known_mm_devices()[stale] == "RECOVERABLE-WLC"
+    storage.close()
 
 
 def test_demo_members_are_always_derived_from_fixtures_not_configured_endpoints(tmp_path: Path) -> None:
@@ -241,6 +314,107 @@ def test_member_replacement_before_first_poll_flushes_restored_scope_state(
     reopened = SQLiteStorage(paths)
     assert reopened.get("192.0.2.12") is None
     reopened.close()
+
+
+def test_member_replacement_stage_keeps_durable_baseline_until_json_commit(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    settings = AppSettings.default()
+    for member, (ip, alias) in zip(settings.cluster.members, EXPECTED_MEMBERS.items()):
+        member.ip = ip
+        member.alias = alias
+    settings_store = SettingsStore(paths)
+    settings_store.save(settings)
+    storage = SQLiteStorage(paths)
+    baseline = ConnectionBaseline(
+        collector_ip="192.0.2.11",
+        member_ip="192.0.2.12",
+        display_value="Type-A",
+        normalized_value="type a",
+        observed_at=datetime(2026, 8, 11, 1, 0, tzinfo=timezone.utc),
+    )
+    storage.set(baseline)
+    runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        storage,
+        setup_logging(paths),
+    )
+    updated = copy.deepcopy(settings)
+    updated.cluster.members[1].ip = "192.0.2.99"
+    updated.cluster.members[1].alias = "WLC-NEW"
+
+    file_update = settings_store.begin_update(updated)
+    runtime_update = runtime.begin_settings_update(updated)
+    # A crash here restores the old JSON. The old SQLite authority must still
+    # exist because the destructive cleanup has not crossed the commit point.
+    assert storage.get("192.0.2.12") == baseline
+    assert SettingsStore(paths).load() == settings
+    runtime_update.rollback()
+    assert runtime.settings == settings
+    assert runtime.baseline_store.get("192.0.2.12") == baseline
+    assert storage.get("192.0.2.12") == baseline
+
+    # Repeat the normal two-phase path: JSON commits first, then the runtime
+    # cleanup becomes durable.
+    file_update = settings_store.begin_update(updated)
+    runtime_update = runtime.begin_settings_update(updated)
+    file_update.commit()
+    runtime_update.commit()
+    assert settings_store.load() == updated
+    assert storage.get("192.0.2.12") is None
+    storage.close()
+
+
+def test_failed_settings_stage_restores_shared_baseline_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    settings = AppSettings.default()
+    for member, (ip, alias) in zip(settings.cluster.members, EXPECTED_MEMBERS.items()):
+        member.ip = ip
+        member.alias = alias
+    storage = SQLiteStorage(paths)
+    baseline = ConnectionBaseline(
+        collector_ip="192.0.2.11",
+        member_ip="192.0.2.12",
+        display_value="Type-A",
+        normalized_value="type a",
+        observed_at=datetime(2026, 8, 11, 1, 0, tzinfo=timezone.utc),
+    )
+    storage.set(baseline)
+    runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        storage,
+        setup_logging(paths),
+    )
+    updated = copy.deepcopy(settings)
+    updated.cluster.members[1].ip = "192.0.2.99"
+    real_factory = runtime._create_incident_manager
+
+    def failing_factory(incidents=None):
+        manager = real_factory(incidents)
+
+        def fail_reconcile(*_args, **_kwargs):
+            raise RuntimeError("injected scope reconciliation failure")
+
+        manager.reconcile_monitoring_scope = fail_reconcile
+        return manager
+
+    monkeypatch.setattr(runtime, "_create_incident_manager", failing_factory)
+
+    with pytest.raises(RuntimeError, match="injected scope"):
+        runtime.begin_settings_update(updated)
+
+    assert runtime.settings == settings
+    assert runtime.baseline_store.get("192.0.2.12") == baseline
+    assert storage.get("192.0.2.12") == baseline
+    storage.close()
 
 
 def test_disabled_new_alert_waits_full_repeat_interval(tmp_path: Path) -> None:

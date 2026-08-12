@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -17,7 +18,12 @@ from aruba_mini_dashboard.models import (
     IncidentType,
     Severity,
 )
-from aruba_mini_dashboard.storage import SQLiteStorage, StorageBusyError, StorageCorruptError
+from aruba_mini_dashboard.storage import (
+    SCHEMA_VERSION,
+    SQLiteStorage,
+    StorageBusyError,
+    StorageCorruptError,
+)
 
 
 def make_paths(tmp_path: Path) -> AppPaths:
@@ -312,6 +318,31 @@ def test_corrupt_database_is_preserved(tmp_path: Path) -> None:
     assert paths.database.read_bytes() == b"not a sqlite database"
 
 
+def test_future_schema_is_preserved_and_initializing_connection_is_closed(
+    tmp_path: Path,
+) -> None:
+    paths = make_paths(tmp_path)
+    paths.database.parent.mkdir(parents=True)
+    future = sqlite3.connect(paths.database)
+    future.execute("PRAGMA journal_mode=DELETE")
+    future.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
+    future.close()
+    original_hash = hashlib.sha256(paths.database.read_bytes()).hexdigest()
+    storage = SQLiteStorage(paths, initialize=False)
+
+    with pytest.raises(StorageCorruptError, match="현재 프로그램보다 새로운 데이터베이스"):
+        storage.initialize()
+
+    assert storage._connection is None
+    assert hashlib.sha256(paths.database.read_bytes()).hexdigest() == original_hash
+    reopened = sqlite3.connect(paths.database)
+    try:
+        assert reopened.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION + 1
+        assert str(reopened.execute("PRAGMA journal_mode").fetchone()[0]).casefold() == "delete"
+    finally:
+        reopened.close()
+
+
 def test_external_sqlite_write_lock_has_bounded_retry(tmp_path: Path) -> None:
     paths = make_paths(tmp_path)
     storage = SQLiteStorage(paths, busy_timeout_ms=5, lock_retries=1)
@@ -448,6 +479,125 @@ def test_history_retention_preserves_active_incident_and_bounds_closed_history(
     ) == 0
     assert removed["connection_changes"] == 4
     assert storage.load_pending_connection_changes() == [pending]
+    storage.close()
+
+
+def _seed_inventory_row(
+    storage: SQLiteStorage,
+    ip: str,
+    observed_at: datetime | str,
+) -> None:
+    storage.save_device_state(
+        ip,
+        {"ip": ip, "state": "normal"},
+        observed_at=observed_at,
+        is_normal=True,
+    )
+    storage.save_mm_discovered_device(
+        ip,
+        hostname=f"WLC-{ip.rsplit('.', 1)[-1]}",
+        last_seen_at=observed_at,
+    )
+
+
+def test_device_inventory_retention_prunes_only_stale_unprotected_ips(
+    tmp_path: Path,
+) -> None:
+    storage = SQLiteStorage(make_paths(tmp_path))
+    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    old = now - timedelta(days=181)
+    recent = now - timedelta(days=1)
+    stale = "192.0.2.20"
+    registered = "192.0.2.21"
+    active = "192.0.2.22"
+    pending_ip = "192.0.2.23"
+    malformed = "192.0.2.24"
+    current = "192.0.2.25"
+    for ip, observed_at in (
+        (stale, old),
+        (registered, old),
+        (active, old),
+        (pending_ip, old),
+        (malformed, "not-a-timestamp"),
+        (current, recent),
+    ):
+        _seed_inventory_row(storage, ip, observed_at)
+    storage.upsert_incident(
+        "active-inventory",
+        active,
+        "mm_down",
+        "down",
+        first_detected_at=old,
+        last_seen_at=old,
+        active=True,
+    )
+    pending = ConnectionChange(
+        collector_ip="192.0.2.11",
+        member_ip=pending_ip,
+        previous_value="Type-A",
+        current_value="Type-B",
+        first_detected_at=old,
+        last_confirmed_at=old,
+    )
+    storage.save_connection_change(pending)
+
+    removed = storage.maintain_device_inventory({registered}, now=now, force=True)
+
+    assert removed == {stale}
+    for table in ("device_states", "device_normal_states", "mm_discovered_devices"):
+        remaining = {
+            row[0]
+            for row in storage._read(
+                lambda db, table=table: db.execute(f"SELECT ip FROM {table}").fetchall()
+            )
+        }
+        assert stale not in remaining
+        assert {registered, active, pending_ip, malformed, current} <= remaining
+    storage.close()
+
+
+def test_device_inventory_cap_is_deterministic_and_protected_rows_do_not_count(
+    tmp_path: Path,
+) -> None:
+    storage = SQLiteStorage(make_paths(tmp_path))
+    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    ips = [f"192.0.2.{number}" for number in range(30, 35)]
+    for offset, ip in enumerate(ips):
+        _seed_inventory_row(storage, ip, now - timedelta(days=offset + 1))
+
+    removed = storage.maintain_device_inventory(
+        {ips[-1]}, now=now, max_rows=2, force=True
+    )
+
+    assert removed == {ips[2], ips[3]}
+    assert set(storage.load_device_states()) == {ips[0], ips[1], ips[-1]}
+    storage.close()
+
+
+def test_device_inventory_cleanup_is_atomic_and_daily_bounded(tmp_path: Path) -> None:
+    storage = SQLiteStorage(make_paths(tmp_path))
+    now = datetime(2026, 8, 12, tzinfo=timezone.utc)
+    old = now - timedelta(days=181)
+    first = "192.0.2.40"
+    second = "192.0.2.41"
+    _seed_inventory_row(storage, first, old)
+    storage._write(
+        lambda db: db.execute(
+            f"""CREATE TRIGGER block_inventory_delete BEFORE DELETE ON device_states
+                WHEN OLD.ip='{first}' BEGIN SELECT RAISE(ABORT, 'blocked'); END"""
+        )
+    )
+    with pytest.raises(Exception):
+        storage.maintain_device_inventory(set(), now=now, force=True)
+    assert first in storage.load_device_states()
+    assert first in {row["ip"] for row in storage.load_mm_discovered_devices()}
+    storage._write(lambda db: db.execute("DROP TRIGGER block_inventory_delete"))
+    assert storage.maintain_device_inventory(set(), now=now, force=True) == {first}
+
+    _seed_inventory_row(storage, second, old)
+    assert storage.maintain_device_inventory(set(), now=now) == set()
+    assert second in storage.load_device_states()
+    assert storage.maintain_device_inventory(set(), now=now, force=True) == {second}
     storage.close()
 
 

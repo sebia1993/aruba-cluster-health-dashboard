@@ -6,10 +6,11 @@ import logging
 import os
 import re
 import threading
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 from .config import AppPaths, default_app_paths
 
@@ -25,9 +26,19 @@ PERFORMANCE_LOG_BACKUP_COUNT = 2
 class SecretRedactor:
     def __init__(self, values: Iterable[str] = ()) -> None:
         self._lock = threading.RLock()
+        # ``_values`` contains process-lifetime sentinels supplied by logging
+        # setup or legacy call sites. Runtime credentials use the replaceable
+        # and scoped sets below so password changes cannot grow this object for
+        # the lifetime of the application.
         self._values: set[str] = set()
+        self._current_values: set[str] = set()
+        self._scoped_values: dict[object, set[str]] = {}
         for value in values:
             self.add(value)
+
+    @staticmethod
+    def _normalize(values: Iterable[str]) -> set[str]:
+        return {candidate for value in values if (candidate := str(value))}
 
     def add(self, value: str) -> None:
         candidate = str(value)
@@ -39,11 +50,54 @@ class SecretRedactor:
         with self._lock:
             self._values.discard(str(value))
 
+    def replace_current(self, values: Iterable[str]) -> None:
+        """Atomically replace the credentials used by normal polling.
+
+        Callers keep any concurrently active one-off operation protected with
+        :meth:`scoped`. This split bounds historical password retention while
+        ensuring an in-flight connection test is never exposed by a poll-time
+        replacement.
+        """
+
+        normalized = self._normalize(values)
+        with self._lock:
+            self._current_values = normalized
+
+    @contextmanager
+    def scoped(self, values: Iterable[str]) -> Iterator[None]:
+        """Redact values only for the lifetime of an active operation."""
+
+        token = object()
+        normalized = self._normalize(values)
+        if normalized:
+            with self._lock:
+                self._scoped_values[token] = normalized
+        try:
+            yield
+        finally:
+            if normalized:
+                with self._lock:
+                    self._scoped_values.pop(token, None)
+
+    @property
+    def tracked_value_count(self) -> int:
+        """Return the number of distinct values currently protected."""
+
+        with self._lock:
+            values = self._values | self._current_values
+            for scoped_values in self._scoped_values.values():
+                values.update(scoped_values)
+            return len(values)
+
     def redact(self, text: object) -> str:
         result = str(text)
         with self._lock:
-            values = sorted(self._values, key=len, reverse=True)
-        for value in values:
+            values = set(self._values)
+            values.update(self._current_values)
+            for scoped_values in self._scoped_values.values():
+                values.update(scoped_values)
+            ordered_values = sorted(values, key=len, reverse=True)
+        for value in ordered_values:
             result = result.replace(value, "[REDACTED]")
         # Defense in depth for accidental key/value logging.  Runtime code
         # must still register actual secrets because free-form exception text
@@ -86,6 +140,16 @@ class LoggingContext:
 
     def register_secret(self, value: str) -> None:
         self.redactor.add(value)
+
+    def replace_current_secrets(self, values: Iterable[str]) -> None:
+        """Replace the bounded set of credentials used by normal polling."""
+
+        self.redactor.replace_current(values)
+
+    def scoped_secrets(self, values: Iterable[str]) -> AbstractContextManager[None]:
+        """Protect transient credentials until the active operation exits."""
+
+        return self.redactor.scoped(values)
 
     def set_ssh_debug_enabled(self, enabled: bool) -> None:
         """Enable or disable the sensitive diagnostic log at runtime.

@@ -40,6 +40,11 @@ def test_release_workflow_uses_pinned_actions_and_minimal_permissions() -> None:
     assert text.count("contents: write") == 1
     assert "id-token: write" not in text
     assert "actions: write" not in text
+    assert "ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION" not in text
+    assert text.count("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1") == 3
+    assert text.count("actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97") == 3
+    assert text.count("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a") == 1
+    assert text.count("actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c") == 2
 
 
 def test_release_workflow_pins_python_and_precreates_venv_before_build() -> None:
@@ -107,6 +112,24 @@ def test_release_workflow_job_order_and_asset_contract() -> None:
     assert jobs["release"]["permissions"] == {"contents": "write"}
 
     assert "Upload MIT-approved public repository release handoff" in text
+    upload_step = next(
+        step
+        for step in jobs["package"]["steps"]
+        if step.get("name") == "Upload MIT-approved public repository release handoff"
+    )
+    assert upload_step["with"]["archive"] == "true"
+    download_steps = [
+        step
+        for job_name in ("verify-handoff", "release")
+        for step in jobs[job_name]["steps"]
+        if step.get("name") in {
+            "Download the release handoff",
+            "Download the independently verified handoff",
+        }
+    ]
+    assert len(download_steps) == 2
+    assert all(step["with"]["skip-decompress"] == "false" for step in download_steps)
+    assert all(step["with"]["digest-mismatch"] == "error" for step in download_steps)
     assert "$publicNames = @($env:AMD_ZIP_NAME, $env:AMD_CHECKSUM_NAME) | Sort-Object" in text
     assert "($remoteNames -join '|') -ne ($publicNames -join '|')" in text
     assert text.index("Reverify the exact assets before GitHub mutation") < text.index("-F draft=false")
@@ -203,6 +226,9 @@ def test_release_process_documents_mit_publication_and_field_boundaries() -> Non
     for mode in ("build-only", "draft-prerelease", "publish-prerelease"):
         assert f"`{mode}`" in text
     assert "Actions artifact로 보관" in text
+    assert "Node.js 24 기반 버전" in text
+    assert "runner `2.327.1` 이상" in text
+    assert "구형 Node 런타임을 강제로 허용" in text
     assert "annotated tag, workflow가 시작된 SHA, 현재 `origin/main` HEAD" in text
     assert "versioned onedir ZIP과 그 ZIP의 `.sha256` 파일 두 개" in text
     assert "기존 Release와 태그는 자동 삭제하지 않습니다" in text

@@ -36,6 +36,8 @@ Actions에서 재현 가능하게 빌드하고, 검증된 자산만 GitHub Prere
 - `v0.3.0`: 첫 실행 설정 안내, 3개 탭 설정 단순화, 도움말, 저사양 모드,
   선택적 성능 로그와 내부 성능 최적화를 추가한 Prerelease입니다. 감지 규칙과
   결과 정확성은 유지하며 새 annotated tag와 새 Release로만 게시합니다.
+- `v0.3.1`: 단일 실행 보호, 오래된 미등록 장비 인벤토리 보관 한도, 설정 파일·
+  비밀값 메모리 경계와 Node.js 24 기반 Actions를 보강한 patch Prerelease입니다.
 
 ## 로컬 검증
 
@@ -43,21 +45,21 @@ CPython 3.11.9 x64와 Windows PowerShell 5.1 환경에서 실행합니다.
 
 ```powershell
 .\scripts\run_tests.ps1
-.\scripts\package_release.ps1 -Version 0.3.0
+.\scripts\package_release.ps1 -Version 0.3.1
 ```
 
 성공하면 `dist\release`에는 다음 두 파일만 생성됩니다.
 
 ```text
-ArubaMiniDashboard-v0.3.0-windows-x64.zip
-ArubaMiniDashboard-v0.3.0-windows-x64.zip.sha256
+ArubaMiniDashboard-v0.3.1-windows-x64.zip
+ArubaMiniDashboard-v0.3.1-windows-x64.zip.sha256
 ```
 
 다른 위치로 전달된 자산은 다시 빌드하지 않고 다음과 같이 검증할 수 있습니다.
 
 ```powershell
 .\scripts\package_release.ps1 `
-  -Version 0.3.0 `
+  -Version 0.3.1 `
   -OutputDirectory artifacts\release `
   -VerifyOnly
 ```
@@ -77,8 +79,8 @@ Qt exact inventory와 한국어 번역 2개, PySide6/shiboken6/Paramiko/scp 외�
 ```powershell
 git switch main
 git pull --ff-only
-git tag -a v0.3.0 -m "Aruba Mini Dashboard v0.3.0"
-git push origin v0.3.0
+git tag -a v0.3.1 -m "Aruba Mini Dashboard v0.3.1"
+git push origin v0.3.1
 ```
 
 태그가 잘못된 커밋을 가리키면 Release workflow를 실행하지 않습니다. 게시된
@@ -89,7 +91,12 @@ git push origin v0.3.0
 GitHub의 **Actions → Build and publish Windows prerelease → Run workflow**에서
 반드시 `main` 브랜치를 선택합니다. 입력값은 다음과 같습니다.
 
-- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.3.0`
+Workflow가 사용하는 공식 Actions는 Node.js 24 기반 버전의 검토된 commit SHA로
+고정되어 있습니다. GitHub-hosted runner는 이 버전을 지원하지만, self-hosted runner를
+사용하려면 runner `2.327.1` 이상이 필요합니다. 구형 Node 런타임을 강제로 허용하는
+환경 변수로 우회하지 않습니다.
+
+- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.3.1`
 - `release_mode`:
   - `build-only`: 빌드·검증 후 Actions artifact만 생성
   - `draft-prerelease`: 검증된 두 자산을 새 Prerelease Draft에 업로드하고 정지

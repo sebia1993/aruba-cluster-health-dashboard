@@ -10,6 +10,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import hashlib
+import logging
 import os
 import tempfile
 from dataclasses import asdict, dataclass, field
@@ -20,10 +21,23 @@ from typing import Any, Mapping
 APP_DIRECTORY_NAME = "ArubaMiniDashboard"
 SETTINGS_SCHEMA_VERSION = 1
 LOW_SPEC_MIN_INTERVAL_SECONDS = 120
+MAX_SETTINGS_FILE_BYTES = 256 * 1024
+MAX_SETTINGS_JSON_DEPTH = 12
+MAX_SETTINGS_OBJECT_MEMBERS = 64
+MAX_SETTINGS_ARRAY_ITEMS = 128
+MAX_SETTINGS_TOTAL_NODES = 1_024
+MAX_SETTINGS_UPDATE_MARKER_BYTES = 1_024
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class SettingsError(RuntimeError):
     """Base class for actionable settings failures."""
+
+
+class AppPathError(SettingsError):
+    """The per-user application data directories could not be prepared."""
 
 
 class SettingsCorruptError(SettingsError):
@@ -71,10 +85,21 @@ class AppPaths:
         )
 
     def ensure(self) -> "AppPaths":
-        self.root.mkdir(parents=True, exist_ok=True)
-        self.settings.parent.mkdir(parents=True, exist_ok=True)
-        self.logs.mkdir(parents=True, exist_ok=True)
-        self.known_hosts.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # Keep the order deterministic so a failure can be diagnosed while
+            # leaving every directory that was already created usable.
+            for directory in dict.fromkeys(
+                (self.root, self.settings.parent, self.logs, self.known_hosts.parent)
+            ):
+                directory.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            # Do not echo the operator's profile or custom data-root path into
+            # an early-startup dialog. The original exception remains chained
+            # for a local debugger while the UI receives an actionable message.
+            raise AppPathError(
+                "프로그램 데이터 폴더를 준비하지 못했습니다. "
+                "폴더 쓰기 권한과 디스크 상태를 확인한 뒤 다시 실행하세요."
+            ) from exc
         return self
 
 
@@ -201,12 +226,19 @@ class AppSettings:
         if not isinstance(value, Mapping):
             raise SettingsCorruptError("설정 루트는 JSON 객체여야 합니다.")
         try:
+            _validate_settings_payload_shape(value)
             _reject_secret_fields(value)
             mm = _mapping(value.get("mobility_master", {}), "mobility_master")
             cluster = _mapping(value.get("cluster", {}), "cluster")
             members_raw = cluster.get("members", [])
             if not isinstance(members_raw, list):
                 raise TypeError("cluster.members must be a list")
+            if len(members_raw) > 4:
+                # Four members is the only schema-valid shape. Reject before
+                # constructing arbitrary numbers of dataclass instances.
+                raise SettingsCorruptError(
+                    "클러스터 구성원 설정은 최대 4개까지만 허용됩니다."
+                )
             members = [ClusterMemberSettings(**_mapping(row, "cluster.members[]")) for row in members_raw]
             defaults = cls.default()
             settings = cls(
@@ -349,6 +381,16 @@ def settings_fingerprint(settings: AppSettings) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _read_bounded_bytes(path: Path, maximum_bytes: int) -> bytes:
+    """Read an untrusted local state file without an unbounded allocation."""
+
+    with path.open("rb") as handle:
+        encoded = handle.read(maximum_bytes + 1)
+    if len(encoded) > maximum_bytes:
+        raise ValueError("file exceeds the allowed size")
+    return encoded
+
+
 class SettingsStore:
     """Atomic JSON store for non-secret application settings."""
 
@@ -359,14 +401,24 @@ class SettingsStore:
             self.path = default_app_paths().settings
         else:
             self.path = Path(path_or_paths)
+        self._rollback_path = self.path.with_name(f".{self.path.name}.rollback")
+        self._update_marker_path = self.path.with_name(f".{self.path.name}.update-pending")
 
     def load(self) -> AppSettings:
+        self._recover_interrupted_update()
         if not self.path.exists():
             return AppSettings.default()
         try:
-            raw = self.path.read_text(encoding="utf-8")
+            # Read at most one byte beyond the limit. This remains bounded even
+            # if the file changes between an earlier stat and the actual read.
+            try:
+                encoded = _read_bounded_bytes(self.path, MAX_SETTINGS_FILE_BYTES)
+            except ValueError:
+                raise SettingsCorruptError(
+                    "설정 파일이 허용 크기를 초과했습니다. 원본을 보존한 채 설정을 다시 확인하세요."
+                )
+            raw = encoded.decode("utf-8")
             payload = json.loads(raw)
-            _reject_secret_fields(payload)
             settings = AppSettings.from_dict(payload)
             settings.validate()
             return settings
@@ -385,32 +437,178 @@ class SettingsStore:
             ) from exc
 
     def save(self, settings: AppSettings) -> Path:
+        self._recover_interrupted_update()
+        return self._write_settings(settings)
+
+    def begin_update(self, settings: AppSettings) -> "SettingsUpdate":
+        """Stage a settings file update that is committed after runtime apply.
+
+        The rollback copy contains only the already non-secret JSON settings.
+        A crash or a second persistence failure leaves the marker in place, so
+        the next :meth:`load` restores the exact previous file before parsing.
+        """
+
+        self._recover_interrupted_update()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        original_exists = self.path.exists()
+        if original_exists:
+            try:
+                original = _read_bounded_bytes(self.path, MAX_SETTINGS_FILE_BYTES)
+            except ValueError as exc:
+                raise SettingsCorruptError(
+                    "기존 설정 파일이 허용 크기를 초과해 안전하게 갱신할 수 없습니다."
+                ) from exc
+            except OSError as exc:
+                raise SettingsError("기존 설정을 복구용으로 보존하지 못했습니다.") from exc
+            self._atomic_write_bytes(self._rollback_path, original)
+        marker = json.dumps(
+            {"version": 1, "original_exists": original_exists},
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        self._atomic_write_bytes(self._update_marker_path, marker)
+        try:
+            self._write_settings(settings)
+        except Exception:
+            # Leave the marker/rollback pair intact. The next load, or an
+            # explicit rollback below, restores the authoritative old file.
+            raise
+        return SettingsUpdate(self, original_exists=original_exists)
+
+    def _write_settings(self, settings: AppSettings) -> Path:
         settings.validate()
         payload = settings.to_dict()
         _reject_secret_fields(payload)
         encoded = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if len(encoded) > MAX_SETTINGS_FILE_BYTES:
+            raise SettingsValidationError(
+                ["설정 내용이 저장 가능한 최대 크기를 초과했습니다."]
+            )
+        self._atomic_write_bytes(self.path, encoded)
+        return self.path
+
+    def _recover_interrupted_update(self) -> None:
+        if not self._update_marker_path.exists():
+            self._remove_orphan_rollback()
+            return
+        try:
+            marker_raw = _read_bounded_bytes(
+                self._update_marker_path,
+                MAX_SETTINGS_UPDATE_MARKER_BYTES,
+            )
+            marker = json.loads(marker_raw.decode("ascii"))
+            if (
+                type(marker) is not dict
+                or type(marker.get("version")) is not int
+                or marker.get("version") != 1
+                or type(marker.get("original_exists")) is not bool
+            ):
+                raise ValueError("invalid marker")
+            if marker["original_exists"]:
+                original = _read_bounded_bytes(
+                    self._rollback_path,
+                    MAX_SETTINGS_FILE_BYTES,
+                )
+                self._atomic_write_bytes(self.path, original)
+            else:
+                self.path.unlink(missing_ok=True)
+            self._update_marker_path.unlink()
+            self._remove_orphan_rollback()
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            raise SettingsCorruptError(
+                "중단된 설정 변경을 복구하지 못했습니다. 원본과 복구 파일을 보존합니다."
+            ) from exc
+
+    def _remove_orphan_rollback(self) -> None:
+        """Remove a rollback copy after the durable commit marker is gone."""
+
+        try:
+            self._rollback_path.unlink(missing_ok=True)
+        except OSError:
+            # It no longer has recovery authority. A later load retries the
+            # cleanup without making otherwise valid settings unavailable.
+            LOGGER.warning("Committed settings rollback copy cleanup deferred", exc_info=True)
+
+    @staticmethod
+    def _atomic_write_bytes(destination: Path, encoded: bytes) -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
         temporary: Path | None = None
         try:
-            descriptor, name = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent)
+            descriptor, name = tempfile.mkstemp(
+                prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+            )
             temporary = Path(name)
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(encoded)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, self.path)
-            return self.path
+            os.replace(temporary, destination)
         except OSError as exc:
-            raise SettingsError(f"설정 파일을 안전하게 저장하지 못했습니다: {self.path}") from exc
+            raise SettingsError(f"설정 파일을 안전하게 저장하지 못했습니다: {destination}") from exc
         finally:
             if temporary is not None and temporary.exists():
                 temporary.unlink(missing_ok=True)
+
+
+class SettingsUpdate:
+    """Durable settings update awaiting cross-layer commit or rollback."""
+
+    def __init__(self, store: SettingsStore, *, original_exists: bool) -> None:
+        self._store = store
+        self._original_exists = bool(original_exists)
+        self._finished = False
+
+    def commit(self) -> None:
+        if self._finished:
+            return
+        try:
+            self._store._update_marker_path.unlink()
+        except OSError as exc:
+            raise SettingsError("설정 변경 확정을 기록하지 못했습니다.") from exc
+        self._store._remove_orphan_rollback()
+        self._finished = True
+
+    def rollback(self) -> None:
+        if self._finished:
+            return
+        self._store._recover_interrupted_update()
+        self._finished = True
 
 
 def _mapping(value: object, label: str) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise TypeError(f"{label} must be an object")
     return dict(value)
+
+
+def _validate_settings_payload_shape(value: object) -> None:
+    """Bound traversal of untrusted JSON before recursive/schema processing."""
+
+    stack: list[tuple[object, int]] = [(value, 0)]
+    seen_containers: set[int] = set()
+    total_nodes = 0
+    while stack:
+        candidate, depth = stack.pop()
+        total_nodes += 1
+        if total_nodes > MAX_SETTINGS_TOTAL_NODES or depth > MAX_SETTINGS_JSON_DEPTH:
+            raise SettingsCorruptError("설정 JSON 구조가 허용 범위를 초과했습니다.")
+        if isinstance(candidate, Mapping):
+            identity = id(candidate)
+            if identity in seen_containers or len(candidate) > MAX_SETTINGS_OBJECT_MEMBERS:
+                raise SettingsCorruptError("설정 JSON 객체 구조가 허용 범위를 초과했습니다.")
+            seen_containers.add(identity)
+            for key, nested in candidate.items():
+                if type(key) is not str:
+                    raise SettingsCorruptError("설정 JSON 객체 키 형식이 올바르지 않습니다.")
+                stack.append((nested, depth + 1))
+        elif isinstance(candidate, list):
+            identity = id(candidate)
+            if identity in seen_containers or len(candidate) > MAX_SETTINGS_ARRAY_ITEMS:
+                raise SettingsCorruptError("설정 JSON 배열 구조가 허용 범위를 초과했습니다.")
+            seen_containers.add(identity)
+            stack.extend((nested, depth + 1) for nested in candidate)
+        elif candidate is not None and type(candidate) not in {str, int, float, bool}:
+            raise SettingsCorruptError("설정 JSON 값 형식이 올바르지 않습니다.")
 
 
 def _bounded(errors: list[str], label: str, value: object, minimum: int, maximum: int) -> None:

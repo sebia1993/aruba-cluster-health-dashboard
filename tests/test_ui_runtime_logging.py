@@ -115,7 +115,7 @@ def test_smoke_output_file_works_without_console(monkeypatch, tmp_path: Path) ->
         assert "WIN32CRED_OK" in smoke_markers
 
 
-def test_ui_smoke_creates_qt_application_without_runtime_state(
+def test_ui_smoke_runs_dashboard_worker_and_cleans_up_without_runtime_state(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -125,7 +125,9 @@ def test_ui_smoke_creates_qt_application_without_runtime_state(
     from aruba_mini_dashboard.main import main
 
     assert main(["--ui-smoke", "--smoke-output", str(marker)]) == 0
-    assert marker.read_text(encoding="utf-8") == "WINDOWS_QT_UI_OK\n"
+    assert marker.read_text(encoding="utf-8") == (
+        "WINDOWS_QT_UI_OK\nWINDOWS_LIFECYCLE_OK\n"
+    )
     assert not (tmp_path / "must-not-exist").exists()
 
 

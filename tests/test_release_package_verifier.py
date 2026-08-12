@@ -312,6 +312,9 @@ def test_standalone_executable_without_one_file_flag_is_not_a_complete_release(
         ("known_hosts", "known_hosts"),
         ("known_hosts.old", "known_hosts"),
         ("settings.json", "runtime settings"),
+        (".settings.json.rollback", "runtime settings"),
+        (".settings.json.update-pending", "runtime settings"),
+        (".aruba-mini-dashboard.lock", "runtime instance lock"),
         ("config.json", "runtime configuration"),
         ("app.db", "database"),
         ("app.sqlite3.backup", "database"),
@@ -680,7 +683,10 @@ def test_smoke_sanitizes_python_environment_and_requires_markers(
         sentinel = Path(command[command.index("--smoke-output") + 1])
         if "--ui-smoke" in command:
             captured["ui_env"] = kwargs["env"]
-            sentinel.write_text("WINDOWS_QT_UI_OK\n", encoding="utf-8")
+            sentinel.write_text(
+                "WINDOWS_QT_UI_OK\nWINDOWS_LIFECYCLE_OK\n",
+                encoding="utf-8",
+            )
         else:
             captured["command"] = command
             captured["env"] = kwargs["env"]
@@ -702,6 +708,23 @@ def test_smoke_sanitizes_python_environment_and_requires_markers(
         ui_env = captured["ui_env"]
         assert isinstance(ui_env, dict)
         assert "QT_QPA_PLATFORM" not in ui_env
+
+
+def test_windows_ui_smoke_requires_graceful_lifecycle_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / f"{NAME}.exe"
+    executable.write_bytes(b"fake")
+
+    def old_widget_only_smoke(command: list[str], **kwargs: object) -> SimpleNamespace:
+        del kwargs
+        sentinel = Path(command[command.index("--smoke-output") + 1])
+        sentinel.write_text("WINDOWS_QT_UI_OK\n", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(verifier.subprocess, "run", old_widget_only_smoke)
+    with pytest.raises(SystemExit, match="WINDOWS_LIFECYCLE_OK"):
+        verifier._run_windows_ui_smoke(executable)
 
 
 def test_smoke_timeout_and_missing_markers_fail_cleanly(

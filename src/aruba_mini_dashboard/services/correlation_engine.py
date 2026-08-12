@@ -132,6 +132,20 @@ class CorrelationEngine:
     def dump_known_mm_devices(self) -> dict[str, str | None]:
         return dict(self._known_mm_devices)
 
+    def forget_known_mm_devices(self, ips: Iterable[str]) -> set[str]:
+        """Forget pruned informational MM inventory outside monitoring scope."""
+
+        protected = set(self._monitoring_scope_ips)
+        removed: set[str] = set()
+        for raw_ip in ips:
+            ip = str(raw_ip)
+            if ip in protected:
+                continue
+            if ip in self._known_mm_devices:
+                del self._known_mm_devices[ip]
+                removed.add(ip)
+        return removed
+
     def pending_connection_changes(self) -> tuple[ConnectionChange, ...]:
         return tuple(
             self._pending_connection_changes[member_ip]
