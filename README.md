@@ -171,6 +171,9 @@ SQLite의 활성 장애와 확인 대기 중인 상태는 보관 한도 때문�
 않습니다. 종료된 장애, 일반 사건, 확인 완료 Connection-Type 변화와 Failover 이력은 하루에 최대 한 번 정리하며,
 각 테이블에서 최근 180일 이내이면서 최대 10,000건만 유지합니다. SQLite
 `VACUUM`을 자동 실행하지 않아 정리 직후 파일 크기가 바로 줄지 않을 수 있습니다.
+MM에서 과거에 발견한 미등록 장비의 snapshot도 같은 180일·10,000개 한도로
+정리합니다. 현재 등록된 4대, 이번 점검에서 실제 관측된 장비, 활성 사건과 확인
+대기 중인 Connection-Type 변화는 이 정리에서 항상 보호됩니다.
 SQLite가 다른 작업에 잠긴 경우 UI 경로의 대기 시간은 짧게 제한하고, 저장하지
 못한 운영 상태는 메모리에 유지한 뒤 다음 점검에서 다시 저장합니다.
 
@@ -190,6 +193,10 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m aruba_mini_dashboard.main
 ```
 
+같은 데이터 경로에서는 대시보드를 한 번만 실행할 수 있습니다. 두 번째 실행은
+운영 SQLite나 장비 점검을 시작하기 전에 안내 후 종료됩니다. 비정상 종료로 남은
+잠금 파일은 소유 프로세스가 없음을 확인한 뒤 자동 복구합니다.
+
 ## Demo 모드
 
 Demo는 운영 설정·자격 증명·운영 SQLite를 사용하지 않고, `tests\fixtures`를
@@ -207,6 +214,10 @@ Demo는 운영 설정·자격 증명·운영 SQLite를 사용하지 않고, `tes
 ```powershell
 .\ArubaMiniDashboard.exe --demo
 ```
+
+Demo도 로그와 알림 영역 UI를 공유하므로 같은 데이터 경로의 일반 실행과 동시에
+열 수 없습니다. 배포 검증용 `--smoke`와 `--ui-smoke`는 운영 데이터 경로를 만들거나
+단일 실행 잠금을 사용하지 않습니다.
 
 ## 테스트
 
@@ -263,7 +274,7 @@ Python 설치가 필요하지 않도록 구성되어 있습니다.
 생성합니다.
 
 ```powershell
-.\scripts\package_release.ps1 -Version 0.3.0
+.\scripts\package_release.ps1 -Version 0.3.1
 ```
 
 기존 태그나 Release 자산을 덮어쓰지 않는 상세 절차는

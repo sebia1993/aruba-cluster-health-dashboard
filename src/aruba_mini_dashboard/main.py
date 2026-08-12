@@ -15,8 +15,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QThreadPool, QTimer
-from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
+from PySide6.QtCore import QLockFile, QThreadPool, QTimer
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .collectors.base import (
     SHOW_CLIENT_DISTRIBUTION,
@@ -37,6 +37,7 @@ from .collectors.ssh_host_keys import (
     scan_ssh_host_key,
 )
 from .config import (
+    AppPathError,
     AppPaths,
     AppSettings,
     SettingsError,
@@ -72,6 +73,60 @@ from .ui.main_window import MainWindow
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+_INSTANCE_LOCK_FILENAME = ".aruba-mini-dashboard.lock"
+_INSTANCE_LOCK_STALE_TIME_MS = 30_000
+
+
+class InstanceAlreadyRunningError(RuntimeError):
+    """Another live process owns this data root."""
+
+
+class InstanceLockUnavailableError(RuntimeError):
+    """The per-data-root lock could not be created safely."""
+
+
+def _acquire_instance_lock(paths: AppPaths) -> QLockFile:
+    """Acquire the process guard before settings or SQLite are opened.
+
+    QLockFile records the owning PID and application identity and removes a
+    dead owner's stale file during ``tryLock``. Its OS-level behavior also
+    releases ownership after a crash, without another runtime dependency.
+    """
+
+    lock = QLockFile(str(paths.root / _INSTANCE_LOCK_FILENAME))
+    lock.setStaleLockTime(_INSTANCE_LOCK_STALE_TIME_MS)
+    if lock.tryLock(0):
+        return lock
+    if lock.error() == QLockFile.LockError.LockFailedError:
+        raise InstanceAlreadyRunningError(
+            "이 데이터 폴더를 사용하는 대시보드가 이미 실행 중입니다. "
+            "작업 표시줄 또는 알림 영역에서 기존 창을 열어 주세요."
+        )
+    raise InstanceLockUnavailableError(
+        "단일 실행 보호 파일을 만들 수 없습니다. "
+        "데이터 폴더 쓰기 권한과 보안 소프트웨어 차단 여부를 확인하세요."
+    )
+
+
+def _report_early_startup_issue(title: str, message: str, *, critical: bool) -> None:
+    """Report an actionable, pre-logging startup result to GUI and stderr."""
+
+    if sys.stderr is not None:
+        try:
+            print(f"{title}: {message}", file=sys.stderr, flush=True)
+        except (OSError, UnicodeError):
+            LOGGER.debug("Early startup stderr notice unavailable", exc_info=True)
+    try:
+        if critical:
+            QMessageBox.critical(None, title, message)
+        else:
+            QMessageBox.information(None, title, message)
+    except Exception:
+        # stderr above is the non-GUI fallback for headless or damaged Qt
+        # environments. No shared state has been opened at this point.
+        LOGGER.debug("Early startup GUI notice unavailable", exc_info=True)
 
 
 _PREFERENCE_PATHS: dict[str, tuple[str, str]] = {
@@ -212,6 +267,26 @@ class CachedBaselineStore:
             self.discard(member_ip)
         return removed
 
+    def snapshot_state(
+        self,
+    ) -> tuple[dict[str, ConnectionBaseline], dict[str, ConnectionBaseline], set[str]]:
+        """Capture the small in-memory cache for a reversible settings stage."""
+
+        return dict(self._values), dict(self._dirty), set(self._removed)
+
+    def restore_state(
+        self,
+        state: tuple[
+            dict[str, ConnectionBaseline],
+            dict[str, ConnectionBaseline],
+            set[str],
+        ],
+    ) -> None:
+        values, dirty, removed = state
+        self._values = dict(values)
+        self._dirty = dict(dirty)
+        self._removed = set(removed)
+
     def flush(
         self,
         changes: list[Any],
@@ -256,6 +331,65 @@ class CachedBaselineStore:
         self._removed.difference_update(removed)
 
 
+class RuntimeSettingsUpdate:
+    """In-memory settings stage committed only after authoritative JSON."""
+
+    def __init__(
+        self,
+        runtime: "RuntimePoller",
+        *,
+        previous: tuple[Any, Any, Any, Any],
+        baseline_state: tuple[
+            dict[str, ConnectionBaseline],
+            dict[str, ConnectionBaseline],
+            set[str],
+        ],
+        pending_transitions: list[Any],
+        pending_acknowledgements: set[str],
+        scope_transitions: list[Any],
+        debug_changed: bool,
+        low_spec_changed: bool,
+        performance_log_changed: bool,
+    ) -> None:
+        self._runtime = runtime
+        self._previous = previous
+        self._baseline_state = baseline_state
+        self._pending_transitions = pending_transitions
+        self._pending_acknowledgements = pending_acknowledgements
+        self._scope_transitions = list(scope_transitions)
+        self._debug_changed = debug_changed
+        self._low_spec_changed = low_spec_changed
+        self._performance_log_changed = performance_log_changed
+        self._finished = False
+
+    def commit(self) -> None:
+        if self._finished:
+            return
+        with self._runtime._lock:
+            self._runtime._pending_persistence_transitions.extend(self._scope_transitions)
+            # Persistence is retryable and _persist_incidents deliberately
+            # retains pending state after a bounded SQLite failure. The JSON
+            # has already committed, so never roll the authoritative setting
+            # back merely because the cleanup must wait for the next write.
+            self._runtime._persist_incidents([])
+            self._finished = True
+
+    def rollback(self) -> None:
+        if self._finished:
+            return
+        with self._runtime._lock:
+            self._runtime._restore_settings_stage(
+                self._previous,
+                self._baseline_state,
+                self._pending_transitions,
+                self._pending_acknowledgements,
+                debug_changed=self._debug_changed,
+                low_spec_changed=self._low_spec_changed,
+                performance_log_changed=self._performance_log_changed,
+            )
+            self._finished = True
+
+
 class RuntimePoller:
     """Compose credentials, collectors, parsers, correlation, and persistence."""
 
@@ -273,6 +407,21 @@ class RuntimePoller:
         self.credential_service = credential_service
         self.storage = storage
         self.logging_context = logging_context
+        configured_members = {
+            member.ip.strip()
+            for member in self.settings.cluster.members
+            if member.ip.strip()
+        }
+        if len(configured_members) == 4:
+            try:
+                # Run before loading snapshots/MM inventory so an upgraded
+                # database with years of churn cannot inflate startup memory
+                # first. Incomplete/default settings deliberately skip cleanup:
+                # a missing or corrupt JSON file must never erase the previous
+                # registered inventory before the operator can recover it.
+                storage.maintain_device_inventory(configured_members)
+            except Exception:
+                LOGGER.warning("Stale device inventory maintenance deferred", exc_info=True)
         self.baseline_store = CachedBaselineStore(storage)
         try:
             restored_devices = storage.load_device_states()
@@ -362,6 +511,14 @@ class RuntimePoller:
         )
 
     def update_settings(self, settings: AppSettings) -> None:
+        """Apply and immediately commit settings for non-UI callers/tests."""
+
+        update = self.begin_settings_update(settings)
+        update.commit()
+
+    def begin_settings_update(self, settings: AppSettings) -> RuntimeSettingsUpdate:
+        """Stage runtime settings without irreversibly pruning SQLite state."""
+
         with self._lock:
             previous_config_scope = tuple(
                 member.ip.strip()
@@ -389,10 +546,14 @@ class RuntimePoller:
                 self.engine,
                 self.incident_manager,
             )
+            baseline_state = self.baseline_store.snapshot_state()
+            previous_pending_transitions = list(self._pending_persistence_transitions)
+            previous_pending_acknowledgements = set(
+                self._pending_connection_acknowledgements
+            )
             detector_state = self.detector.dump_state()
             pending_changes = self.engine.pending_connection_changes()
             incidents = copy.deepcopy(self.incident_manager.events())
-            self._persist_detector_state()
             debug_changed = settings.ssh_debug_logging != self.settings.ssh_debug_logging
             low_spec_changed = (
                 settings.performance.low_spec_mode
@@ -428,32 +589,67 @@ class RuntimePoller:
                     monitoring_scope,
                     now=datetime.now(timezone.utc),
                 )
-                if removed_scope or scope_transitions:
-                    self._persist_incidents(scope_transitions)
             except Exception:
-                self.settings, self.detector, self.engine, self.incident_manager = previous
-                if debug_changed:
-                    try:
-                        self.logging_context.set_ssh_debug_enabled(
-                            self.settings.ssh_debug_logging
-                        )
-                    except Exception:
-                        LOGGER.critical("SSH debug logger rollback failed", exc_info=True)
-                if low_spec_changed:
-                    try:
-                        self.logging_context.set_low_spec_mode(
-                            self.settings.performance.low_spec_mode
-                        )
-                    except Exception:
-                        LOGGER.critical("Log mode rollback failed", exc_info=True)
-                if performance_log_changed:
-                    try:
-                        self.logging_context.set_performance_logging_enabled(
-                            self.settings.performance.performance_logging
-                        )
-                    except Exception:
-                        LOGGER.critical("Performance logger rollback failed", exc_info=True)
+                self._restore_settings_stage(
+                    previous,
+                    baseline_state,
+                    previous_pending_transitions,
+                    previous_pending_acknowledgements,
+                    debug_changed=debug_changed,
+                    low_spec_changed=low_spec_changed,
+                    performance_log_changed=performance_log_changed,
+                )
                 raise
+            return RuntimeSettingsUpdate(
+                self,
+                previous=previous,
+                baseline_state=baseline_state,
+                pending_transitions=previous_pending_transitions,
+                pending_acknowledgements=previous_pending_acknowledgements,
+                scope_transitions=scope_transitions,
+                debug_changed=debug_changed,
+                low_spec_changed=low_spec_changed,
+                performance_log_changed=performance_log_changed,
+            )
+
+    def _restore_settings_stage(
+        self,
+        previous: tuple[Any, Any, Any, Any],
+        baseline_state: tuple[
+            dict[str, ConnectionBaseline],
+            dict[str, ConnectionBaseline],
+            set[str],
+        ],
+        pending_transitions: list[Any],
+        pending_acknowledgements: set[str],
+        *,
+        debug_changed: bool,
+        low_spec_changed: bool,
+        performance_log_changed: bool,
+    ) -> None:
+        self.settings, self.detector, self.engine, self.incident_manager = previous
+        self.baseline_store.restore_state(baseline_state)
+        self._pending_persistence_transitions = list(pending_transitions)
+        self._pending_connection_acknowledgements = set(pending_acknowledgements)
+        if debug_changed:
+            try:
+                self.logging_context.set_ssh_debug_enabled(self.settings.ssh_debug_logging)
+            except Exception:
+                LOGGER.critical("SSH debug logger rollback failed", exc_info=True)
+        if low_spec_changed:
+            try:
+                self.logging_context.set_low_spec_mode(
+                    self.settings.performance.low_spec_mode
+                )
+            except Exception:
+                LOGGER.critical("Log mode rollback failed", exc_info=True)
+        if performance_log_changed:
+            try:
+                self.logging_context.set_performance_logging_enabled(
+                    self.settings.performance.performance_logging
+                )
+            except Exception:
+                LOGGER.critical("Performance logger rollback failed", exc_info=True)
 
     def can_auto_start(self) -> tuple[bool, str]:
         try:
@@ -563,61 +759,61 @@ class RuntimePoller:
             if not credential_id:
                 raise RuntimeError("자격 증명을 입력하거나 먼저 저장한 뒤 연결 테스트를 실행하세요.")
             credential = self.credential_service.get(credential_id)
-        self.logging_context.register_secret(credential.username)
-        self.logging_context.register_secret(credential.password)
-        self.logging_context.register_secret(credential.enable_secret)
         from .collectors.base import SshConnectionOptions
 
-        authenticated_hosts: list[str] = []
-        last_auth_error: SshOperationError | None = None
-        for scanned in scans:
-            host = scanned.host
-            options = SshConnectionOptions(
-                host=host,
+        with self.logging_context.scoped_secrets(
+            (credential.username, credential.password, credential.enable_secret)
+        ):
+            authenticated_hosts: list[str] = []
+            last_auth_error: SshOperationError | None = None
+            for scanned in scans:
+                host = scanned.host
+                options = SshConnectionOptions(
+                    host=host,
+                    port=endpoint.ssh_port,
+                    connect_timeout_seconds=endpoint.connect_timeout_seconds,
+                    command_timeout_seconds=endpoint.command_timeout_seconds,
+                    known_hosts_path=self.paths.known_hosts,
+                    enable_required=endpoint.enable_required,
+                )
+                adapter = ArubaSshAdapter(
+                    options,
+                    credential,
+                    cancel_event=cancellation_event,
+                    logger=self.logging_context.ssh_logger,
+                )
+                try:
+                    adapter.connect()
+                    authenticated_hosts.append(host)
+                except SshOperationError as exc:
+                    last_auth_error = exc
+                    if role == "mm":
+                        raise
+                    LOGGER.info("Cluster connection test failed for %s: %s", host, exc.code)
+                finally:
+                    adapter.close()
+            if not authenticated_hosts:
+                if last_auth_error is not None:
+                    raise last_auth_error
+                raise RuntimeError("인증 가능한 Cluster 수집 Controller가 없습니다.")
+            first_scan = scans[0]
+            skipped_note = (
+                f" 연결할 수 없어 건너뛴 Controller {len(scan_failures)}개가 있습니다."
+                if scan_failures
+                else ""
+            )
+            return ConnectionTestResult(
+                status="success",
+                role=role,
+                host=", ".join(authenticated_hosts),
                 port=endpoint.ssh_port,
-                connect_timeout_seconds=endpoint.connect_timeout_seconds,
-                command_timeout_seconds=endpoint.command_timeout_seconds,
-                known_hosts_path=self.paths.known_hosts,
-                enable_required=endpoint.enable_required,
+                message=(
+                    f"{len(authenticated_hosts)}개 수집 Controller의 SSH 호스트 키와 로그인을 확인했습니다."
+                    + skipped_note
+                ),
+                fingerprint=first_scan.fingerprint,
+                algorithm=first_scan.algorithm,
             )
-            adapter = ArubaSshAdapter(
-                options,
-                credential,
-                cancel_event=cancellation_event,
-                logger=self.logging_context.ssh_logger,
-            )
-            try:
-                adapter.connect()
-                authenticated_hosts.append(host)
-            except SshOperationError as exc:
-                last_auth_error = exc
-                if role == "mm":
-                    raise
-                LOGGER.info("Cluster connection test failed for %s: %s", host, exc.code)
-            finally:
-                adapter.close()
-        if not authenticated_hosts:
-            if last_auth_error is not None:
-                raise last_auth_error
-            raise RuntimeError("인증 가능한 Cluster 수집 Controller가 없습니다.")
-        first_scan = scans[0]
-        skipped_note = (
-            f" 연결할 수 없어 건너뛴 Controller {len(scan_failures)}개가 있습니다."
-            if scan_failures
-            else ""
-        )
-        return ConnectionTestResult(
-            status="success",
-            role=role,
-            host=", ".join(authenticated_hosts),
-            port=endpoint.ssh_port,
-            message=(
-                f"{len(authenticated_hosts)}개 수집 Controller의 SSH 호스트 키와 로그인을 확인했습니다."
-                + skipped_note
-            ),
-            fingerprint=first_scan.fingerprint,
-            algorithm=first_scan.algorithm,
-        )
 
     def approve_host_key(self, scanned: Any) -> Path:
         return register_scanned_host_key(scanned, self.paths.known_hosts)
@@ -641,10 +837,14 @@ class RuntimePoller:
             settings.cluster.primary_controller_ip,
             (SHOW_CLIENT_DISTRIBUTION, SHOW_GROUP_MEMBERSHIP),
         )
-        for credential in {item for item in (mm_credential, cluster_credential) if item is not None}:
-            self.logging_context.register_secret(credential.username)
-            self.logging_context.register_secret(credential.password)
-            self.logging_context.register_secret(credential.enable_secret)
+        resolved_credentials = {
+            item for item in (mm_credential, cluster_credential) if item is not None
+        }
+        self.logging_context.replace_current_secrets(
+            value
+            for credential in resolved_credentials
+            for value in (credential.username, credential.password, credential.enable_secret)
+        )
 
         cancel_event = cancellation_event or threading.Event()
 
@@ -926,7 +1126,21 @@ class RuntimePoller:
                     first_error or "PRIMARY_FAILED",
                     cluster_bundle.failover_at or health.checked_at,
                 )
-            self.storage.save_poll_runtime_state(
+            protected_ips = set(health.monitoring_scope_ips or ())
+            protected_ips.update(
+                device.ip
+                for device in health.devices
+                if getattr(device, "last_seen", None) == health.checked_at
+            )
+            protected_ips.update(
+                incident.ip
+                for incident in self.incident_manager.active_incidents()
+                if getattr(incident, "ip", None)
+            )
+            protected_ips.update(
+                change.member_ip for change in self.engine.pending_connection_changes()
+            )
+            pruned_ips = self.storage.save_poll_runtime_state(
                 detector_state=self.detector.dump_state(),
                 device_states=(
                     (device, device.severity is Severity.NORMAL)
@@ -934,12 +1148,18 @@ class RuntimePoller:
                 ),
                 observed_at=health.checked_at,
                 failover=failover,
+                retention_protected_ips=protected_ips,
             )
+            if pruned_ips:
+                self.engine.forget_known_mm_devices(pruned_ips)
+                for ip in pruned_ips:
+                    self._last_devices.pop(ip, None)
             self.logging_context.performance_logger.info(
-                "persist_runtime duration_ms=%d devices=%d failover=%d",
+                "persist_runtime duration_ms=%d devices=%d failover=%d pruned_inventory=%d",
                 round((time.perf_counter() - started) * 1000),
                 len(health.devices),
                 int(failover is not None),
+                len(pruned_ips),
             )
         except Exception:
             LOGGER.exception("상태 저장 중 오류가 발생했습니다. 현재 점검 결과는 화면에 계속 표시합니다.")
@@ -1047,30 +1267,75 @@ def _run_frozen_smoke(fixture_dir: Path | None = None) -> str:
 
 
 def _run_qt_ui_smoke(output_path: Path | None) -> int:
-    """Create a real Qt window briefly without touching runtime state or network."""
+    """Exercise the real dashboard, one worker cycle, and graceful shutdown.
+
+    The smoke stays isolated from the operator data directory and never opens a
+    network connection.  It uses the bundled, sanitized demo fixtures so a
+    frozen package proves that the main window can consume a worker result and
+    tear its application-owned thread pool down cleanly.
+    """
 
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     app = QApplication.instance() or QApplication([sys.argv[0]])
     app.setApplicationName("ArubaMiniDashboardUiSmoke")
-    window = QWidget()
-    window.setWindowTitle("Aruba Mini Dashboard UI Smoke")
-    window.resize(240, 120)
-    marker = "WINDOWS_QT_UI_OK\n"
+    app.setQuitOnLastWindowClosed(False)
+
+    from .demo import DemoPoller
+    from .services.correlation_engine import CorrelationEngine
+
+    settings = AppSettings.default()
+    worker_pool = QThreadPool(app)
+    worker_pool.setMaxThreadCount(1)
+    worker_pool.setExpiryTimeout(30_000)
+    coordinator = PollCoordinator(
+        DemoPoller(CorrelationEngine()),
+        settings.effective_poll_interval_seconds,
+        thread_pool=worker_pool,
+    )
+    window = MainWindow(coordinator, settings, demo_mode=True)
+    marker = "WINDOWS_QT_UI_OK\nWINDOWS_LIFECYCLE_OK\n"
     completed = False
+    timed_out = False
 
     def finish() -> None:
         nonlocal completed
+        if completed or timed_out:
+            return
+        if not coordinator.shutdown(5000):
+            app.quit()
+            return
         if output_path is not None:
             _write_atomic_text(output_path, marker)
         completed = True
-        window.close()
+        window.request_quit()
+
+    def cycle_finished(_result: Any) -> None:
+        # MainWindow receives the same signal first and renders the dashboard.
+        # Let the QRunnable return before waiting for the pool to become idle.
+        QTimer.singleShot(0, finish)
+
+    def cycle_failed(_error: Any) -> None:
         app.quit()
 
+    def timeout() -> None:
+        nonlocal timed_out
+        if completed:
+            return
+        timed_out = True
+        coordinator.request_shutdown()
+        window.tray_icon.hide()
+        app.quit()
+
+    coordinator.cycle_finished.connect(cycle_finished)
+    coordinator.cycle_failed.connect(cycle_failed)
     window.show()
-    QTimer.singleShot(100, finish)
-    QTimer.singleShot(5000, app.quit)
+    QTimer.singleShot(0, coordinator.check_now)
+    QTimer.singleShot(10_000, timeout)
     exit_code = int(app.exec())
-    return exit_code if completed else 2
+    workers_stopped = coordinator.shutdown(5000)
+    window.tray_icon.hide()
+    window.close()
+    return exit_code if completed and workers_stopped else 2
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1086,12 +1351,39 @@ def main(argv: list[str] | None = None) -> int:
     if args.ui_smoke:
         return _run_qt_ui_smoke(args.smoke_output)
 
-    paths = AppPaths.from_environment().ensure()
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     app = QApplication.instance() or QApplication([sys.argv[0]])
     app.setApplicationName("ArubaMiniDashboard")
     app.setOrganizationName("ArubaMiniDashboard")
     app.setQuitOnLastWindowClosed(False)
+
+    try:
+        paths = AppPaths.from_environment().ensure()
+    except (AppPathError, OSError) as exc:
+        _report_early_startup_issue(
+            "프로그램 데이터 폴더 확인 필요",
+            str(exc)
+            if isinstance(exc, AppPathError)
+            else (
+                "프로그램 데이터 폴더를 준비하지 못했습니다. "
+                "폴더 쓰기 권한과 디스크 상태를 확인한 뒤 다시 실행하세요."
+            ),
+            critical=True,
+        )
+        return 2
+
+    # Demo uses in-memory settings/state, but it still shares the data-root log
+    # files and desktop/tray identity. Keep one dashboard per data root. Frozen
+    # dependency smoke and isolated Qt UI smoke return above and never lock or
+    # create production runtime state.
+    try:
+        instance_lock = _acquire_instance_lock(paths)
+    except InstanceAlreadyRunningError as exc:
+        _report_early_startup_issue("대시보드가 이미 실행 중입니다", str(exc), critical=False)
+        return 3
+    except InstanceLockUnavailableError as exc:
+        _report_early_startup_issue("단일 실행 보호를 시작할 수 없습니다", str(exc), critical=True)
+        return 2
 
     store = SettingsStore(paths)
     settings_error = ""
@@ -1164,7 +1456,7 @@ def main(argv: list[str] | None = None) -> int:
         credential_service=credentials,
         notification_service=notifications,
         storage=storage,
-        settings_apply_handler=runtime.update_settings,
+        settings_apply_handler=runtime.begin_settings_update,
         demo_mode=args.demo,
         setup_readiness_check=(
             None if args.demo else (lambda _settings: runtime.can_auto_start())
@@ -1191,6 +1483,7 @@ def main(argv: list[str] | None = None) -> int:
             return
         credentials.close()
         storage.close()
+        instance_lock.unlock()
 
     app.aboutToQuit.connect(cleanup)
     window.show()

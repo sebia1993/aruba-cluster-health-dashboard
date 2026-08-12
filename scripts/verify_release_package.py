@@ -290,16 +290,19 @@ def _forbidden_release_reason(
             return "unapproved unused Qt component"
 
     name = folded_parts[-1]
+    runtime_name = name.lstrip(".")
     suffix = PurePosixPath(name).suffix
 
-    if name == "known_hosts" or name.startswith("known_hosts."):
+    if runtime_name == "known_hosts" or runtime_name.startswith("known_hosts."):
         return "SSH known_hosts data"
     if name in HOST_KEY_FILENAMES or name.startswith("ssh_host_"):
         return "SSH key material"
     if name == ".env" or name.startswith(".env.") or suffix == ".env":
         return "environment file"
-    if name == "settings" or name.startswith(("settings.", "settings-")):
+    if runtime_name == "settings" or runtime_name.startswith(("settings.", "settings-")):
         return "runtime settings file"
+    if runtime_name == "aruba-mini-dashboard.lock":
+        return "runtime instance lock"
     if name in RUNTIME_CONFIG_FILENAMES:
         return "runtime configuration file"
     if suffix in DATABASE_SUFFIXES or re.search(
@@ -1129,10 +1132,14 @@ def _run_windows_ui_smoke(executable: Path, *, timeout: int = 30) -> None:
     except (OSError, UnicodeError) as exc:
         _fail(f"Windows Qt UI smoke could not complete: {exc}", cause=exc)
 
-    if completed.returncode != 0 or "WINDOWS_QT_UI_OK" not in sentinel_text.splitlines():
+    required_markers = {"WINDOWS_QT_UI_OK", "WINDOWS_LIFECYCLE_OK"}
+    present_markers = {line.strip() for line in sentinel_text.splitlines() if line.strip()}
+    missing_markers = sorted(required_markers - present_markers)
+    if completed.returncode != 0 or missing_markers:
         _fail(
             "Windows Qt UI smoke failed "
-            f"rc={completed.returncode} sentinel={sentinel_text!r}\n"
+            f"rc={completed.returncode} missing_markers={missing_markers!r} "
+            f"sentinel={sentinel_text!r}\n"
             f"stdout={completed.stdout}\nstderr={completed.stderr}"
         )
 

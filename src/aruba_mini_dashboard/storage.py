@@ -9,6 +9,7 @@ types.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -22,10 +23,12 @@ from typing import Any, TypeVar
 from .config import AppPaths, default_app_paths
 
 
+LOGGER = logging.getLogger(__name__)
 SCHEMA_VERSION = 4
 HISTORY_RETENTION_DAYS = 180
 HISTORY_RETENTION_MAX_ROWS = 10_000
 HISTORY_MAINTENANCE_INTERVAL = timedelta(days=1)
+DEVICE_INVENTORY_RETENTION_MARKER = "_device_inventory_retention_last_run"
 _T = TypeVar("_T")
 _SECRET_KEYS = {"password", "passwd", "secret", "enable_secret", "credential_blob", "token"}
 
@@ -103,8 +106,9 @@ class SQLiteStorage:
         with self._lock:
             if self._connection is not None:
                 return
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            connection: sqlite3.Connection | None = None
             try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
                 connection = sqlite3.connect(
                     self.path,
                     timeout=self.busy_timeout_ms / 1000,
@@ -114,28 +118,62 @@ class SQLiteStorage:
                 connection.row_factory = sqlite3.Row
                 connection.execute(f"PRAGMA busy_timeout={self.busy_timeout_ms}")
                 connection.execute("PRAGMA foreign_keys=ON")
+                self._connection = connection
+                # Check/migrate the schema before changing persistent database
+                # pragmas. A database from a newer application version is a
+                # read-preserving startup error and must not be switched from
+                # DELETE to WAL merely by probing it with an older build.
+                self._migrate()
                 connection.execute("PRAGMA journal_mode=WAL")
                 connection.execute("PRAGMA synchronous=NORMAL")
-                self._connection = connection
-                self._migrate()
                 # Force SQLite to inspect pages now so a corrupt file is not
                 # mistaken for an empty first-run database.
                 result = connection.execute("PRAGMA quick_check").fetchone()
                 if not result or str(result[0]).casefold() != "ok":
                     raise sqlite3.DatabaseError(f"quick_check returned {result!r}")
+            except StorageError:
+                # _migrate() deliberately raises StorageError for a database
+                # created by a newer application version. Close that newly
+                # opened handle before propagating so startup can safely stop
+                # without retaining a WAL/file lock.
+                self._discard_initializing_connection(connection)
+                raise
+            except OSError as exc:
+                self._discard_initializing_connection(connection)
+                raise StorageError(
+                    "로컬 상태 저장소 폴더를 사용할 수 없습니다. "
+                    "쓰기 권한과 디스크 상태를 확인하세요."
+                ) from exc
             except sqlite3.DatabaseError as exc:
-                if self._connection is not None:
-                    self._connection.close()
-                    self._connection = None
+                self._discard_initializing_connection(connection)
                 raise StorageCorruptError(
                     f"로컬 상태 저장소를 열 수 없습니다. 원본을 보존한 채 확인하세요: {self.path}"
                 ) from exc
+
+    def _discard_initializing_connection(
+        self,
+        connection: sqlite3.Connection | None,
+    ) -> None:
+        """Drop a partially initialized connection without masking its error."""
+
+        self._connection = None
+        if connection is None:
+            return
+        try:
+            connection.close()
+        except sqlite3.DatabaseError:
+            # The initialization failure is the actionable root cause. A close
+            # error on the already-unusable handle must not replace it.
+            LOGGER.debug("Failed to close unusable SQLite initialization handle", exc_info=True)
 
     def _migrate(self) -> None:
         connection = self._require_connection()
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
         if version > SCHEMA_VERSION:
-            raise StorageCorruptError(f"지원하지 않는 데이터베이스 버전입니다: {version}")
+            raise StorageCorruptError(
+                "현재 프로그램보다 새로운 데이터베이스 버전입니다: "
+                f"{version}. 더 최신 버전의 프로그램으로 실행하세요."
+            )
         if version < 1:
             script = """
                 BEGIN IMMEDIATE;
@@ -976,7 +1014,8 @@ class SQLiteStorage:
         device_states: Iterable[tuple[object, bool]],
         observed_at: datetime | str,
         failover: tuple[str, str, str, datetime | str | None] | None = None,
-    ) -> None:
+        retention_protected_ips: Iterable[str] | None = None,
+    ) -> set[str]:
         """Persist one completed poll's non-domain state in one transaction.
 
         Connection baselines, changes, incidents and their journal transitions
@@ -1026,7 +1065,13 @@ class SQLiteStorage:
                     )
                 )
 
-        def operation(db: sqlite3.Connection) -> None:
+        protected_ips = (
+            tuple(dict.fromkeys(str(ip).strip() for ip in retention_protected_ips if str(ip).strip()))
+            if retention_protected_ips is not None
+            else None
+        )
+
+        def operation(db: sqlite3.Connection) -> set[str]:
             db.executemany(
                 """INSERT INTO detector_streaks
                        (detector, ip, anomaly_count, recovery_count, active, updated_at)
@@ -1073,8 +1118,145 @@ class SQLiteStorage:
                     (primary, actual, error_code, _timestamp(collected_at)),
                 )
             self._cleanup_history_if_due(db)
+            if protected_ips is None:
+                return set()
+            return self._cleanup_device_inventory_if_due(
+                db,
+                protected_ips=protected_ips,
+                now=observed_at,
+            )
 
-        self._write(operation)
+        return self._write(operation)
+
+    def maintain_device_inventory(
+        self,
+        protected_ips: Iterable[str],
+        *,
+        now: datetime | str | None = None,
+        max_age_days: int = HISTORY_RETENTION_DAYS,
+        max_rows: int = HISTORY_RETENTION_MAX_ROWS,
+        force: bool = False,
+    ) -> set[str]:
+        """Bound stale, unregistered device inventory without touching live state.
+
+        Registered IPs supplied by the runtime, durable active incidents, and
+        unacknowledged Connection-Type changes are always protected.  Cleanup
+        removes a selected IP from all three snapshot/inventory tables in one
+        transaction and deliberately does not run ``VACUUM``.
+        """
+
+        if int(max_age_days) < 1 or int(max_rows) < 1:
+            raise ValueError("device inventory retention limits must be positive")
+        normalized = tuple(
+            dict.fromkeys(str(ip).strip() for ip in protected_ips if str(ip).strip())
+        )
+        return self._write(
+            lambda db: self._cleanup_device_inventory_if_due(
+                db,
+                protected_ips=normalized,
+                now=now,
+                max_age_days=int(max_age_days),
+                max_rows=int(max_rows),
+                force=force,
+            )
+        )
+
+    @staticmethod
+    def _cleanup_device_inventory_if_due(
+        db: sqlite3.Connection,
+        *,
+        protected_ips: Iterable[str],
+        now: datetime | str | None = None,
+        max_age_days: int = HISTORY_RETENTION_DAYS,
+        max_rows: int = HISTORY_RETENTION_MAX_ROWS,
+        force: bool = False,
+    ) -> set[str]:
+        maintenance_at = _parse_timestamp(_timestamp(now))
+        row = db.execute(
+            "SELECT value_json FROM preferences WHERE key=?",
+            (DEVICE_INVENTORY_RETENTION_MARKER,),
+        ).fetchone()
+        if row is not None and not force:
+            try:
+                last_run = _parse_timestamp(str(json.loads(row["value_json"])))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                last_run = None
+            if last_run is not None and maintenance_at - last_run < HISTORY_MAINTENANCE_INTERVAL:
+                return set()
+
+        db.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS inventory_retention_protected "
+            "(ip TEXT PRIMARY KEY) WITHOUT ROWID"
+        )
+        db.execute("DELETE FROM inventory_retention_protected")
+        db.executemany(
+            "INSERT OR IGNORE INTO inventory_retention_protected(ip) VALUES (?)",
+            ((str(ip).strip(),) for ip in protected_ips if str(ip).strip()),
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO inventory_retention_protected(ip) "
+            "SELECT ip FROM incidents WHERE active=1 AND ip<>''"
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO inventory_retention_protected(ip) "
+            "SELECT member_ip FROM connection_changes WHERE acknowledged=0 AND member_ip<>''"
+        )
+
+        db.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS inventory_retention_prune "
+            "(ip TEXT PRIMARY KEY) WITHOUT ROWID"
+        )
+        db.execute("DELETE FROM inventory_retention_prune")
+        cutoff_text = _timestamp(maintenance_at - timedelta(days=max_age_days))
+        db.execute(
+            """INSERT OR IGNORE INTO inventory_retention_prune(ip)
+               WITH all_sightings(ip, observed_at) AS (
+                   SELECT ip, last_seen_at FROM mm_discovered_devices WHERE ip<>''
+                   UNION ALL
+                   SELECT ip, observed_at FROM device_states WHERE ip<>''
+                     AND ip NOT IN (SELECT ip FROM mm_discovered_devices)
+                   UNION ALL
+                   SELECT ip, observed_at FROM device_normal_states WHERE ip<>''
+                     AND ip NOT IN (SELECT ip FROM mm_discovered_devices)
+                     AND ip NOT IN (SELECT ip FROM device_states)
+               ),
+               eligible AS (
+                   SELECT sightings.ip, MAX(sightings.observed_at) AS recency
+                   FROM all_sightings AS sightings
+                   WHERE sightings.ip NOT IN (SELECT ip FROM inventory_retention_protected)
+                   GROUP BY sightings.ip
+                   HAVING julianday(MAX(sightings.observed_at)) IS NOT NULL
+               )
+               SELECT eligible.ip FROM eligible
+               WHERE julianday(eligible.recency) < julianday(?)
+                  OR eligible.ip NOT IN (
+                      SELECT newest.ip FROM eligible AS newest
+                      ORDER BY julianday(newest.recency) DESC, newest.ip DESC
+                      LIMIT ?
+                  )""",
+            (cutoff_text, int(max_rows)),
+        )
+        removed = {
+            str(row["ip"])
+            for row in db.execute("SELECT ip FROM inventory_retention_prune").fetchall()
+        }
+        for table in ("device_normal_states", "device_states", "mm_discovered_devices"):
+            db.execute(
+                f"DELETE FROM {table} WHERE ip IN (SELECT ip FROM inventory_retention_prune)"
+            )
+        db.execute(
+            """INSERT INTO preferences(key, value_json, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET
+                   value_json=excluded.value_json,
+                   updated_at=excluded.updated_at""",
+            (
+                DEVICE_INVENTORY_RETENTION_MARKER,
+                _json_dump(_timestamp(maintenance_at)),
+                _timestamp(maintenance_at),
+            ),
+        )
+        return removed
 
     def upsert_incident(
         self,

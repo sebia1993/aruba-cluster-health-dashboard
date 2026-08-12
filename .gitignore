@@ -29,6 +29,8 @@ config.toml
 settings
 settings.json
 settings.*
+.settings.*
+.aruba-mini-dashboard.lock
 known_hosts
 known_hosts.*
 .env

@@ -116,6 +116,52 @@ def test_snapshot_does_not_repaint_tables_while_hidden_to_tray() -> None:
     window.close()
 
 
+def test_unchanged_large_full_table_skips_per_cell_icon_and_style_work(monkeypatch) -> None:
+    app = _app()
+    now = datetime.now(timezone.utc)
+    health = OverallHealth(
+        checked_at=now,
+        severity=Severity.NORMAL,
+        devices=[
+            DeviceHealth(
+                ip=f"198.51.{index // 250}.{index % 250 + 1}",
+                alias=f"WLC-{index:03d}",
+                mm_status="Up",
+                active_clients=100,
+                standby_clients=100,
+                severity=Severity.NORMAL,
+                last_seen=now,
+            )
+            for index in range(500)
+        ],
+    )
+    calls = 0
+    from aruba_mini_dashboard.ui import main_window as main_window_module
+
+    real_status_icon = main_window_module.status_icon
+
+    def counted_status_icon(key: str):
+        nonlocal calls
+        calls += 1
+        return real_status_icon(key)
+
+    monkeypatch.setattr(main_window_module, "status_icon", counted_status_icon)
+    window = MainWindow(Coordinator(), AppSettings.default())
+    window.resize(1100, 600)
+    window.show()
+    app.processEvents()
+
+    window.update_snapshot(health)
+    first_calls = calls
+    window.update_snapshot(health)
+
+    assert window.table.rowCount() == 500
+    assert first_calls >= 501  # one status cell per row plus window/tray icon
+    assert calls - first_calls == 1  # only the overall window/tray icon remains
+    window._quitting = True
+    window.close()
+
+
 def test_first_visible_show_offers_existing_settings_without_starting_poll(monkeypatch) -> None:
     app = _app()
     coordinator = Coordinator()

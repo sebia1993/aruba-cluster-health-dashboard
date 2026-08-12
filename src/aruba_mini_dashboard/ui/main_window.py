@@ -126,6 +126,8 @@ class MainWindow(QMainWindow):
         self._dashboard_mode: str | None = None
         self._latest_display_devices: list[DeviceView] = []
         self._table_dirty = {self.COMPACT_MODE: True, self.FULL_MODE: True}
+        self._full_row_signatures: dict[str, tuple[Any, ...]] = {}
+        self._compact_row_signatures: dict[str, tuple[Any, ...]] = {}
         self._hidden_to_tray = False
         self._initial_setup_offer_scheduled = False
         self._initial_setup_offered = False
@@ -666,10 +668,9 @@ class MainWindow(QMainWindow):
 
     def _populate_full_table(self, devices: list[DeviceView]) -> None:
         devices = sorted(devices, key=lambda item: item.ip)
-        self.table.setUpdatesEnabled(False)
-        self.table.setSortingEnabled(False)
-        self._ensure_table_shape(self.table, [device.ip for device in devices], len(self.COLUMNS))
-        for row, device in enumerate(devices):
+        rows: list[tuple[DeviceView, bool, str, str, tuple[str, ...]]] = []
+        signatures: dict[str, tuple[Any, ...]] = {}
+        for device in devices:
             registered = self._device_is_registered(device)
             display_status = device.status if registered else "감시 제외"
             display_status_key = device.status_key if registered else "unknown"
@@ -685,6 +686,18 @@ class MainWindow(QMainWindow):
                 "등록" if registered else "미등록 · 감시 제외",
                 device.distribution_status,
             )
+            signature = (*values, registered, display_status_key)
+            signatures[device.ip] = signature
+            rows.append((device, registered, display_status, display_status_key, values))
+        identities = [device.ip for device in devices]
+        shape_changed = self._ensure_table_shape(self.table, identities, len(self.COLUMNS))
+        if not shape_changed and signatures == self._full_row_signatures:
+            return
+        self.table.setUpdatesEnabled(False)
+        self.table.setSortingEnabled(False)
+        for row, (device, registered, _display_status, display_status_key, values) in enumerate(rows):
+            if not shape_changed and self._full_row_signatures.get(device.ip) == signatures[device.ip]:
+                continue
             foreground, _background, _accent = STATUS_STYLES.get(
                 display_status_key, STATUS_STYLES["unknown"]
             )
@@ -704,18 +717,16 @@ class MainWindow(QMainWindow):
                     item.setForeground(QColor(STATUS_STYLES["unknown"][0]))
                 if self.table.item(row, column) is None:
                     self.table.setItem(row, column, item)
+        if shape_changed:
+            self.table.sortItems(0, Qt.AscendingOrder)
         self.table.setSortingEnabled(True)
-        self.table.sortItems(0, Qt.AscendingOrder)
         self.table.setUpdatesEnabled(True)
+        self._full_row_signatures = signatures
 
     def _populate_compact_table(self, devices: list[DeviceView]) -> None:
-        self.compact_table.setUpdatesEnabled(False)
-        self._ensure_table_shape(
-            self.compact_table,
-            [device.ip for device in devices],
-            len(self.COMPACT_COLUMNS),
-        )
-        for row, device in enumerate(devices):
+        rows: list[tuple[DeviceView, str, tuple[str, ...], str, str]] = []
+        signatures: dict[str, tuple[Any, ...]] = {}
+        for device in devices:
             name = device.alias or device.hostname or "컨트롤러"
             values = (
                 f"{name} · {device.ip}",
@@ -735,6 +746,20 @@ class MainWindow(QMainWindow):
                 "low_usage": "attention",
                 "missing": "attention",
             }.get(device.distribution_state, "unknown")
+            signatures[device.ip] = (*values, controller_key, distribution_key)
+            rows.append((device, name, values, controller_key, distribution_key))
+        identities = [device.ip for device in devices]
+        shape_changed = self._ensure_table_shape(
+            self.compact_table,
+            identities,
+            len(self.COMPACT_COLUMNS),
+        )
+        if not shape_changed and signatures == self._compact_row_signatures:
+            return
+        self.compact_table.setUpdatesEnabled(False)
+        for row, (device, name, values, controller_key, distribution_key) in enumerate(rows):
+            if not shape_changed and self._compact_row_signatures.get(device.ip) == signatures[device.ip]:
+                continue
             for column, text in enumerate(values):
                 item = self.compact_table.item(row, column) or QTableWidgetItem()
                 if item.text() != text:
@@ -752,9 +777,10 @@ class MainWindow(QMainWindow):
                 if self.compact_table.item(row, column) is None:
                     self.compact_table.setItem(row, column, item)
         self.compact_table.setUpdatesEnabled(True)
+        self._compact_row_signatures = signatures
 
     @staticmethod
-    def _ensure_table_shape(table: QTableWidget, identities: list[str], columns: int) -> None:
+    def _ensure_table_shape(table: QTableWidget, identities: list[str], columns: int) -> bool:
         existing = [
             display(table.item(row, 0).data(Qt.UserRole), "")
             if table.item(row, 0) is not None
@@ -764,6 +790,8 @@ class MainWindow(QMainWindow):
         if existing != identities or table.columnCount() != columns:
             table.clearContents()
             table.setRowCount(len(identities))
+            return True
+        return False
 
     def _compact_devices(self, devices: list[DeviceView]) -> list[DeviceView]:
         by_ip = {device.ip: device for device in devices}
@@ -1075,24 +1103,85 @@ class MainWindow(QMainWindow):
         previous_member_ips = tuple(
             member.ip.strip() for member in previous_settings.cluster.members if member.ip.strip()
         )
+        settings_update = None
+        runtime_update = None
         if self.settings_store is not None:
             try:
                 settings.validate()
-                self.settings_store.save(settings)
+                begin_update = getattr(self.settings_store, "begin_update", None)
+                if callable(begin_update):
+                    settings_update = begin_update(settings)
+                else:
+                    self.settings_store.save(settings)
             except Exception as exc:
                 QMessageBox.warning(self, "설정 저장 실패", str(exc))
                 return False
         if self.settings_apply_handler is not None:
             try:
-                self.settings_apply_handler(settings)
+                staged_runtime = self.settings_apply_handler(settings)
+                if (
+                    staged_runtime is not None
+                    and callable(getattr(staged_runtime, "commit", None))
+                    and callable(getattr(staged_runtime, "rollback", None))
+                ):
+                    runtime_update = staged_runtime
             except Exception as exc:
-                if self.settings_store is not None:
+                if settings_update is not None:
+                    try:
+                        settings_update.rollback()
+                    except Exception:
+                        LOGGER.critical("Durable settings rollback deferred to next startup", exc_info=True)
+                elif self.settings_store is not None:
                     try:
                         self.settings_store.save(previous_settings)
                     except Exception:
                         LOGGER.critical("Settings rollback failed", exc_info=True)
                 QMessageBox.warning(self, "설정 적용 실패", str(exc))
                 return False
+        if settings_update is not None:
+            try:
+                settings_update.commit()
+            except Exception as exc:
+                runtime_rollback_failed = False
+                if runtime_update is not None:
+                    try:
+                        runtime_update.rollback()
+                    except Exception:
+                        runtime_rollback_failed = True
+                        LOGGER.critical("Staged runtime settings rollback failed", exc_info=True)
+                elif self.settings_apply_handler is not None:
+                    try:
+                        self.settings_apply_handler(previous_settings)
+                    except Exception:
+                        runtime_rollback_failed = True
+                        LOGGER.critical("Runtime settings rollback failed", exc_info=True)
+                try:
+                    settings_update.rollback()
+                except Exception:
+                    LOGGER.critical("Durable settings rollback deferred to next startup", exc_info=True)
+                message = str(exc)
+                if runtime_rollback_failed:
+                    message += " 프로그램을 다시 시작해 이전 설정을 복구하세요."
+                    self.coordinator.pause_automatic()
+                QMessageBox.warning(self, "설정 확정 실패", message)
+                return False
+        runtime_commit_failed = False
+        if runtime_update is not None:
+            try:
+                runtime_update.commit()
+            except Exception:
+                # The authoritative JSON is already committed. Keep the
+                # candidate active and stop automatic polling rather than
+                # presenting the old UI against the new startup settings.
+                LOGGER.critical("Committed runtime settings cleanup was deferred", exc_info=True)
+                runtime_commit_failed = True
+                self.coordinator.pause_automatic()
+                QMessageBox.warning(
+                    self,
+                    "설정 후속 저장 지연",
+                    "설정은 저장했지만 이전 감시 상태 정리를 마치지 못했습니다. "
+                    "프로그램을 다시 시작한 뒤 점검 상태를 확인하세요.",
+                )
         previous_auto = self.coordinator.automatic
         self.settings = settings
         current_member_ips = tuple(
@@ -1125,7 +1214,11 @@ class MainWindow(QMainWindow):
                 recovery_enabled=settings.notifications.recovery_notifications,
             )
         self._mirror_all_settings()
-        if settings.polling.automatic_enabled and not previous_auto:
+        if (
+            not runtime_commit_failed
+            and settings.polling.automatic_enabled
+            and not previous_auto
+        ):
             self.coordinator.start_automatic()
         elif not settings.polling.automatic_enabled and previous_auto:
             self.coordinator.pause_automatic()

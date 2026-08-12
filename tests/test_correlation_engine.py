@@ -37,6 +37,18 @@ def fixture(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
 
 
+def test_forget_known_mm_devices_never_removes_registered_scope() -> None:
+    engine = CorrelationEngine(
+        known_mm_devices={"192.0.2.11": "WLC-01", "192.0.2.99": "OLD-WLC"}
+    )
+    engine.reconcile_monitoring_scope(("192.0.2.11",))
+
+    assert engine.forget_known_mm_devices(("192.0.2.11", "192.0.2.99")) == {
+        "192.0.2.99"
+    }
+    assert engine.dump_known_mm_devices() == {"192.0.2.11": "WLC-01"}
+
+
 def cycle(
     *,
     mm: str = "mm_show_switches_normal.txt",
