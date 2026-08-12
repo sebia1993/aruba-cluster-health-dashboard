@@ -194,6 +194,42 @@ def test_connection_change_and_domain_incident_survive_restart(tmp_path: Path) -
         assert reopened.load_pending_connection_changes() == []
 
 
+def test_scope_prune_survives_restart_but_preserves_discovered_inventory(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    now = datetime(2026, 8, 11, 1, 31, tzinfo=timezone.utc)
+    baseline = DomainConnectionBaseline(
+        collector_ip="192.0.2.11",
+        member_ip="192.0.2.12",
+        display_value="Type-A",
+        normalized_value="type a",
+        observed_at=now,
+    )
+    change = ConnectionChange(
+        collector_ip="192.0.2.11",
+        member_ip="192.0.2.12",
+        previous_value="Type-A",
+        current_value="Type-B",
+        first_detected_at=now,
+        last_confirmed_at=now,
+    )
+    with SQLiteStorage(paths) as storage:
+        storage.set(baseline)
+        storage.save_connection_change(change)
+        storage.save_streak("load", "192.0.2.12", 2, 0, False, updated_at=now)
+        storage.save_mm_discovered_device(
+            "192.0.2.12",
+            hostname="WLC-02",
+            last_seen_at=now,
+        )
+        storage.save_cycle_domain_state([], [], set(), [], [], {"192.0.2.12"})
+
+    with SQLiteStorage(paths) as reopened:
+        assert reopened.get("192.0.2.12") is None
+        assert reopened.get_streak("load", "192.0.2.12") is None
+        assert reopened.load_pending_connection_changes() == []
+        assert reopened.load_mm_discovered_devices()[0]["ip"] == "192.0.2.12"
+
+
 def test_connection_change_token_round_trips_microseconds_without_duplicate_rows(tmp_path: Path) -> None:
     storage = SQLiteStorage(make_paths(tmp_path))
     detected = datetime(2026, 8, 11, 1, 31, 0, 123456, tzinfo=timezone.utc)

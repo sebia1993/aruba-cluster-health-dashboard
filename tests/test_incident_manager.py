@@ -281,3 +281,47 @@ def test_acknowledged_connection_change_closes_without_recovery_transition() -> 
     assert acknowledged.incident.active is False
     assert manager.active_incidents() == []
     assert manager.process(health(checked_at=NOW + timedelta(minutes=2))) == []
+
+
+def test_scope_removed_incident_is_silently_superseded_not_recovered() -> None:
+    manager = IncidentManager()
+    scoped = health(signal())
+    scoped.monitoring_scope_ips = ("192.0.2.12",)
+    incident = manager.process(scoped)[0].incident
+
+    transitions = manager.reconcile_monitoring_scope(
+        ("192.0.2.11",),
+        now=NOW + timedelta(minutes=1),
+    )
+
+    assert len(transitions) == 1
+    transition = transitions[0]
+    assert transition.kind is IncidentTransitionKind.SUPERSEDED
+    assert transition.should_notify is False
+    assert transition.incident.incident_id == incident.incident_id
+    assert transition.incident.active is False
+    assert transition.incident.recovered_at is None
+    assert manager.active_incidents() == []
+
+
+def test_collection_failure_remains_active_when_target_is_outside_member_scope() -> None:
+    manager = IncidentManager()
+    failure = signal(
+        IncidentType.COLLECTION_FAILURE,
+        ip="198.51.100.10",
+        reason="MM 수집 실패",
+        token="collection|AUTH_FAILED|198.51.100.10",
+    )
+    snapshot = health(failure)
+    snapshot.monitoring_scope_ips = ("192.0.2.11",)
+
+    activated = manager.process(snapshot)
+    scope_transitions = manager.reconcile_monitoring_scope(
+        ("192.0.2.11",),
+        now=NOW + timedelta(minutes=1),
+    )
+
+    assert len(activated) == 1
+    assert activated[0].kind is IncidentTransitionKind.ACTIVATED
+    assert scope_transitions == []
+    assert manager.active_incidents()[0].incident_type is IncidentType.COLLECTION_FAILURE

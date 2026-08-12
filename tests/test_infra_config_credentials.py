@@ -121,6 +121,7 @@ _MALFORMED_SCHEMA_VALUES = (
     (("notifications", "sound_enabled"), "false"),
     (("notifications", "recovery_notifications"), None),
     (("ui", "always_on_top"), "false"),
+    (("ui", "window_maximized"), "false"),
     (("ui", "opacity_percent"), True),
     (("ui", "window_x"), "10"),
     (("ui", "window_y"), False),

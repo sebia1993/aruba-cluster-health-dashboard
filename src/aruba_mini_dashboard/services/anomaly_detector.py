@@ -91,6 +91,24 @@ class AnomalyDetector:
     def dump_state(self) -> dict[str, dict[str, object]]:
         return {key: asdict(value) for key, value in sorted(self._counters.items())}
 
+    def prune_ips(self, expected_ips: Iterable[str]) -> set[str]:
+        """Forget debounce state for members that are no longer monitored.
+
+        Persisted counters must not reactivate when an operator removes a
+        controller and later adds it again.  Returning the removed IPs lets the
+        runtime prune the corresponding durable rows in the same transaction
+        as incident lifecycle updates.
+        """
+
+        allowed = {str(ip) for ip in expected_ips}
+        removed: set[str] = set()
+        for key in list(self._counters):
+            _category, separator, ip = key.rpartition("|")
+            if separator and ip not in allowed:
+                removed.add(ip)
+                del self._counters[key]
+        return removed
+
     def _counter(self, category: str, ip: str) -> DetectorCounter:
         return self._counters.setdefault(f"{category}|{ip}", DetectorCounter())
 

@@ -89,6 +89,7 @@ _PREFERENCE_PATHS: dict[str, tuple[str, str]] = {
     "notifications.recovery_notifications": ("notifications", "recovery_notifications"),
     "ui.always_on_top": ("ui", "always_on_top"),
     "ui.opacity_percent": ("ui", "opacity_percent"),
+    "ui.window_maximized": ("ui", "window_maximized"),
     "ui.window_x": ("ui", "window_x"),
     "ui.window_y": ("ui", "window_y"),
     "ui.window_width": ("ui", "window_width"),
@@ -181,6 +182,7 @@ class CachedBaselineStore:
         self.storage = storage
         self._values: dict[str, ConnectionBaseline] = {}
         self._dirty: dict[str, ConnectionBaseline] = {}
+        self._removed: set[str] = set()
         try:
             for row in storage.load_connection_baselines():
                 baseline = storage.get(row.member_ip)
@@ -195,6 +197,20 @@ class CachedBaselineStore:
     def set(self, baseline: ConnectionBaseline) -> None:
         self._values[baseline.member_ip] = baseline
         self._dirty[baseline.member_ip] = baseline
+        self._removed.discard(baseline.member_ip)
+
+    def discard(self, member_ip: str) -> None:
+        member_ip = str(member_ip)
+        self._values.pop(member_ip, None)
+        self._dirty.pop(member_ip, None)
+        self._removed.add(member_ip)
+
+    def prune(self, expected_ips: Any) -> set[str]:
+        allowed = {str(ip) for ip in expected_ips}
+        removed = set(self._values) - allowed
+        for member_ip in removed:
+            self.discard(member_ip)
+        return removed
 
     def flush(
         self,
@@ -206,17 +222,38 @@ class CachedBaselineStore:
         """Atomically flush baselines, changes, incidents, and journal rows."""
 
         dirty = list(self._dirty.values())
-        if not dirty and not changes and not acknowledged_members and not incidents and not transitions:
+        removed = set(self._removed)
+        if (
+            not dirty
+            and not changes
+            and not acknowledged_members
+            and not incidents
+            and not transitions
+            and not removed
+        ):
             return
-        self.storage.save_cycle_domain_state(
-            dirty,
-            changes,
-            acknowledged_members,
-            incidents,
-            transitions,
-        )
+        if removed:
+            self.storage.save_cycle_domain_state(
+                dirty,
+                changes,
+                acknowledged_members,
+                incidents,
+                transitions,
+                removed,
+            )
+        else:
+            # Keep the established five-argument protocol for test/fallback
+            # stores when no scope reconciliation is pending.
+            self.storage.save_cycle_domain_state(
+                dirty,
+                changes,
+                acknowledged_members,
+                incidents,
+                transitions,
+            )
         for baseline in dirty:
             self._dirty.pop(baseline.member_ip, None)
+        self._removed.difference_update(removed)
 
 
 class RuntimePoller:
@@ -326,6 +363,26 @@ class RuntimePoller:
 
     def update_settings(self, settings: AppSettings) -> None:
         with self._lock:
+            previous_config_scope = tuple(
+                member.ip.strip()
+                for member in self.settings.cluster.members
+                if member.ip.strip()
+            )
+            previous_runtime_scope = self.engine.monitoring_scope_ips()
+            configured_scope = tuple(
+                member.ip.strip()
+                for member in settings.cluster.members
+                if member.ip.strip()
+            )
+            # A threshold/polling-only rebuild must retain the scope observed
+            # in the most recent explicit cycle (notably demo and test
+            # runtimes whose AppSettings remain intentionally unconfigured).
+            # A real member-list edit, including clearing it, is authoritative.
+            monitoring_scope = (
+                previous_runtime_scope
+                if configured_scope == previous_config_scope and previous_runtime_scope
+                else configured_scope
+            )
             previous = (
                 self.settings,
                 self.detector,
@@ -345,6 +402,18 @@ class RuntimePoller:
                 self.detector = self._create_detector(detector_state)
                 self.engine = self._create_engine(pending_changes)
                 self.incident_manager = self._create_incident_manager(incidents)
+                pruned_restored_state = self.engine.reconcile_monitoring_scope(monitoring_scope)
+                removed_scope = (
+                    set(previous_runtime_scope) - set(monitoring_scope)
+                ) | set(pruned_restored_state)
+                for member_ip in removed_scope:
+                    self.baseline_store.discard(member_ip)
+                scope_transitions = self.incident_manager.reconcile_monitoring_scope(
+                    monitoring_scope,
+                    now=datetime.now(timezone.utc),
+                )
+                if removed_scope or scope_transitions:
+                    self._persist_incidents(scope_transitions)
             except Exception:
                 self.settings, self.detector, self.engine, self.incident_manager = previous
                 if debug_changed:

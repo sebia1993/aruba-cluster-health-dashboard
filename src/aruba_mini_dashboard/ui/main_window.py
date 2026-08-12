@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QStackedWidget,
     QStyle,
     QSystemTrayIcon,
     QTableWidget,
@@ -62,7 +64,25 @@ class MainWindow(QMainWindow):
     quit_requested = Signal()
     settings_saved = Signal(object)
 
-    COLUMNS = ("IP", "장비명", "MM Status", "Active", "Standby", "Connection-Type", "상태", "마지막 확인")
+    # Keep the long-standing first eight columns stable for operators, tests,
+    # and assistive tooling, then add the explicit monitoring-scope fields.
+    COLUMNS = (
+        "IP",
+        "장비명",
+        "MM 보고 상태",
+        "Active",
+        "Standby",
+        "Connection-Type",
+        "종합 상태",
+        "마지막 확인",
+        "감시 범위",
+        "분배 상태",
+    )
+    COMPACT_COLUMNS = ("컨트롤러", "상태", "클러스터 분배")
+    COMPACT_MODE = "compact"
+    FULL_MODE = "full"
+    FULL_ENTER_WIDTH = 1000
+    COMPACT_ENTER_WIDTH = 900
 
     def __init__(
         self,
@@ -93,8 +113,11 @@ class MainWindow(QMainWindow):
         self._parse_results: Any = {}
         self._previous_devices: dict[str, Any] = {}
         self._active_incidents: list[Any] = []
+        self._devices_by_ip: dict[str, Any] = {}
+        self._pending_scope_refresh_ips: set[str] = set()
         self._base_settings_fingerprint = settings_fingerprint(settings)
         self._detail_windows: list[DetailDialog] = []
+        self._dashboard_mode: str | None = None
 
         self.setWindowTitle("Aruba 네트워크 상태 미니보드" + (" — 데모" if demo_mode else ""))
         self.setMinimumSize(360, 260)
@@ -104,15 +127,43 @@ class MainWindow(QMainWindow):
         self._connect_coordinator()
         self._restore_ui_settings()
         self._set_empty_state()
+        self._apply_responsive_mode(force=True)
 
     def _build_ui(self) -> None:
         central = QWidget(self)
         root = QVBoxLayout(central)
-        root.setContentsMargins(10, 9, 10, 9)
-        root.setSpacing(7)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
         self.setCentralWidget(central)
 
-        self.status_card = QFrame(central)
+        self.dashboard_stack = QStackedWidget(central)
+        self.full_page = self._build_full_page()
+        self.compact_page = self._build_compact_page()
+        self.dashboard_stack.addWidget(self.compact_page)
+        self.dashboard_stack.addWidget(self.full_page)
+        root.addWidget(self.dashboard_stack, 1)
+
+        self.check_now_button.clicked.connect(self.coordinator.check_now)
+        self.start_button.clicked.connect(self.coordinator.start_automatic)
+        self.pause_button.clicked.connect(self.coordinator.pause_automatic)
+        self.settings_button.clicked.connect(self.open_settings)
+        self.ack_button.clicked.connect(self._acknowledge_selected)
+        self.table.itemDoubleClicked.connect(self._open_detail_for_item)
+        self.table.itemSelectionChanged.connect(self._selection_changed)
+        self.compact_check_now_button.clicked.connect(self.coordinator.check_now)
+        self.compact_auto_button.clicked.connect(self._toggle_automatic)
+        self.compact_table.itemDoubleClicked.connect(self._open_detail_for_item)
+        self.compact_table.itemSelectionChanged.connect(self._selection_changed)
+
+        self.statusBar().showMessage("대기 중")
+
+    def _build_full_page(self) -> QWidget:
+        page = QWidget(self)
+        root = QVBoxLayout(page)
+        root.setContentsMargins(10, 9, 10, 9)
+        root.setSpacing(7)
+
+        self.status_card = QFrame(page)
         self.status_card.setObjectName("statusCard")
         status_layout = QVBoxLayout(self.status_card)
         status_layout.setContentsMargins(12, 8, 12, 8)
@@ -173,30 +224,115 @@ class MainWindow(QMainWindow):
             controls.setColumnStretch(column, 1)
         root.addLayout(controls)
 
-        self.table = QTableWidget(0, len(self.COLUMNS), central)
+        self.table = QTableWidget(0, len(self.COLUMNS), page)
         self.table.setHorizontalHeaderLabels(self.COLUMNS)
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SingleSelection)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.verticalHeader().setVisible(False)
+        self._configure_table(self.table)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setHorizontalScrollMode(QTableWidget.ScrollPerPixel)
-        self.table.setVerticalScrollMode(QTableWidget.ScrollPerPixel)
         self.table.setSortingEnabled(True)
         self.table.sortItems(0, Qt.AscendingOrder)
         root.addWidget(self.table, 1)
+        return page
 
-        self.check_now_button.clicked.connect(self.coordinator.check_now)
-        self.start_button.clicked.connect(self.coordinator.start_automatic)
-        self.pause_button.clicked.connect(self.coordinator.pause_automatic)
-        self.settings_button.clicked.connect(self.open_settings)
-        self.ack_button.clicked.connect(self._acknowledge_selected)
-        self.table.itemDoubleClicked.connect(self._open_detail_for_item)
-        self.table.itemSelectionChanged.connect(self._selection_changed)
+    def _build_compact_page(self) -> QWidget:
+        page = QWidget(self)
+        root = QVBoxLayout(page)
+        root.setContentsMargins(8, 7, 8, 7)
+        root.setSpacing(5)
 
-        self.statusBar().showMessage("대기 중")
+        self.compact_status_card = QFrame(page)
+        self.compact_status_card.setObjectName("compactStatusCard")
+        status_layout = QHBoxLayout(self.compact_status_card)
+        status_layout.setContentsMargins(10, 6, 10, 6)
+        status_layout.setSpacing(6)
+        self.compact_status_label = QLabel("확인 불가", self.compact_status_card)
+        font = self.compact_status_label.font()
+        font.setPointSize(max(font.pointSize() + 4, 13))
+        font.setBold(True)
+        self.compact_status_label.setFont(font)
+        self.compact_status_label.setAccessibleName("전체 상태")
+        status_layout.addWidget(self.compact_status_label)
+        self.compact_busy_label = QLabel("", self.compact_status_card)
+        self.compact_busy_label.setStyleSheet("color: #52606D;")
+        status_layout.addWidget(self.compact_busy_label)
+        status_layout.addStretch(1)
+        self.compact_last_check_label = QLabel("마지막: -", self.compact_status_card)
+        self.compact_last_check_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.compact_last_check_label.setAccessibleName("마지막 점검 시각")
+        status_layout.addWidget(self.compact_last_check_label)
+        root.addWidget(self.compact_status_card)
+
+        controls = QHBoxLayout()
+        controls.setSpacing(5)
+        self.compact_check_now_button = QPushButton("지금 점검", page)
+        self.compact_auto_button = QPushButton("자동 시작", page)
+        self.compact_more_button = QToolButton(page)
+        self.compact_more_button.setText("더보기")
+        self.compact_more_button.setPopupMode(QToolButton.InstantPopup)
+        self._build_compact_more_menu()
+        for button in (
+            self.compact_check_now_button,
+            self.compact_auto_button,
+            self.compact_more_button,
+        ):
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            controls.addWidget(button, 1)
+        root.addLayout(controls)
+
+        self.compact_table = QTableWidget(0, len(self.COMPACT_COLUMNS), page)
+        self.compact_table.setHorizontalHeaderLabels(self.COMPACT_COLUMNS)
+        self._configure_table(self.compact_table)
+        self.compact_table.setSortingEnabled(False)
+        self.compact_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.compact_table.setTextElideMode(Qt.ElideMiddle)
+        self.compact_table.verticalHeader().setDefaultSectionSize(27)
+        header = self.compact_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.Fixed)
+        header.resizeSection(1, 78)
+        header.resizeSection(2, 126)
+        root.addWidget(self.compact_table, 1)
+        return page
+
+    @staticmethod
+    def _configure_table(table: QTableWidget) -> None:
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setSelectionMode(QTableWidget.SingleSelection)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.setHorizontalScrollMode(QTableWidget.ScrollPerPixel)
+        table.setVerticalScrollMode(QTableWidget.ScrollPerPixel)
+
+    def _build_compact_more_menu(self) -> None:
+        menu = QMenu(self)
+        self.compact_ack_action = menu.addAction("알림 확인", self._acknowledge_selected)
+        self.compact_settings_action = menu.addAction("설정", self.open_settings)
+        menu.addSeparator()
+        screen_menu = menu.addMenu("화면")
+        self.compact_always_on_top_action = QAction("항상 위에 표시", self, checkable=True)
+        self.compact_always_on_top_action.toggled.connect(self.set_always_on_top)
+        screen_menu.addAction(self.compact_always_on_top_action)
+        opacity_container = QWidget(screen_menu)
+        opacity_layout = QHBoxLayout(opacity_container)
+        opacity_layout.setContentsMargins(10, 4, 10, 4)
+        opacity_layout.addWidget(QLabel("투명도"))
+        self.compact_opacity_slider = NoWheelSlider(Qt.Horizontal, opacity_container)
+        self.compact_opacity_slider.setRange(40, 100)
+        self.compact_opacity_slider.setMinimumWidth(100)
+        self.compact_opacity_number = QLabel("100%")
+        opacity_layout.addWidget(self.compact_opacity_slider, 1)
+        opacity_layout.addWidget(self.compact_opacity_number)
+        opacity_action = QWidgetAction(screen_menu)
+        opacity_action.setDefaultWidget(opacity_container)
+        screen_menu.addAction(opacity_action)
+        screen_menu.addAction("화면 설정 기본값 복원", self.reset_window_options)
+        menu.addAction("전체 보기", self.showMaximized)
+        menu.addSeparator()
+        menu.addAction("종료", self.request_quit)
+        self.compact_opacity_slider.valueChanged.connect(self.set_opacity_percent)
+        self.compact_more_button.setMenu(menu)
 
     def _build_options_menu(self) -> None:
         menu = QMenu(self)
@@ -221,6 +357,48 @@ class MainWindow(QMainWindow):
         menu.addAction(reset)
         self.opacity_slider.valueChanged.connect(self.set_opacity_percent)
         self.options_button.setMenu(menu)
+
+    @Slot()
+    def _toggle_automatic(self) -> None:
+        if self.coordinator.automatic:
+            self.coordinator.pause_automatic()
+        else:
+            self.coordinator.start_automatic()
+
+    def _active_table(self) -> QTableWidget:
+        if self._dashboard_mode == self.FULL_MODE:
+            return self.table
+        return self.compact_table
+
+    def _apply_responsive_mode(self, *, force: bool = False) -> None:
+        if not hasattr(self, "dashboard_stack"):
+            return
+        previous = self._dashboard_mode
+        if self.isMaximized() or self.width() >= self.FULL_ENTER_WIDTH:
+            target = self.FULL_MODE
+        elif self.width() < self.COMPACT_ENTER_WIDTH:
+            target = self.COMPACT_MODE
+        elif previous is None:
+            target = self.COMPACT_MODE
+        else:
+            target = previous
+        if not force and target == previous:
+            return
+        selected_ip = self._selected_ip()
+        self._dashboard_mode = target
+        target_page = self.full_page if target == self.FULL_MODE else self.compact_page
+        self.dashboard_stack.setCurrentWidget(target_page)
+        if selected_ip:
+            self._select_ip(self._active_table(), selected_ip)
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        self._apply_responsive_mode()
+
+    def changeEvent(self, event: QEvent) -> None:  # noqa: N802 - Qt API
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange:
+            self._apply_responsive_mode(force=True)
 
     def _create_tray(self) -> None:
         self.tray_icon = QSystemTrayIcon(status_icon("unknown"), self)
@@ -282,28 +460,40 @@ class MainWindow(QMainWindow):
         self.set_always_on_top(ui.always_on_top, persist=False)
         if ui.window_x is not None and ui.window_y is not None:
             self.move(self._visible_position(QPoint(ui.window_x, ui.window_y), self.size()))
+        if ui.window_maximized:
+            self.setWindowState(self.windowState() | Qt.WindowMaximized)
         self.start_button.setEnabled(not self.coordinator.automatic and not self.coordinator.busy)
         self.pause_button.setEnabled(self.coordinator.automatic)
+        self.compact_auto_button.setText("일시정지" if self.coordinator.automatic else "자동 시작")
+        self.compact_auto_button.setEnabled(
+            self.coordinator.automatic or not self.coordinator.busy
+        )
+        self.compact_settings_action.setEnabled(not self.coordinator.busy)
         if not self.coordinator.automatic:
             self.next_check_label.setText("다음 점검: 일시정지")
 
     def _set_empty_state(self) -> None:
         self._apply_status_style("unknown")
         self.status_label.setText("확인 불가")
+        self.compact_status_label.setText("확인 불가")
         self.problem_label.setText("문제 IP: 확인 전")
         self.reason_label.setText("점검을 실행하면 판단 근거가 표시됩니다.")
         self.ack_button.setEnabled(False)
+        self.compact_ack_action.setEnabled(False)
 
     @Slot(object)
     def update_snapshot(self, result: Any) -> None:
         view = DashboardView.from_source(result)
+        self._pending_scope_refresh_ips.clear()
         self._current_view = view
         self._current_devices = [device.source for device in view.devices]
+        self._devices_by_ip = {device.ip: device.source for device in view.devices if device.ip}
         self._raw_outputs = value(result, "raw_outputs", {})
         self._parse_results = value(result, "parse_results", {})
         self._previous_devices = dict(value(result, "previous_devices", {}) or {})
         self._active_incidents = sequence(result, "active_incidents")
         self.status_label.setText(view.status)
+        self.compact_status_label.setText(view.status)
         self._apply_status_style(view.status_key)
         if not view.problem_ips:
             self.problem_label.setText("문제 IP: 없음")
@@ -326,41 +516,189 @@ class MainWindow(QMainWindow):
             "판단 근거: " + (" / ".join(view.reasons[:4]) if view.reasons else "이상 신호 없음")
         )
         self.last_check_label.setText(f"마지막 점검: {view.checked_at}")
+        self.compact_last_check_label.setText(f"마지막: {view.checked_at_short}")
+        self.compact_last_check_label.setToolTip(f"마지막 점검: {view.checked_at}")
         self._populate_table(view.devices)
         self._update_icons(view.status_key)
         self._notify_from_result(result)
-        self.statusBar().showMessage("점검 완료", 5000)
-        self.ack_button.setEnabled(
-            len(view.problem_ips) == 1 or self._has_active_collection_incident()
-        )
+        hidden_count = max(0, len(view.devices) - len(self._compact_devices(view.devices)))
+        message = "점검 완료"
+        if self._dashboard_mode == self.COMPACT_MODE and hidden_count:
+            message += f" · 미등록 장비 {hidden_count}대 숨김"
+        self.statusBar().showMessage(message, 5000)
+        self._selection_changed()
 
     def _populate_table(self, devices: list[DeviceView]) -> None:
+        selected_ip = self._selected_ip()
+        display_devices = self._scope_adjusted_devices(devices)
+        for device in display_devices:
+            self._devices_by_ip.setdefault(device.ip, device.source)
+        self._populate_full_table(display_devices)
+        compact_devices = self._compact_devices(display_devices)
+        self._populate_compact_table(compact_devices)
+        if selected_ip:
+            self._select_ip(self._active_table(), selected_ip)
+
+    def _populate_full_table(self, devices: list[DeviceView]) -> None:
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(devices))
         for row, device in enumerate(devices):
+            registered = self._device_is_registered(device)
+            display_status = device.status if registered else "감시 제외"
+            display_status_key = device.status_key if registered else "unknown"
             values = (
                 device.ip,
                 device.alias or device.hostname or "-",
-                device.mm_status,
+                device.controller_status,
                 device.active_clients,
                 device.standby_clients,
                 device.connection_type,
-                device.status,
+                display_status,
                 device.last_seen,
+                "등록" if registered else "미등록 · 감시 제외",
+                device.distribution_status,
             )
-            foreground, _background, accent = STATUS_STYLES.get(device.status_key, STATUS_STYLES["unknown"])
+            foreground, _background, _accent = STATUS_STYLES.get(
+                display_status_key, STATUS_STYLES["unknown"]
+            )
             for column, text in enumerate(values):
                 item = QTableWidgetItem(text)
-                item.setData(Qt.UserRole, row)
+                item.setData(Qt.UserRole, device.ip)
+                item.setToolTip(str(text))
                 if column == 6:
                     item.setForeground(QColor(foreground))
                     font = item.font()
                     font.setBold(True)
                     item.setFont(font)
-                    item.setIcon(status_icon(device.status_key))
+                    item.setIcon(status_icon(display_status_key))
+                elif column == 8 and not registered:
+                    item.setForeground(QColor(STATUS_STYLES["unknown"][0]))
                 self.table.setItem(row, column, item)
         self.table.setSortingEnabled(True)
         self.table.sortItems(0, Qt.AscendingOrder)
+
+    def _populate_compact_table(self, devices: list[DeviceView]) -> None:
+        self.compact_table.setRowCount(len(devices))
+        for row, device in enumerate(devices):
+            name = device.alias or device.hostname or "컨트롤러"
+            values = (
+                f"{name} · {device.ip}",
+                device.controller_status,
+                device.distribution_status,
+            )
+            controller_key = {
+                "up": "normal",
+                "down": "failure",
+                "missing": "attention",
+            }.get(device.controller_state, "unknown")
+            distribution_key = {
+                "normal": "normal",
+                "observing": "attention",
+                "anomalous": "attention",
+                "recovering": "attention",
+                "low_usage": "attention",
+                "missing": "attention",
+            }.get(device.distribution_state, "unknown")
+            for column, text in enumerate(values):
+                item = QTableWidgetItem(text)
+                item.setData(Qt.UserRole, device.ip)
+                item.setToolTip(f"{name}\nIP: {device.ip}" if column == 0 else str(text))
+                if column in {1, 2}:
+                    style_key = controller_key if column == 1 else distribution_key
+                    foreground = STATUS_STYLES.get(style_key, STATUS_STYLES["unknown"])[0]
+                    item.setForeground(QColor(foreground))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                    item.setIcon(status_icon(style_key))
+                self.compact_table.setItem(row, column, item)
+
+    def _compact_devices(self, devices: list[DeviceView]) -> list[DeviceView]:
+        by_ip = {device.ip: device for device in devices}
+        scope = [member.ip.strip() for member in self.settings.cluster.members if member.ip.strip()]
+        if not scope:
+            scope = list(self._current_view.monitoring_scope_ips if self._current_view else ())
+        if not scope:
+            scope = [device.ip for device in devices if device.is_registered]
+        ordered = [by_ip[ip] for ip in scope if ip in by_ip and self._device_is_registered(by_ip[ip])]
+        included = {device.ip for device in ordered}
+        ordered.extend(
+            device for device in devices if self._device_is_registered(device) and device.ip not in included
+        )
+        return ordered
+
+    def _scope_adjusted_devices(self, devices: list[DeviceView]) -> list[DeviceView]:
+        """Reclassify the cached snapshot against the current member settings.
+
+        Applying a member-list edit does not run SSH implicitly. Newly added
+        controllers therefore appear immediately with unknown values until the
+        next explicit or scheduled poll, while removed controllers remain as
+        informational inventory in the full view.
+        """
+
+        configured = {
+            member.ip.strip(): member.alias.strip()
+            for member in self.settings.cluster.members
+            if member.ip.strip()
+        }
+        if not configured:
+            return devices
+        adjusted: list[DeviceView] = []
+        seen: set[str] = set()
+        for device in devices:
+            registered = device.ip in configured
+            alias = configured.get(device.ip) or device.alias
+            if device.ip in self._pending_scope_refresh_ips:
+                adjusted.append(
+                    replace(
+                        device,
+                        alias=alias,
+                        is_registered=True,
+                        controller_state="unknown",
+                        controller_status="확인 불가",
+                        distribution_state="unknown",
+                        distribution_status="확인 불가",
+                        status="확인 불가",
+                        status_key="unknown",
+                        issue_reasons=[],
+                    )
+                )
+            else:
+                adjusted.append(replace(device, alias=alias, is_registered=registered))
+            seen.add(device.ip)
+        for ip, alias in configured.items():
+            if ip in seen:
+                continue
+            adjusted.append(
+                DeviceView.from_source(
+                    {
+                        "ip": ip,
+                        "alias": alias,
+                        "is_registered": True,
+                        "controller_state": "unknown",
+                        "distribution_state": "unknown",
+                        "severity": "unknown",
+                    }
+                )
+            )
+        return adjusted
+
+    def _device_is_registered(self, device: DeviceView) -> bool:
+        configured = {member.ip.strip() for member in self.settings.cluster.members if member.ip.strip()}
+        if configured:
+            return device.ip in configured
+        if self._current_view and self._current_view.monitoring_scope_ips:
+            return device.ip in self._current_view.monitoring_scope_ips
+        return device.is_registered
+
+    @staticmethod
+    def _select_ip(table: QTableWidget, ip: str) -> bool:
+        for row in range(table.rowCount()):
+            item = table.item(row, 0)
+            if item is not None and display(item.data(Qt.UserRole), "") == ip:
+                table.selectRow(row)
+                return True
+        return False
 
     def _apply_status_style(self, key: str) -> None:
         foreground, background, accent = STATUS_STYLES.get(key, STATUS_STYLES["unknown"])
@@ -369,7 +707,13 @@ class MainWindow(QMainWindow):
             f"background: {background}; border: 1px solid {accent}; border-left: 5px solid {accent};"
             "border-radius: 6px;}"
         )
+        self.compact_status_card.setStyleSheet(
+            "QFrame#compactStatusCard {"
+            f"background: {background}; border: 1px solid {accent}; border-left: 5px solid {accent};"
+            "border-radius: 6px;}"
+        )
         self.status_label.setStyleSheet(f"color: {foreground};")
+        self.compact_status_label.setStyleSheet(f"color: {foreground};")
 
     def _update_icons(self, key: str) -> None:
         icon = status_icon(key)
@@ -479,6 +823,7 @@ class MainWindow(QMainWindow):
     def _cycle_failed(self, error: BaseException) -> None:
         LOGGER.exception("Poll cycle failed", exc_info=(type(error), error, error.__traceback__))
         self.status_label.setText("확인 불가")
+        self.compact_status_label.setText("확인 불가")
         self.problem_label.setText("최종 판단: 확인 불가")
         from aruba_mini_dashboard.collectors.base import SshOperationError
         from aruba_mini_dashboard.config import SettingsError
@@ -497,6 +842,7 @@ class MainWindow(QMainWindow):
     def _automatic_start_rejected(self, reason: str) -> None:
         self.settings.polling.automatic_enabled = False
         self.next_check_label.setText("다음 점검: 일시정지")
+        self.compact_auto_button.setText("자동 시작")
         self._persist_preference("polling.automatic_enabled", False)
         QMessageBox.warning(self, "자동 점검 시작 불가", reason)
         self.statusBar().showMessage("자동 점검 일시정지: " + reason, 10000)
@@ -504,9 +850,13 @@ class MainWindow(QMainWindow):
     @Slot(bool)
     def _busy_changed(self, busy: bool) -> None:
         self.busy_label.setText("● 점검 중" if busy else "")
+        self.compact_busy_label.setText("● 점검 중" if busy else "")
         self.start_button.setEnabled(not busy and not self.coordinator.automatic)
         self.pause_button.setEnabled(self.coordinator.automatic)
         self.settings_button.setEnabled(not busy)
+        self.compact_check_now_button.setEnabled(not busy)
+        self.compact_auto_button.setEnabled(self.coordinator.automatic or not busy)
+        self.compact_settings_action.setEnabled(not busy)
         if self._quitting and not busy:
             self._complete_quit()
 
@@ -514,6 +864,8 @@ class MainWindow(QMainWindow):
     def _automatic_changed(self, automatic: bool) -> None:
         self.start_button.setEnabled(not automatic and not self.coordinator.busy)
         self.pause_button.setEnabled(automatic)
+        self.compact_auto_button.setText("일시정지" if automatic else "자동 시작")
+        self.compact_auto_button.setEnabled(automatic or not self.coordinator.busy)
         if not automatic:
             self.next_check_label.setText("다음 점검: 일시정지")
         self.settings.polling.automatic_enabled = automatic
@@ -557,6 +909,9 @@ class MainWindow(QMainWindow):
         # Persist first. A failed atomic JSON write must leave the active UI,
         # coordinator, runtime and SQLite preference mirror unchanged.
         previous_settings = self.settings
+        previous_member_ips = tuple(
+            member.ip.strip() for member in previous_settings.cluster.members if member.ip.strip()
+        )
         if self.settings_store is not None:
             try:
                 settings.validate()
@@ -577,10 +932,17 @@ class MainWindow(QMainWindow):
                 return False
         previous_auto = self.coordinator.automatic
         self.settings = settings
+        current_member_ips = tuple(
+            member.ip.strip() for member in settings.cluster.members if member.ip.strip()
+        )
         self._base_settings_fingerprint = settings_fingerprint(settings)
         self.coordinator.set_interval(settings.polling.interval_seconds)
         self.set_opacity_percent(settings.ui.opacity_percent, persist=False)
         self.set_always_on_top(settings.ui.always_on_top, persist=False)
+        if self._current_view is not None:
+            if current_member_ips != previous_member_ips:
+                self._mark_scope_change_pending(current_member_ips, previous_member_ips)
+            self._populate_table(self._current_view.devices)
         if self.notification_service is not None:
             self.notification_service.configure(
                 sound_enabled=settings.notifications.sound_enabled,
@@ -596,6 +958,29 @@ class MainWindow(QMainWindow):
         self.settings_saved.emit(settings)
         self.statusBar().showMessage("설정을 저장했습니다.", 5000)
         return True
+
+    def _mark_scope_change_pending(
+        self,
+        member_ips: tuple[str, ...],
+        previous_member_ips: tuple[str, ...],
+    ) -> None:
+        """Make a changed monitoring scope explicit until the next poll."""
+
+        if self._current_view is None:
+            return
+        self._pending_scope_refresh_ips = set(member_ips) - set(previous_member_ips)
+        self._current_view.monitoring_scope_ips = list(member_ips)
+        self._current_view.problem_ips = []
+        self._current_view.status = "확인 불가"
+        self._current_view.status_key = "unknown"
+        self._current_view.reasons = ["구성원 설정이 변경되었습니다. 다음 점검 결과를 기다립니다."]
+        self.status_label.setText("확인 불가")
+        self.compact_status_label.setText("확인 불가")
+        self.problem_label.setText("문제 IP: 확인 전")
+        self.reason_label.setText("판단 근거: 구성원 설정 변경 후 점검 대기")
+        self._apply_status_style("unknown")
+        self.ack_button.setEnabled(False)
+        self.compact_ack_action.setEnabled(False)
 
     @Slot(str, object)
     def _connection_test_requested(self, role: str, settings: Any) -> None:
@@ -667,19 +1052,18 @@ class MainWindow(QMainWindow):
         LOGGER.warning("NOTIFICATION_UNAVAILABLE: %s", message)
         self.statusBar().showMessage(message, 10000)
 
-    @Slot(int)
+    @Slot(object)
     def _open_detail_for_item(self, item: QTableWidgetItem) -> None:
-        source_index = item.data(Qt.UserRole)
-        if source_index is None or not 0 <= int(source_index) < len(self._current_devices):
+        ip = display(item.data(Qt.UserRole), "")
+        source = self._devices_by_ip.get(ip)
+        if source is None:
             return
         dialog = DetailDialog(
-            self._current_devices[int(source_index)],
+            source,
             self,
             raw_outputs=self._raw_outputs,
             parsed_results=self._parse_results,
-            previous_device=self._previous_devices.get(
-                display(value(self._current_devices[int(source_index)], "ip", ""), "")
-            ),
+            previous_device=self._previous_devices.get(ip),
         )
         self._detail_windows.append(dialog)
         dialog.destroyed.connect(lambda: self._detail_windows.remove(dialog) if dialog in self._detail_windows else None)
@@ -692,9 +1076,17 @@ class MainWindow(QMainWindow):
             return
         selected_ip = self._selected_ip()
         if selected_ip:
-            enabled = (
-                selected_ip in self._current_view.problem_ips
-                or self._has_active_incident_for_ip(selected_ip)
+            selected_device = next(
+                (device for device in self._current_view.devices if device.ip == selected_ip),
+                None,
+            )
+            enabled = bool(
+                selected_device is not None
+                and self._device_is_registered(selected_device)
+                and (
+                    selected_ip in self._current_view.problem_ips
+                    or self._has_active_incident_for_ip(selected_ip)
+                )
             )
         else:
             enabled = (
@@ -702,23 +1094,24 @@ class MainWindow(QMainWindow):
                 or self._has_active_collection_incident()
             )
         self.ack_button.setEnabled(enabled)
+        self.compact_ack_action.setEnabled(enabled)
 
     @Slot()
     def _acknowledge_selected(self) -> None:
-        selected = self.table.selectedItems()
-        if selected:
-            source_index = selected[0].data(Qt.UserRole)
-            if source_index is not None and 0 <= int(source_index) < len(self._current_devices):
-                ip = display(value(self._current_devices[int(source_index)], "ip"), "")
-                if ip and self._current_view and (
-                    ip in self._current_view.problem_ips
-                    or self._has_active_incident_for_ip(ip)
-                ):
-                    self.acknowledge_requested.emit(ip)
-                    self.statusBar().showMessage(f"{ip}의 현재 알림을 확인 처리했습니다.", 5000)
-                    return
-                self.statusBar().showMessage("선택한 행에는 확인 처리할 활성 문제가 없습니다.", 5000)
+        ip = self._selected_ip()
+        if ip:
+            selected_device = next(
+                (device for device in self._current_view.devices if device.ip == ip),
+                None,
+            ) if self._current_view else None
+            if self._current_view and selected_device is not None and self._device_is_registered(
+                selected_device
+            ) and (ip in self._current_view.problem_ips or self._has_active_incident_for_ip(ip)):
+                self.acknowledge_requested.emit(ip)
+                self.statusBar().showMessage(f"{ip}의 현재 알림을 확인 처리했습니다.", 5000)
                 return
+            self.statusBar().showMessage("선택한 행에는 확인 처리할 활성 문제가 없습니다.", 5000)
+            return
         if self._current_view and len(self._current_view.problem_ips) == 1:
             ip = self._current_view.problem_ips[0]
             self.acknowledge_requested.emit(ip)
@@ -731,13 +1124,16 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("확인 처리할 문제 IP를 선택하세요.", 5000)
 
     def _selected_ip(self) -> str:
-        selected = self.table.selectedItems()
-        if not selected:
-            return ""
-        source_index = selected[0].data(Qt.UserRole)
-        if source_index is None or not 0 <= int(source_index) < len(self._current_devices):
-            return ""
-        return display(value(self._current_devices[int(source_index)], "ip", ""), "")
+        tables = (self._active_table(), self.table, self.compact_table)
+        seen: set[int] = set()
+        for table in tables:
+            if id(table) in seen:
+                continue
+            seen.add(id(table))
+            selected = table.selectedItems()
+            if selected:
+                return display(selected[0].data(Qt.UserRole), "")
+        return ""
 
     @staticmethod
     def _incident_is_active(incident: Any) -> bool:
@@ -771,6 +1167,9 @@ class MainWindow(QMainWindow):
         self.always_on_top_action.blockSignals(True)
         self.always_on_top_action.setChecked(bool(enabled))
         self.always_on_top_action.blockSignals(False)
+        self.compact_always_on_top_action.blockSignals(True)
+        self.compact_always_on_top_action.setChecked(bool(enabled))
+        self.compact_always_on_top_action.blockSignals(False)
         if persist:
             self.settings.ui.always_on_top = bool(enabled)
             self._persist_preference("ui.always_on_top", bool(enabled))
@@ -784,6 +1183,11 @@ class MainWindow(QMainWindow):
             self.opacity_slider.blockSignals(True)
             self.opacity_slider.setValue(percent)
             self.opacity_slider.blockSignals(False)
+        self.compact_opacity_number.setText(f"{percent}%")
+        if self.compact_opacity_slider.value() != percent:
+            self.compact_opacity_slider.blockSignals(True)
+            self.compact_opacity_slider.setValue(percent)
+            self.compact_opacity_slider.blockSignals(False)
         if persist:
             self.settings.ui.opacity_percent = percent
             self._persist_preference("ui.opacity_percent", percent)
@@ -856,6 +1260,7 @@ class MainWindow(QMainWindow):
         ui.window_y = geometry.y()
         ui.window_width = max(360, geometry.width())
         ui.window_height = max(260, geometry.height())
+        ui.window_maximized = self.isMaximized()
         ui.opacity_percent = self.opacity_slider.value()
         ui.always_on_top = self.always_on_top_action.isChecked()
         self.settings.polling.automatic_enabled = self.coordinator.automatic
@@ -921,6 +1326,7 @@ class MainWindow(QMainWindow):
             "notifications.recovery_notifications": notifications.recovery_notifications,
             "ui.always_on_top": ui.always_on_top,
             "ui.opacity_percent": ui.opacity_percent,
+            "ui.window_maximized": ui.window_maximized,
             "ui.window_x": ui.window_x,
             "ui.window_y": ui.window_y,
             "ui.window_width": ui.window_width,

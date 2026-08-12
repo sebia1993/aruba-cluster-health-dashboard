@@ -81,9 +81,20 @@ class IncidentManager:
         now: datetime | None = None,
     ) -> list[IncidentTransition]:
         observed_at = now or health.checked_at
+        monitoring_scope = self._monitoring_scope(health)
         aliases = {device.ip: device.display_name for device in health.devices}
         current: dict[tuple[IncidentType, str | None, str], HealthSignal] = {}
         for signal in health.signals:
+            if (
+                signal.incident_type is not IncidentType.COLLECTION_FAILURE
+                and signal.ip is not None
+                and monitoring_scope is not None
+                and signal.ip not in monitoring_scope
+            ):
+                # Defense in depth: correlation should already suppress these,
+                # but a restored/stale snapshot must never reactivate an
+                # inventory-only device incident.
+                continue
             key = self._signal_key(signal)
             # A single poll can surface the same global collection error through
             # several UI paths.  Preserve only one deterministic incident key.
@@ -94,7 +105,11 @@ class IncidentManager:
         }
         self._confirmed_current_keys = set(current)
 
-        transitions: list[IncidentTransition] = []
+        transitions = (
+            []
+            if monitoring_scope is None
+            else self.reconcile_monitoring_scope(monitoring_scope, now=observed_at)
+        )
         for key, signal in current.items():
             incident_id = self._active_keys.get(key)
             if incident_id is None:
@@ -141,9 +156,9 @@ class IncidentManager:
                 )
 
         for key, incident_id in list(self._active_keys.items()):
+            incident = self._incidents[incident_id]
             if key in current:
                 continue
-            incident = self._incidents[incident_id]
             if self._is_superseded_connection_event(incident, current):
                 # A trusted newer event is conclusive even if an older token
                 # also appears in a stale deferred-state snapshot.
@@ -178,6 +193,56 @@ class IncidentManager:
                 )
             )
         return transitions
+
+    def reconcile_monitoring_scope(
+        self,
+        monitoring_scope_ips: Iterable[str],
+        *,
+        now: datetime | None = None,
+    ) -> list[IncidentTransition]:
+        """Close device incidents removed from configuration without recovery.
+
+        Configuration removal is an operator scope change, not evidence that
+        the underlying condition recovered, so it is persisted as a silent
+        ``SUPERSEDED`` transition. Source-level collection failures remain
+        active because they describe monitor reachability rather than a member
+        health judgment.
+        """
+
+        scope = {str(ip) for ip in monitoring_scope_ips}
+        observed_at = now or utc_now()
+        transitions: list[IncidentTransition] = []
+        for key, incident_id in list(self._active_keys.items()):
+            incident = self._incidents[incident_id]
+            if (
+                incident.incident_type is IncidentType.COLLECTION_FAILURE
+                or incident.ip is None
+                or incident.ip in scope
+            ):
+                continue
+            incident.active = False
+            incident.last_seen_at = observed_at
+            del self._active_keys[key]
+            transitions.append(
+                IncidentTransition(
+                    IncidentTransitionKind.SUPERSEDED,
+                    self._snapshot(incident),
+                    False,
+                )
+            )
+        return transitions
+
+    @staticmethod
+    def _monitoring_scope(health: OverallHealth) -> set[str] | None:
+        if health.monitoring_scope_ips is not None:
+            return set(health.monitoring_scope_ips)
+        registered = {device.ip for device in health.devices if device.is_registered}
+        if registered:
+            return registered
+        # Legacy/external snapshots that do not declare a scope retain the
+        # pre-scope lifecycle semantics: absence of a signal can confirm
+        # recovery. Runtime correlation always supplies an explicit tuple.
+        return None
 
     @staticmethod
     def _is_superseded_connection_event(

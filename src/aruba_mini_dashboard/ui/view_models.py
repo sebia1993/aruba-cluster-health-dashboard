@@ -66,6 +66,84 @@ _SEVERITY_LABELS = {
 }
 
 
+_CONTROLLER_STATE_LABELS = {
+    "up": "Up",
+    "down": "Down",
+    "missing": "누락",
+    "unknown": "확인 불가",
+}
+
+_DISTRIBUTION_STATE_LABELS = {
+    "normal": "정상",
+    "observing": "관찰",
+    "anomalous": "이상",
+    "recovering": "복구 확인 중",
+    "low_usage": "낮은 전체 사용량",
+    "missing": "행 누락",
+    "unknown": "확인 불가",
+}
+
+
+def enum_key(source: Any, name: str, default: str = "unknown") -> str:
+    """Return a stable lower-case key for string or Enum-backed UI state."""
+
+    raw = value(source, name, default)
+    if isinstance(raw, Enum):
+        raw = raw.value
+    return str(raw or default).strip().casefold().replace("-", "_").replace(" ", "_")
+
+
+def nonnegative_int(raw: Any) -> int:
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def short_time(rendered: str) -> str:
+    if rendered in {"", "-"}:
+        return rendered
+    if " " in rendered:
+        return rendered.rsplit(" ", 1)[-1][:8]
+    if "T" in rendered:
+        return rendered.split("T", 1)[-1][:8]
+    return rendered[:8]
+
+
+def _controller_state(source: Any) -> tuple[str, str]:
+    state = enum_key(source, "controller_state")
+    # Newer domain snapshots provide controller_state.  Directly constructed
+    # legacy DeviceHealth objects leave it at UNKNOWN, so preserve their useful
+    # MM status instead of replacing a known Up/Down value with "확인 불가".
+    mm_status = display(value(source, "mm_status"), "").strip()
+    mm_key = mm_status.casefold()
+    if state == "unknown" and mm_key in {"up", "down"}:
+        state = mm_key
+    elif state == "unknown" and value(source, "mm_present", None) is False:
+        state = "missing"
+    return state, _CONTROLLER_STATE_LABELS.get(state, "확인 불가")
+
+
+def _distribution_state(source: Any) -> tuple[str, str]:
+    state = enum_key(source, "distribution_state")
+    streak = nonnegative_int(value(source, "load_anomaly_streak", 0))
+    if state == "unknown":
+        if bool(value(source, "load_anomaly", False)):
+            state = "anomalous"
+        elif value(source, "load_present", None) is False:
+            state = "missing"
+        elif streak:
+            state = "observing"
+        elif value(source, "active_clients", None) is not None and value(
+            source, "standby_clients", None
+        ) is not None:
+            state = "normal"
+    label = _DISTRIBUTION_STATE_LABELS.get(state, "확인 불가")
+    if state == "observing" and streak:
+        label = f"관찰 {streak}회"
+    return state, label
+
+
 def severity_key(source: Any) -> str:
     raw = value(source, "severity", value(source, "overall_status", value(source, "status", "unknown")))
     if isinstance(raw, Enum):
@@ -98,11 +176,19 @@ class DeviceView:
     status: str
     status_key: str
     last_seen: str
+    is_registered: bool = True
+    controller_state: str = "unknown"
+    controller_status: str = "확인 불가"
+    distribution_state: str = "unknown"
+    distribution_status: str = "확인 불가"
+    load_anomaly_streak: int = 0
     issue_reasons: list[str] = field(default_factory=list)
 
     @classmethod
     def from_source(cls, source: Any) -> "DeviceView":
         reasons = [display(item, "") for item in sequence(source, "issue_reasons", "reasons")]
+        controller_state, controller_status = _controller_state(source)
+        distribution_state, distribution_status = _distribution_state(source)
         return cls(
             source=source,
             ip=display(value(source, "ip"), ""),
@@ -115,6 +201,12 @@ class DeviceView:
             status=severity_label(source),
             status_key=severity_key(source),
             last_seen=display(value(source, "last_seen")),
+            is_registered=bool(value(source, "is_registered", True)),
+            controller_state=controller_state,
+            controller_status=controller_status,
+            distribution_state=distribution_state,
+            distribution_status=distribution_status,
+            load_anomaly_streak=nonnegative_int(value(source, "load_anomaly_streak", 0)),
             issue_reasons=[item for item in reasons if item],
         )
 
@@ -128,6 +220,8 @@ class DashboardView:
     problem_ips: list[str]
     reasons: list[str]
     checked_at: str
+    checked_at_short: str
+    monitoring_scope_ips: list[str] = field(default_factory=list)
 
     @classmethod
     def from_source(cls, source: Any) -> "DashboardView":
@@ -164,6 +258,11 @@ class DashboardView:
             for device in devices:
                 reasons.extend(device.issue_reasons)
         checked = value(source, "checked_at", value(source, "completed_at", value(source, "last_checked", None)))
+        checked_display = display(checked)
+        # display(datetime) is deliberately the canonical local-time
+        # conversion.  Keeping the short form derived from it makes the compact
+        # board match the full detail timestamp and its timezone.
+        checked_short = short_time(checked_display)
         return cls(
             source=source,
             status=severity_label(source),
@@ -171,7 +270,11 @@ class DashboardView:
             devices=devices,
             problem_ips=[ip for ip in problem_ips if ip],
             reasons=list(dict.fromkeys(reason for reason in reasons if reason)),
-            checked_at=display(checked),
+            checked_at=checked_display,
+            checked_at_short=checked_short,
+            monitoring_scope_ips=[
+                display(ip, "") for ip in sequence(source, "monitoring_scope_ips") if display(ip, "")
+            ],
         )
 
 

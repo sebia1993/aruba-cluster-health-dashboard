@@ -5,6 +5,10 @@ from pathlib import Path
 
 from aruba_mini_dashboard.models import (
     CollectionError,
+    ConnectionBaseline,
+    ConnectionChange,
+    ControllerState,
+    DistributionState,
     IncidentTransitionKind,
     IncidentType,
     ParseIssue,
@@ -651,7 +655,7 @@ def test_membership_missing_is_not_reported_as_connection_change() -> None:
     assert any("Membership 행 누락" in reason for reason in device.issue_reasons)
 
 
-def test_dynamic_mm_ip_is_displayed_and_later_missing_is_debounced() -> None:
+def test_dynamic_mm_ip_is_inventory_only_and_never_advances_missing_state() -> None:
     extra = fixture("mm_show_switches_normal.txt").replace(
         "\nTotal Switches: 4", "\n192.0.2.99       EDGE-MM            Up\n\nTotal Switches: 5"
     )
@@ -664,12 +668,175 @@ def test_dynamic_mm_ip_is_displayed_and_later_missing_is_debounced() -> None:
         health = engine.correlate(cycle(checked_at=NOW + timedelta(minutes=index + 1)))
     dynamic = health.device_by_ip("192.0.2.99")
     assert dynamic is not None
-    assert dynamic.severity is Severity.WARNING
+    assert dynamic.is_registered is False
+    assert dynamic.controller_state is ControllerState.MISSING
+    assert dynamic.severity is Severity.NORMAL
+    assert health.problem_ips == []
     assert not dynamic.collection_errors  # no Cluster data is expected for MM-only devices
     first_recovery = engine.correlate(first_poll)
-    assert first_recovery.device_by_ip("192.0.2.99").severity is Severity.WARNING  # type: ignore[union-attr]
-    second_recovery = engine.correlate(first_poll)
-    assert second_recovery.device_by_ip("192.0.2.99").severity is Severity.NORMAL  # type: ignore[union-attr]
+    assert first_recovery.device_by_ip("192.0.2.99").severity is Severity.NORMAL  # type: ignore[union-attr]
+
+
+def test_unregistered_mm_down_is_visible_but_excluded_from_health_and_incidents() -> None:
+    extra = fixture("mm_show_switches_normal.txt").replace(
+        "\nTotal Switches: 4",
+        "\n192.0.2.99       EDGE-MM            Down\n\nTotal Switches: 5",
+    )
+    poll = cycle()
+    poll.mm_result = parse_show_switches(extra)
+
+    health = CorrelationEngine().correlate(poll)
+
+    inventory = health.device_by_ip("192.0.2.99")
+    assert health.monitoring_scope_ips == tuple(MEMBERS)
+    assert health.severity is Severity.NORMAL
+    assert health.problem_ips == []
+    assert inventory is not None
+    assert inventory.is_registered is False
+    assert inventory.controller_state is ControllerState.DOWN
+    assert inventory.mm_status == "Down"
+    assert inventory.signals == []
+    assert IncidentManager().process(health) == []
+
+
+def test_unregistered_membership_row_never_creates_or_changes_a_baseline() -> None:
+    initial = fixture("group_membership_initial.txt").replace(
+        "\n(WLC-01) #",
+        "\n192.0.2.99       Type-Z\n(WLC-01) #",
+    )
+    changed = initial.replace("Type-Z", "Type-Y")
+    store = InMemoryConnectionBaselineStore()
+    engine = CorrelationEngine(baseline_store=store)
+
+    first_poll = cycle()
+    first_poll.membership_result = parse_group_membership(initial)
+    first = engine.correlate(first_poll)
+    second_poll = cycle(checked_at=NOW + timedelta(minutes=1))
+    second_poll.membership_result = parse_group_membership(changed)
+    second = engine.correlate(second_poll)
+
+    inventory = second.device_by_ip("192.0.2.99")
+    assert inventory is not None and inventory.is_registered is False
+    assert inventory.connection_type == "Type-Y"
+    assert store.get("192.0.2.99") is None
+    assert not any(signal.ip == "192.0.2.99" for signal in first.signals + second.signals)
+
+
+def test_scope_removal_prunes_restored_baseline_and_pending_change() -> None:
+    baseline = ConnectionBaseline(
+        collector_ip="192.0.2.99",
+        member_ip="192.0.2.99",
+        display_value="Type-A",
+        normalized_value="type a",
+        observed_at=NOW,
+    )
+    change = ConnectionChange(
+        collector_ip="192.0.2.99",
+        member_ip="192.0.2.99",
+        previous_value="Type-A",
+        current_value="Type-B",
+        first_detected_at=NOW,
+        last_confirmed_at=NOW,
+    )
+    store = InMemoryConnectionBaselineStore([baseline])
+    engine = CorrelationEngine(
+        baseline_store=store,
+        pending_connection_changes=[change],
+    )
+
+    health = engine.correlate(cycle())
+
+    assert health.monitoring_scope_ips == tuple(MEMBERS)
+    assert store.get("192.0.2.99") is None
+    assert engine.pending_connection_changes() == ()
+    assert not any(signal.ip == "192.0.2.99" for signal in health.signals)
+
+
+def test_removed_then_readded_member_uses_first_membership_as_a_new_baseline() -> None:
+    store = InMemoryConnectionBaselineStore()
+    engine = CorrelationEngine(baseline_store=store)
+    engine.correlate(cycle())
+
+    removed_poll = cycle(checked_at=NOW + timedelta(minutes=1))
+    removed_poll.expected_cluster_members = {
+        ip: alias for ip, alias in MEMBERS.items() if ip != "192.0.2.12"
+    }
+    removed = engine.correlate(removed_poll)
+    assert removed.device_by_ip("192.0.2.12").is_registered is False  # type: ignore[union-attr]
+    assert store.get("192.0.2.12") is None
+
+    readded = engine.correlate(
+        cycle(
+            membership="group_membership_changed.txt",
+            checked_at=NOW + timedelta(minutes=2),
+        )
+    )
+    target = readded.device_by_ip("192.0.2.12")
+    assert target is not None and target.is_registered is True
+    assert target.connection_type == "Type-B"
+    assert target.connection_type_changed is False
+    assert store.get("192.0.2.12").display_value == "Type-B"  # type: ignore[union-attr]
+
+
+def test_scope_removal_resets_client_anomaly_streak_before_readd() -> None:
+    engine = CorrelationEngine()
+    engine.correlate(cycle(load="cluster_load_abnormal.txt"))
+    second = engine.correlate(
+        cycle(load="cluster_load_abnormal.txt", checked_at=NOW + timedelta(minutes=1))
+    )
+    assert second.device_by_ip("192.0.2.12").load_anomaly_streak == 2  # type: ignore[union-attr]
+
+    removed_poll = cycle(checked_at=NOW + timedelta(minutes=2))
+    removed_poll.expected_cluster_members = {
+        ip: alias for ip, alias in MEMBERS.items() if ip != "192.0.2.12"
+    }
+    engine.correlate(removed_poll)
+    readded = engine.correlate(
+        cycle(load="cluster_load_abnormal.txt", checked_at=NOW + timedelta(minutes=3))
+    )
+
+    target = readded.device_by_ip("192.0.2.12")
+    assert target is not None
+    assert target.distribution_state is DistributionState.OBSERVING
+    assert target.load_anomaly_streak == 1
+    assert target.load_anomaly is False
+
+
+def test_distribution_state_exposes_observation_anomaly_recovery_and_low_usage() -> None:
+    engine = CorrelationEngine()
+    observing = engine.correlate(cycle(load="cluster_load_abnormal.txt"))
+    assert observing.device_by_ip("192.0.2.12").distribution_state is DistributionState.OBSERVING  # type: ignore[union-attr]
+    engine.correlate(
+        cycle(load="cluster_load_abnormal.txt", checked_at=NOW + timedelta(minutes=1))
+    )
+    anomalous = engine.correlate(
+        cycle(load="cluster_load_abnormal.txt", checked_at=NOW + timedelta(minutes=2))
+    )
+    assert anomalous.device_by_ip("192.0.2.12").distribution_state is DistributionState.ANOMALOUS  # type: ignore[union-attr]
+    recovering = engine.correlate(cycle(checked_at=NOW + timedelta(minutes=3)))
+    assert recovering.device_by_ip("192.0.2.12").distribution_state is DistributionState.RECOVERING  # type: ignore[union-attr]
+    recovered = engine.correlate(cycle(checked_at=NOW + timedelta(minutes=4)))
+    assert recovered.device_by_ip("192.0.2.12").distribution_state is DistributionState.NORMAL  # type: ignore[union-attr]
+
+    low_usage = CorrelationEngine().correlate(cycle(load="cluster_load_all_low.txt"))
+    assert all(
+        device.distribution_state is DistributionState.LOW_USAGE
+        for device in low_usage.devices
+        if device.is_registered
+    )
+
+
+def test_distribution_missing_state_is_observing_until_confirmed() -> None:
+    engine = CorrelationEngine()
+    first = engine.correlate(cycle(load="cluster_load_missing_member.txt"))
+    assert first.device_by_ip("192.0.2.12").distribution_state is DistributionState.OBSERVING  # type: ignore[union-attr]
+    engine.correlate(
+        cycle(load="cluster_load_missing_member.txt", checked_at=NOW + timedelta(minutes=1))
+    )
+    confirmed = engine.correlate(
+        cycle(load="cluster_load_missing_member.txt", checked_at=NOW + timedelta(minutes=2))
+    )
+    assert confirmed.device_by_ip("192.0.2.12").distribution_state is DistributionState.MISSING  # type: ignore[union-attr]
 
 
 def test_low_overall_usage_is_normal_with_an_explicit_note() -> None:

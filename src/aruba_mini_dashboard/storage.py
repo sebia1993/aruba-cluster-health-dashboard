@@ -13,7 +13,7 @@ import os
 import sqlite3
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -449,6 +449,49 @@ class SQLiteStorage:
             observed_at=getattr(baseline, "observed_at"),
         )
 
+    def discard(self, member_ip: str) -> None:
+        """Remove monitored-member state while retaining discovery/history rows."""
+
+        member = str(member_ip)
+
+        def operation(db: sqlite3.Connection) -> None:
+            db.execute("DELETE FROM connection_baselines WHERE member_ip=?", (member,))
+            db.execute("DELETE FROM detector_streaks WHERE ip=?", (member,))
+            db.execute(
+                "UPDATE connection_changes SET acknowledged=1 "
+                "WHERE member_ip=? AND acknowledged=0",
+                (member,),
+            )
+
+        self._write(operation)
+
+    def prune(self, expected_ips: Iterable[str]) -> set[str]:
+        """Prune durable detector/baseline state outside the configured scope."""
+
+        allowed = {str(ip) for ip in expected_ips}
+        rows = self._read(
+            lambda db: db.execute(
+                "SELECT member_ip AS ip FROM connection_baselines "
+                "UNION SELECT ip FROM detector_streaks "
+                "UNION SELECT member_ip AS ip FROM connection_changes WHERE acknowledged=0"
+            ).fetchall()
+        )
+        removed = {str(row["ip"]) for row in rows} - allowed
+        if removed:
+            self._write(lambda db: self._prune_member_rows(db, removed))
+        return removed
+
+    @staticmethod
+    def _prune_member_rows(db: sqlite3.Connection, member_ips: set[str]) -> None:
+        for member_ip in member_ips:
+            db.execute("DELETE FROM connection_baselines WHERE member_ip=?", (member_ip,))
+            db.execute("DELETE FROM detector_streaks WHERE ip=?", (member_ip,))
+            db.execute(
+                "UPDATE connection_changes SET acknowledged=1 "
+                "WHERE member_ip=? AND acknowledged=0",
+                (member_ip,),
+            )
+
     def save_connection_change(self, change: object, *, acknowledged: bool = False) -> None:
         event_token = str(getattr(change, "event_token"))
         member_ip = str(getattr(change, "member_ip"))
@@ -550,10 +593,12 @@ class SQLiteStorage:
         acknowledged_members: set[str],
         incidents: list[object],
         transitions: list[object],
+        removed_members: set[str] | None = None,
     ) -> None:
         """Atomically commit membership state, acknowledgements, and incidents."""
 
         def operation(db: sqlite3.Connection) -> None:
+            self._prune_member_rows(db, set(removed_members or ()))
             for baseline in baselines:
                 db.execute(
                     """INSERT INTO connection_baselines
