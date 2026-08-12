@@ -13,12 +13,12 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLabel,
     QPlainTextEdit,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from .view_models import DeviceView, display, flatten_errors, safe_raw_output, sequence, value
+from .widgets import SubtleTabWidget
 
 
 def _plain(value_: Any) -> Any:
@@ -63,7 +63,7 @@ class DetailDialog(QDialog):
         self._raw_editor: QPlainTextEdit | None = None
 
         root = QVBoxLayout(self)
-        self.tabs = QTabWidget(self)
+        self.tabs = SubtleTabWidget(self)
         root.addWidget(self.tabs)
         self._build_summary_tab()
         self.tabs.addTab(QWidget(self.tabs), "파싱 결과")

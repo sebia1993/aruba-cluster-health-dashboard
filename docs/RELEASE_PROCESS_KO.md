@@ -42,6 +42,9 @@ Actions에서 재현 가능하게 빌드하고, 검증된 자산만 GitHub Prere
   보존합니다. 이 태그를 이동하거나 다시 사용하지 않습니다.
 - `v0.3.2`: 태그별 GraphQL 조회와 REST numeric-ID 재검증으로 Draft 식별을
   보강한 patch Prerelease입니다. `v0.3.1` 기능을 그대로 포함합니다.
+- `v0.3.3`: 설정창과 장비 상세창의 모든 탭에서 넓은 Windows 파란색 선택 채움을
+  제거하고, 시스템 팔레트 기반의 중립색 탭과 얇은 청회색 하단 표시선을 적용한
+  patch Prerelease입니다. 기존 키보드 탐색과 포커스 표시는 유지합니다.
 
 ## 로컬 검증
 
@@ -49,21 +52,21 @@ CPython 3.11.9 x64와 Windows PowerShell 5.1 환경에서 실행합니다.
 
 ```powershell
 .\scripts\run_tests.ps1
-.\scripts\package_release.ps1 -Version 0.3.2
+.\scripts\package_release.ps1 -Version 0.3.3
 ```
 
 성공하면 `dist\release`에는 다음 두 파일만 생성됩니다.
 
 ```text
-ArubaMiniDashboard-v0.3.2-windows-x64.zip
-ArubaMiniDashboard-v0.3.2-windows-x64.zip.sha256
+ArubaMiniDashboard-v0.3.3-windows-x64.zip
+ArubaMiniDashboard-v0.3.3-windows-x64.zip.sha256
 ```
 
 다른 위치로 전달된 자산은 다시 빌드하지 않고 다음과 같이 검증할 수 있습니다.
 
 ```powershell
 .\scripts\package_release.ps1 `
-  -Version 0.3.2 `
+  -Version 0.3.3 `
   -OutputDirectory artifacts\release `
   -VerifyOnly
 ```
@@ -83,8 +86,8 @@ Qt exact inventory와 한국어 번역 2개, PySide6/shiboken6/Paramiko/scp 외�
 ```powershell
 git switch main
 git pull --ff-only
-git tag -a v0.3.2 -m "Aruba Mini Dashboard v0.3.2"
-git push origin v0.3.2
+git tag -a v0.3.3 -m "Aruba Mini Dashboard v0.3.3"
+git push origin v0.3.3
 ```
 
 태그가 잘못된 커밋을 가리키면 Release workflow를 실행하지 않습니다. 게시된
@@ -100,7 +103,7 @@ Workflow가 사용하는 공식 Actions는 Node.js 24 기반 버전의 검토된
 사용하려면 runner `2.327.1` 이상이 필요합니다. 구형 Node 런타임을 강제로 허용하는
 환경 변수로 우회하지 않습니다.
 
-- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.3.2`
+- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.3.3`
 - `release_mode`:
   - `build-only`: 빌드·검증 후 Actions artifact만 생성
   - `draft-prerelease`: 검증된 두 자산을 새 Prerelease Draft에 업로드하고 정지

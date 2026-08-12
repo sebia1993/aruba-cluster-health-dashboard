@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -39,7 +38,12 @@ class ConnectionTestRequest:
     def __repr__(self) -> str:
         return "ConnectionTestRequest(settings=[NON_SECRET], credential=[REDACTED])"
 
-from .widgets import CollapsibleSection, ClickArmedComboBox, ClickArmedSpinBox
+from .widgets import (
+    ClickArmedComboBox,
+    ClickArmedSpinBox,
+    CollapsibleSection,
+    SubtleTabWidget,
+)
 
 
 class _CredentialFields(QGroupBox):
@@ -130,7 +134,7 @@ class SettingsDialog(QDialog):
             )
             guide.setAccessibleName("첫 실행 설정 안내")
             layout.addWidget(guide)
-        self.tabs = QTabWidget(self)
+        self.tabs = SubtleTabWidget(self)
         layout.addWidget(self.tabs)
         self._build_devices_tab()
         self._build_polling_tab()
