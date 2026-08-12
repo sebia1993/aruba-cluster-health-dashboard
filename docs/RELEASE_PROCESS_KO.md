@@ -30,7 +30,9 @@ Actions에서 재현 가능하게 빌드하고, 검증된 자산만 GitHub Prere
 - `v0.1.0`: 사용하지 않는 Qt Virtual Keyboard 구성요소가 포함된 최초 패키지입니다.
   기존 Draft와 자산을 격리 상태로 보존하고 재게시하거나 교체하지 않습니다.
 - `v0.1.1`: 해당 구성요소를 제거하고 라이선스 고지·패키지 검증을 강화한 첫
-  MIT Prerelease 후보입니다. 새 annotated tag와 새 Release로만 게시합니다.
+  MIT Prerelease입니다.
+- `v0.2.0`: 등록 장비 중심 감시 범위, 간단/전체 반응형 화면과 설정 입력
+  안전화를 추가한 Prerelease입니다. 새 annotated tag와 새 Release로만 게시합니다.
 
 ## 로컬 검증
 
@@ -38,21 +40,21 @@ CPython 3.11.9 x64와 Windows PowerShell 5.1 환경에서 실행합니다.
 
 ```powershell
 .\scripts\run_tests.ps1
-.\scripts\package_release.ps1 -Version 0.1.1
+.\scripts\package_release.ps1 -Version 0.2.0
 ```
 
 성공하면 `dist\release`에는 다음 두 파일만 생성됩니다.
 
 ```text
-ArubaMiniDashboard-v0.1.1-windows-x64.zip
-ArubaMiniDashboard-v0.1.1-windows-x64.zip.sha256
+ArubaMiniDashboard-v0.2.0-windows-x64.zip
+ArubaMiniDashboard-v0.2.0-windows-x64.zip.sha256
 ```
 
 다른 위치로 전달된 자산은 다시 빌드하지 않고 다음과 같이 검증할 수 있습니다.
 
 ```powershell
 .\scripts\package_release.ps1 `
-  -Version 0.1.1 `
+  -Version 0.2.0 `
   -OutputDirectory artifacts\release `
   -VerifyOnly
 ```
@@ -71,8 +73,8 @@ Qt exact inventory, PySide6/shiboken6/Paramiko/scp 외부 소스와 PYZ 비포�
 ```powershell
 git switch main
 git pull --ff-only
-git tag -a v0.1.1 -m "Aruba Mini Dashboard v0.1.1"
-git push origin v0.1.1
+git tag -a v0.2.0 -m "Aruba Mini Dashboard v0.2.0"
+git push origin v0.2.0
 ```
 
 태그가 잘못된 커밋을 가리키면 Release workflow를 실행하지 않습니다. 게시된
@@ -83,7 +85,7 @@ git push origin v0.1.1
 GitHub의 **Actions → Build and publish Windows prerelease → Run workflow**에서
 반드시 `main` 브랜치를 선택합니다. 입력값은 다음과 같습니다.
 
-- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.1.1`
+- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.2.0`
 - `release_mode`:
   - `build-only`: 빌드·검증 후 Actions artifact만 생성
   - `draft-prerelease`: 검증된 두 자산을 새 Prerelease Draft에 업로드하고 정지

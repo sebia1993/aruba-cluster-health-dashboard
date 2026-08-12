@@ -30,6 +30,27 @@ class DetectionMode(str, Enum):
     ABSOLUTE_AND_RELATIVE = "absolute_and_relative"
 
 
+class ControllerState(str, Enum):
+    """Structured controller state rendered by compact dashboard views."""
+
+    UP = "up"
+    DOWN = "down"
+    MISSING = "missing"
+    UNKNOWN = "unknown"
+
+
+class DistributionState(str, Enum):
+    """Structured client-distribution lifecycle for one monitored member."""
+
+    NORMAL = "normal"
+    OBSERVING = "observing"
+    ANOMALOUS = "anomalous"
+    RECOVERING = "recovering"
+    LOW_USAGE = "low_usage"
+    MISSING = "missing"
+    UNKNOWN = "unknown"
+
+
 class IncidentType(str, Enum):
     MM_DOWN = "mm_down"
     CLIENT_DISTRIBUTION = "client_distribution"
@@ -162,6 +183,9 @@ class DeviceHealth:
     ip: str
     alias: str | None = None
     hostname: str | None = None
+    is_registered: bool = True
+    controller_state: ControllerState = ControllerState.UNKNOWN
+    distribution_state: DistributionState = DistributionState.UNKNOWN
     mm_status: str | None = None
     active_clients: int | None = None
     standby_clients: int | None = None
@@ -190,6 +214,7 @@ class OverallHealth:
     checked_at: datetime
     severity: Severity
     devices: list[DeviceHealth]
+    monitoring_scope_ips: tuple[str, ...] | None = None
     problem_ips: list[str] = field(default_factory=list)
     primary_problem_ip: str | None = None
     summary: str = ""

@@ -161,6 +161,7 @@ class NotificationSettings:
 class UiSettings:
     always_on_top: bool = False
     opacity_percent: int = 100
+    window_maximized: bool = False
     window_x: int | None = None
     window_y: int | None = None
     window_width: int = 420
@@ -505,6 +506,7 @@ def _settings_schema_errors(settings: AppSettings) -> list[str]:
     ui = settings.ui
     if exact("ui", ui, UiSettings, "객체"):
         boolean("ui.always_on_top", ui.always_on_top)
+        boolean("ui.window_maximized", ui.window_maximized)
         for field_name in ("opacity_percent", "window_width", "window_height"):
             integer(f"ui.{field_name}", getattr(ui, field_name))
         for field_name in ("window_x", "window_y"):

@@ -232,3 +232,15 @@ def test_detector_state_round_trip_preserves_streaks() -> None:
     restored = AnomalyDetector(state=first.dump_state())
     result = restored.evaluate_client_distribution(ONE_LOW, IPS, data_complete=True, total_active=755)
     assert result["192.0.2.12"].anomaly_streak == 2
+
+
+def test_prune_ips_removes_every_counter_category_for_removed_member() -> None:
+    detector = AnomalyDetector()
+    detector.evaluate_client_distribution(ONE_LOW, IPS, data_complete=True, total_active=755)
+    detector.evaluate_missing("mm", IPS[:1] + IPS[2:], IPS, data_complete=True)
+    detector.evaluate_missing("membership", IPS[:1] + IPS[2:], IPS, data_complete=True)
+
+    removed = detector.prune_ips(ip for ip in IPS if ip != "192.0.2.12")
+
+    assert removed == {"192.0.2.12"}
+    assert not any(key.endswith("|192.0.2.12") for key in detector.dump_state())

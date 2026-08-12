@@ -7,8 +7,10 @@ from aruba_mini_dashboard.models import (
     CollectionError,
     ConnectionBaseline,
     ConnectionChange,
+    ControllerState,
     DeferredIncidentState,
     DeviceHealth,
+    DistributionState,
     HealthSignal,
     IncidentType,
     OverallHealth,
@@ -31,6 +33,10 @@ class ConnectionBaselineStore(Protocol):
 
     def set(self, baseline: ConnectionBaseline) -> None: ...
 
+    def discard(self, member_ip: str) -> None: ...
+
+    def prune(self, expected_ips: Iterable[str]) -> set[str]: ...
+
 
 class InMemoryConnectionBaselineStore:
     def __init__(self, baselines: Iterable[ConnectionBaseline] = ()) -> None:
@@ -41,6 +47,16 @@ class InMemoryConnectionBaselineStore:
 
     def set(self, baseline: ConnectionBaseline) -> None:
         self._values[baseline.member_ip] = baseline
+
+    def discard(self, member_ip: str) -> None:
+        self._values.pop(member_ip, None)
+
+    def prune(self, expected_ips: Iterable[str]) -> set[str]:
+        allowed = {str(ip) for ip in expected_ips}
+        removed = set(self._values) - allowed
+        for member_ip in removed:
+            self.discard(member_ip)
+        return removed
 
     def values(self) -> tuple[ConnectionBaseline, ...]:
         return tuple(self._values[member_ip] for member_ip in sorted(self._values))
@@ -111,6 +127,7 @@ class CorrelationEngine:
             change.member_ip: change
             for change in (pending_connection_changes or ())
         }
+        self._monitoring_scope_ips: tuple[str, ...] = ()
 
     def dump_known_mm_devices(self) -> dict[str, str | None]:
         return dict(self._known_mm_devices)
@@ -120,6 +137,9 @@ class CorrelationEngine:
             self._pending_connection_changes[member_ip]
             for member_ip in sorted(self._pending_connection_changes)
         )
+
+    def monitoring_scope_ips(self) -> tuple[str, ...]:
+        return self._monitoring_scope_ips
 
     def acknowledge_connection_change(self, ip: str, collector_ip: str | None = None) -> bool:
         change = self._pending_connection_changes.get(ip)
@@ -131,8 +151,43 @@ class CorrelationEngine:
     def acknowledge_all_connection_changes(self) -> None:
         self._pending_connection_changes.clear()
 
+    def reconcile_monitoring_scope(self, expected_ips: Iterable[str]) -> set[str]:
+        """Drop health state for IPs outside the authoritative configured scope.
+
+        MM discovery remains independent so removed members can still appear as
+        informational inventory rows in the expanded dashboard.
+        """
+
+        ordered = tuple(dict.fromkeys(str(ip) for ip in expected_ips))
+        allowed = set(ordered)
+        removed = self.detector.prune_ips(ordered)
+        for member_ip in list(self._pending_connection_changes):
+            if member_ip not in allowed:
+                removed.add(member_ip)
+                del self._pending_connection_changes[member_ip]
+
+        prune = getattr(self.baseline_store, "prune", None)
+        if callable(prune):
+            removed.update(prune(ordered))
+        else:
+            discard = getattr(self.baseline_store, "discard", None)
+            if callable(discard):
+                for member_ip in removed:
+                    discard(member_ip)
+
+        # A removed IP may have only an incident or a pending change, without a
+        # baseline/counter. Mark every known removal for durable cleanup.
+        discard = getattr(self.baseline_store, "discard", None)
+        if callable(discard):
+            for member_ip in removed:
+                discard(member_ip)
+        self._monitoring_scope_ips = ordered
+        return removed
+
     def correlate(self, cycle: PollCycleResult) -> OverallHealth:
         expected_aliases = dict(cycle.expected_cluster_members)
+        monitoring_scope_ips = tuple(expected_aliases)
+        self.reconcile_monitoring_scope(monitoring_scope_ips)
         errors = list(cycle.collection_errors)
         errors.extend(_parser_errors(cycle, MM_SOURCE, cycle.mm_result, errors))
         errors.extend(_parser_errors(cycle, LOAD_SOURCE, cycle.load_result, errors))
@@ -159,6 +214,7 @@ class CorrelationEngine:
                 ip=ip,
                 alias=expected_aliases.get(ip),
                 hostname=(mm_by_ip[ip].hostname if ip in mm_by_ip else self._known_mm_devices.get(ip)),
+                is_registered=ip in expected_aliases,
             )
             for ip in sorted(all_ips)
         }
@@ -228,6 +284,7 @@ class CorrelationEngine:
             checked_at=cycle.checked_at,
             severity=severity,
             devices=ordered_devices,
+            monitoring_scope_ips=monitoring_scope_ips,
             problem_ips=problem_ips,
             primary_problem_ip=problem_ips[0] if problem_ips else None,
             summary=summary,
@@ -250,7 +307,7 @@ class CorrelationEngine:
         deferred_incidents: list[DeferredIncidentState],
     ) -> None:
         complete = cycle.mm_result is not None and cycle.mm_result.status is ParseStatus.COMPLETE
-        expected_mm = set(self._known_mm_devices) | set(cycle.expected_cluster_members)
+        expected_mm = tuple(cycle.expected_cluster_members)
         if not complete:
             for ip in expected_mm:
                 self._defer(deferred_incidents, IncidentType.MM_DOWN, ip)
@@ -265,6 +322,10 @@ class CorrelationEngine:
             device = devices[ip]
             evaluation = missing[ip]
             device.mm_present = evaluation.present
+            if evaluation.present is False:
+                device.controller_state = ControllerState.MISSING
+            elif evaluation.present is None:
+                device.controller_state = ControllerState.UNKNOWN
             if evaluation.active and evaluation.deferred:
                 self._defer(deferred_incidents, IncidentType.MM_MEMBER_MISSING, ip)
             elif evaluation.active:
@@ -280,13 +341,33 @@ class CorrelationEngine:
                 device.observations.append(
                     f"MM 행 누락 감지 {evaluation.missing_streak}/{self.detector.settings.missing_confirmations}회"
                 )
+
+        # Discovered but unregistered MM rows remain visible inventory. Their
+        # absence is informational only and never advances a missing streak.
+        for ip, device in devices.items():
+            if device.is_registered or ip in mm_by_ip:
+                continue
+            device.mm_present = False if complete else None
+            device.controller_state = (
+                ControllerState.MISSING if complete else ControllerState.UNKNOWN
+            )
         for ip, row in mm_by_ip.items():
             device = devices[ip]
             device.mm_present = True
             device.mm_status = row.status
             device.hostname = row.hostname or device.hostname
             device.last_seen = cycle.checked_at
-            if row.status.casefold() == "down":
+            normalized_status = row.status.strip().casefold()
+            if normalized_status == "up":
+                device.controller_state = ControllerState.UP
+            elif normalized_status == "down":
+                device.controller_state = ControllerState.DOWN
+            else:
+                device.controller_state = ControllerState.UNKNOWN
+
+            if not device.is_registered:
+                continue
+            if normalized_status == "down":
                 self._add_signal(
                     device,
                     IncidentType.MM_DOWN,
@@ -294,7 +375,7 @@ class CorrelationEngine:
                     "MM show switches Status = Down",
                     MM_SOURCE,
                 )
-            elif row.status.casefold() != "up":
+            elif normalized_status != "up":
                 device.collection_errors.append(
                     CollectionError(
                         source=MM_SOURCE,
@@ -323,6 +404,12 @@ class CorrelationEngine:
             value = cycle.load_result.metadata.get("total_active")
             if isinstance(value, int):
                 total_active = value
+        if complete and all(ip in load_by_ip for ip in expected):
+            # Detection is scoped to configured members. A parser-reported
+            # cluster total may include unregistered rows discovered in the
+            # same command output and must not influence monitored-member
+            # low-usage suppression.
+            total_active = sum(load_by_ip[ip].active_clients for ip in expected)
         if not complete:
             for ip in expected:
                 self._defer(deferred_incidents, IncidentType.LOAD_MEMBER_MISSING, ip)
@@ -350,6 +437,14 @@ class CorrelationEngine:
             device = devices[ip]
             missing_result = missing[ip]
             device.load_present = missing_result.present
+            if not complete:
+                device.distribution_state = DistributionState.UNKNOWN
+            elif missing_result.present is False:
+                device.distribution_state = (
+                    DistributionState.MISSING
+                    if missing_result.active
+                    else DistributionState.OBSERVING
+                )
             if missing_result.active and missing_result.deferred:
                 self._defer(deferred_incidents, IncidentType.LOAD_MEMBER_MISSING, ip)
             elif missing_result.active:
@@ -369,6 +464,19 @@ class CorrelationEngine:
             evaluation = evaluations[ip]
             device.load_anomaly = evaluation.active and not evaluation.deferred
             device.load_anomaly_streak = evaluation.anomaly_streak
+            if missing_result.present is not False:
+                if evaluation.low_usage:
+                    device.distribution_state = DistributionState.LOW_USAGE
+                elif evaluation.deferred:
+                    device.distribution_state = DistributionState.UNKNOWN
+                elif evaluation.active and evaluation.condition_met:
+                    device.distribution_state = DistributionState.ANOMALOUS
+                elif evaluation.active and evaluation.recovery_streak:
+                    device.distribution_state = DistributionState.RECOVERING
+                elif evaluation.condition_met:
+                    device.distribution_state = DistributionState.OBSERVING
+                else:
+                    device.distribution_state = DistributionState.NORMAL
             if evaluation.active and evaluation.deferred:
                 self._defer(deferred_incidents, IncidentType.CLIENT_DISTRIBUTION, ip)
                 device.observations.append(evaluation.reason)
@@ -450,7 +558,7 @@ class CorrelationEngine:
             device.membership_present = True
             device.connection_type = row.connection_type
             device.last_seen = cycle.checked_at
-            if not complete or not collector_ip:
+            if not device.is_registered or not complete or not collector_ip:
                 continue
             normalized = normalize_connection_type(row.connection_type)
             baseline = self.baseline_store.get(ip)
@@ -503,8 +611,10 @@ class CorrelationEngine:
         for change in self._pending_connection_changes.values():
             ip = change.member_ip
             if ip not in devices:
-                devices[ip] = DeviceHealth(ip=ip)
+                devices[ip] = DeviceHealth(ip=ip, is_registered=ip in cycle.expected_cluster_members)
             device = devices[ip]
+            if not device.is_registered:
+                continue
             row = membership_by_ip.get(ip)
             change_is_current = bool(
                 complete
@@ -607,6 +717,13 @@ class CorrelationEngine:
     @staticmethod
     def _finalize_device_severity(devices: Iterable[DeviceHealth]) -> None:
         for device in devices:
+            if not device.is_registered:
+                # Inventory-only rows may carry raw observed values and source
+                # errors, but they never participate in monitored health.
+                device.signals.clear()
+                device.issue_reasons.clear()
+                device.severity = Severity.NORMAL
+                continue
             abnormal = [
                 signal
                 for signal in device.signals

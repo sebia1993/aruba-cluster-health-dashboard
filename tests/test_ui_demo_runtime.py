@@ -9,7 +9,7 @@ from aruba_mini_dashboard.credentials import CredentialService, SessionCredentia
 from aruba_mini_dashboard.demo import DEMO_STAGES, DemoPoller, demo_fixture_directory
 from aruba_mini_dashboard.logging_setup import setup_logging
 from aruba_mini_dashboard.main import RuntimePoller
-from aruba_mini_dashboard.models import PollCycleResult
+from aruba_mini_dashboard.models import ConnectionBaseline, PollCycleResult
 from aruba_mini_dashboard.parsers import (
     parse_group_membership,
     parse_load_distribution,
@@ -153,6 +153,94 @@ def test_membership_event_survives_locked_flush_and_settings_rebuild(
     assert [item["event_type"] for item in events].count("activated") == 1
     assert all(item["event_type"] != "recovered" for item in events)
     storage.close()
+
+
+def test_settings_member_replacement_silently_supersedes_and_prunes_old_scope(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    settings = AppSettings.default()
+    for member, (ip, alias) in zip(settings.cluster.members, EXPECTED_MEMBERS.items()):
+        member.ip = ip
+        member.alias = alias
+    storage = SQLiteStorage(paths)
+    runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        storage,
+        setup_logging(paths),
+    )
+    initial_at = datetime(2026, 8, 11, 1, 0, tzinfo=timezone.utc)
+    runtime.correlate(membership_cycle("group_membership_initial.txt", initial_at))
+    activated = runtime.correlate(
+        membership_cycle("group_membership_changed.txt", initial_at + timedelta(minutes=1))
+    )
+    incident_id = activated.active_incidents[0].incident_id
+
+    updated = copy.deepcopy(settings)
+    updated.cluster.members[1].ip = "192.0.2.99"
+    updated.cluster.members[1].alias = "WLC-NEW"
+    runtime.update_settings(updated)
+
+    assert runtime.incident_manager.active_incidents() == []
+    superseded = next(
+        incident
+        for incident in storage.load_domain_incidents()
+        if incident.incident_id == incident_id
+    )
+    assert superseded.active is False
+    assert superseded.recovered_at is None
+    assert storage.get("192.0.2.12") is None
+    assert storage.load_pending_connection_changes() == []
+    assert "superseded" in [item["event_type"] for item in storage.list_events()]
+
+    storage.close()
+    reopened = SQLiteStorage(paths)
+    assert reopened.get("192.0.2.12") is None
+    assert reopened.load_pending_connection_changes() == []
+    assert not any(item.active for item in reopened.load_domain_incidents())
+    reopened.close()
+
+
+def test_member_replacement_before_first_poll_flushes_restored_scope_state(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    settings = AppSettings.default()
+    for member, (ip, alias) in zip(settings.cluster.members, EXPECTED_MEMBERS.items()):
+        member.ip = ip
+        member.alias = alias
+    storage = SQLiteStorage(paths)
+    storage.set(
+        ConnectionBaseline(
+            collector_ip="192.0.2.11",
+            member_ip="192.0.2.12",
+            display_value="Type-A",
+            normalized_value="type a",
+            observed_at=datetime(2026, 8, 11, 1, 0, tzinfo=timezone.utc),
+        )
+    )
+    runtime = RuntimePoller(
+        settings,
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        storage,
+        setup_logging(paths),
+    )
+    assert runtime.engine.monitoring_scope_ips() == ()
+    assert storage.get("192.0.2.12") is not None
+
+    updated = copy.deepcopy(settings)
+    updated.cluster.members[1].ip = "192.0.2.99"
+    updated.cluster.members[1].alias = "WLC-NEW"
+    runtime.update_settings(updated)
+
+    assert storage.get("192.0.2.12") is None
+    storage.close()
+    reopened = SQLiteStorage(paths)
+    assert reopened.get("192.0.2.12") is None
+    reopened.close()
 
 
 def test_disabled_new_alert_waits_full_repeat_interval(tmp_path: Path) -> None:

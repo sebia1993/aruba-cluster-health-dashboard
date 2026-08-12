@@ -8,7 +8,6 @@ from typing import Any
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -20,7 +19,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QSpinBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -41,7 +39,7 @@ class ConnectionTestRequest:
     def __repr__(self) -> str:
         return "ConnectionTestRequest(settings=[NON_SECRET], credential=[REDACTED])"
 
-from .widgets import NoWheelSlider
+from .widgets import ClickArmedComboBox, ClickArmedSpinBox, NoWheelSlider
 
 
 class _CredentialFields(QGroupBox):
@@ -118,8 +116,13 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.buttons)
 
     @staticmethod
-    def _spin(minimum: int, maximum: int, value: int, suffix: str = "") -> QSpinBox:
-        widget = QSpinBox()
+    def _spin(
+        minimum: int,
+        maximum: int,
+        value: int,
+        suffix: str = "",
+    ) -> ClickArmedSpinBox:
+        widget = ClickArmedSpinBox()
         widget.setRange(minimum, maximum)
         widget.setValue(value)
         widget.setSuffix(suffix)
@@ -238,7 +241,7 @@ class SettingsDialog(QDialog):
         self.low_threshold = self._spin(0, 1_000_000, d.low_client_threshold)
         self.anomaly_cycles = self._spin(1, 100, d.anomaly_cycles, "회")
         self.recovery_cycles = self._spin(1, 100, d.recovery_cycles, "회")
-        self.comparison_mode = QComboBox()
+        self.comparison_mode = ClickArmedComboBox()
         self.comparison_mode.addItem("절대값과 상대 비교 함께 사용", "absolute_and_relative")
         self.comparison_mode.addItem("절대값만 사용", "absolute_only")
         self.comparison_mode.setCurrentIndex(max(0, self.comparison_mode.findData(d.comparison_mode)))

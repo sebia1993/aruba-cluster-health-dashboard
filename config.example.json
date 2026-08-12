@@ -61,6 +61,7 @@
   "ui": {
     "always_on_top": false,
     "opacity_percent": 100,
+    "window_maximized": false,
     "window_x": null,
     "window_y": null,
     "window_width": 420,
