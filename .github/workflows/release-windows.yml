@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing annotated release tag, for example v0.3.4"
+        description: "Existing annotated release tag, for example v0.3.5"
         required: true
         type: string
       release_mode:
@@ -447,10 +447,19 @@ jobs:
             민감 파일 검사, 압축 해제 후 EXE 스모크 검증 통과
           - 상세 변경 이력: https://github.com/$($env:AMD_REPOSITORY)/blob/$($env:AMD_SOURCE_COMMIT)/CHANGELOG.md
 
+          ## 저사양 모드
+
+          - 자동 점검 간격은 설정값과 120초 중 큰 값이며, ``지금 점검``은 즉시 시작합니다.
+          - MM과 클러스터를 최대 두 작업으로 동시에 수집합니다. 실행하는 세 show 명령,
+            timeout·재시도, 감지 규칙, 문제 IP와 사건 결과는 일반 모드와 같습니다.
+          - 큰 원본 출력은 압축 효과가 충분할 때만 작은 단위로 압축하고, 효과가 낮으면
+            원문을 보관합니다. 전체 장비가 250대를 넘으면 전체 정렬 후 현재 250대만 그립니다.
+
           ## 현장 확인 범위
 
           실제 Aruba 장비 출력과 사내 SSH 환경, 코드 서명, Python 미설치 클린 Windows 11,
-          실제 100%/125%/150% DPI 및 조직 정책이 적용된 알림 검증은 별도 현장 확인이 필요합니다.
+          실제 100%/125%/150% DPI, 저사양 PC·HDD·느린 네트워크·24시간 이상 운전 및
+          조직 정책이 적용된 알림 검증은 별도 현장 확인이 필요합니다.
           실제 장비 설정을 변경하는 명령은 지원하지 않지만, 운영망 적용 전 읽기 전용 계정과
           호스트 키 정책을 현장 기준으로 다시 확인하십시오.
           "@

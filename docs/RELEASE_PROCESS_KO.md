@@ -48,6 +48,9 @@ Actions에서 재현 가능하게 빌드하고, 검증된 자산만 GitHub Prere
 - `v0.3.4`: 전체 보기와 작은 보기의 장비 표에서 선택 행의 넓은 Windows 파란색
   채움을 시스템 팔레트 기반 연한 중립 회색으로 교체한 patch Prerelease입니다.
   상태 표시, 알림 확인, 상세 보기와 선택 장비 복원 동작은 유지합니다.
+- `v0.3.5`: 저사양 모드의 MM·클러스터 최대 2개 병렬 수집, 적응형 원본 출력
+  압축과 250대 단위 전체 표 페이지를 추가한 patch Prerelease입니다. 세 명령,
+  감지 규칙, 문제 IP와 사건 결과는 일반 모드와 동일하게 유지합니다.
 
 ## 로컬 검증
 
@@ -55,21 +58,21 @@ CPython 3.11.9 x64와 Windows PowerShell 5.1 환경에서 실행합니다.
 
 ```powershell
 .\scripts\run_tests.ps1
-.\scripts\package_release.ps1 -Version 0.3.4
+.\scripts\package_release.ps1 -Version 0.3.5
 ```
 
 성공하면 `dist\release`에는 다음 두 파일만 생성됩니다.
 
 ```text
-ArubaMiniDashboard-v0.3.4-windows-x64.zip
-ArubaMiniDashboard-v0.3.4-windows-x64.zip.sha256
+ArubaMiniDashboard-v0.3.5-windows-x64.zip
+ArubaMiniDashboard-v0.3.5-windows-x64.zip.sha256
 ```
 
 다른 위치로 전달된 자산은 다시 빌드하지 않고 다음과 같이 검증할 수 있습니다.
 
 ```powershell
 .\scripts\package_release.ps1 `
-  -Version 0.3.4 `
+  -Version 0.3.5 `
   -OutputDirectory artifacts\release `
   -VerifyOnly
 ```
@@ -89,8 +92,8 @@ Qt exact inventory와 한국어 번역 2개, PySide6/shiboken6/Paramiko/scp 외�
 ```powershell
 git switch main
 git pull --ff-only
-git tag -a v0.3.4 -m "Aruba Mini Dashboard v0.3.4"
-git push origin v0.3.4
+git tag -a v0.3.5 -m "Aruba Mini Dashboard v0.3.5"
+git push origin v0.3.5
 ```
 
 태그가 잘못된 커밋을 가리키면 Release workflow를 실행하지 않습니다. 게시된
@@ -106,7 +109,7 @@ Workflow가 사용하는 공식 Actions는 Node.js 24 기반 버전의 검토된
 사용하려면 runner `2.327.1` 이상이 필요합니다. 구형 Node 런타임을 강제로 허용하는
 환경 변수로 우회하지 않습니다.
 
-- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.3.4`
+- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.3.5`
 - `release_mode`:
   - `build-only`: 빌드·검증 후 Actions artifact만 생성
   - `draft-prerelease`: 검증된 두 자산을 새 Prerelease Draft에 업로드하고 정지
@@ -154,7 +157,8 @@ workflow는 다음 순서를 바꿀 수 없도록 구성되어 있습니다.
 - 실제 Aruba 장비, 사내 SSH, Python 미설치 클린 Windows 11, 실제 DPI,
   알림 정책, 저사양 PC/HDD/장시간 운전과 코드 서명이 별도 현장 검증이라는
   제한사항
-- 저사양 모드의 자동 간격 최소 120초·순차 수집과 수동 점검 즉시 실행,
+- 저사양 모드의 자동 간격 최소 120초, MM·클러스터 최대 2개 병렬 수집,
+  적응형 원본 출력 보관과 250대 단위 전체 표 페이지, 수동 점검 즉시 실행,
   일반 모드와 동일한 명령·감지 규칙·결과 정확성
 - v0.3.0 성능 수치는 실제로 측정한 값만 기재하고, 미측정 항목은 측정 불가로
   표시했다는 설명

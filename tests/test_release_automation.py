@@ -97,6 +97,10 @@ def test_release_workflow_has_approved_safe_prerelease_contract() -> None:
     assert "MIT License" in text
     assert "Python 미설치 클린 Windows 11" in text
     assert "실제 100%/125%/150% DPI" in text
+    assert "자동 점검 간격은 설정값과 120초 중 큰 값" in text
+    assert "MM과 클러스터를 최대 두 작업으로 동시에 수집" in text
+    assert "전체 장비가 250대를 넘으면 전체 정렬 후 현재 250대만" in text
+    assert "저사양 PC·HDD·느린 네트워크·24시간 이상 운전" in text
     assert "exact numeric release ID could not be confirmed" in text
     assert "was not deleted or modified automatically" in text
     assert "--clobber" not in text
