@@ -52,6 +52,10 @@ EXCLUDED_QT_BINARIES = {
     "pyside6/plugins/imageformats/qpdf.dll",
     "pyside6/plugins/platforminputcontexts/qtvirtualkeyboardplugin.dll",
 }
+APPROVED_QT_TRANSLATIONS = {
+    "pyside6/translations/qt_ko.qm",
+    "pyside6/translations/qtbase_ko.qm",
+}
 
 
 def is_reviewed_qt_runtime_path(destination):
@@ -62,13 +66,19 @@ def is_reviewed_qt_runtime_path(destination):
 
 def keep_runtime_entry(entry):
     destination = str(entry[0]).replace("\\", "/").casefold()
+    if destination.startswith("pyside6/translations/") and destination.endswith(".qm"):
+        return destination in APPROVED_QT_TRANSLATIONS
     if destination in EXCLUDED_QT_BINARIES:
         return False
     if is_reviewed_qt_runtime_path(destination):
         return destination in APPROVED_QT_RUNTIME_ARTIFACTS
     return True
 
-netmiko_hidden = collect_submodules("netmiko")
+netmiko_hidden = [
+    module
+    for module in collect_submodules("netmiko")
+    if not module.startswith("netmiko.cli_tools")
+]
 paramiko_hidden = collect_submodules("paramiko")
 
 datas = [
@@ -99,6 +109,14 @@ a = Analysis(
         "PySide6.QtQml",
         "PySide6.QtQuick",
         "PySide6.QtVirtualKeyboard",
+        # Netmiko's command-line helpers are not used by the embedded adapter.
+        # Excluding their presentation/configuration dependencies keeps the
+        # offline onedir smaller without removing any device driver.
+        "netmiko.cli_tools",
+        "rich",
+        "ruamel",
+        "markdown_it",
+        "pygments",
     ],
     noarchive=False,
     optimize=0,

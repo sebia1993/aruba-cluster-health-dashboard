@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import replace
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QCloseEvent, QIcon, QKeySequence
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal, Slot
+from PySide6.QtGui import QAction, QColor, QCloseEvent, QIcon, QKeySequence, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -42,6 +43,7 @@ from .widgets import NoWheelSlider
 
 
 LOGGER = logging.getLogger(__name__)
+PERFORMANCE_LOGGER = logging.getLogger("aruba_mini_dashboard.performance")
 
 
 STATUS_STYLES = {
@@ -95,6 +97,8 @@ class MainWindow(QMainWindow):
         storage: Any | None = None,
         settings_apply_handler: Any | None = None,
         demo_mode: bool = False,
+        setup_readiness_check: Callable[[AppSettings], Any] | None = None,
+        startup_issue: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -106,6 +110,8 @@ class MainWindow(QMainWindow):
         self.storage = storage
         self.settings_apply_handler = settings_apply_handler
         self.demo_mode = demo_mode
+        self.setup_readiness_check = setup_readiness_check
+        self.startup_issue = startup_issue
         self._quitting = False
         self._current_view: DashboardView | None = None
         self._current_devices: list[Any] = []
@@ -116,8 +122,19 @@ class MainWindow(QMainWindow):
         self._devices_by_ip: dict[str, Any] = {}
         self._pending_scope_refresh_ips: set[str] = set()
         self._base_settings_fingerprint = settings_fingerprint(settings)
-        self._detail_windows: list[DetailDialog] = []
+        self._detail_windows: dict[str, DetailDialog] = {}
         self._dashboard_mode: str | None = None
+        self._latest_display_devices: list[DeviceView] = []
+        self._table_dirty = {self.COMPACT_MODE: True, self.FULL_MODE: True}
+        self._hidden_to_tray = False
+        self._initial_setup_offer_scheduled = False
+        self._initial_setup_offered = False
+        self._setup_required = False
+        self._pending_preference_save = False
+        self._preference_save_timer = QTimer(self)
+        self._preference_save_timer.setSingleShot(True)
+        self._preference_save_timer.setInterval(750)
+        self._preference_save_timer.timeout.connect(self._flush_preference_mirror)
 
         self.setWindowTitle("Aruba 네트워크 상태 미니보드" + (" — 데모" if demo_mode else ""))
         self.setMinimumSize(360, 260)
@@ -128,6 +145,7 @@ class MainWindow(QMainWindow):
         self._restore_ui_settings()
         self._set_empty_state()
         self._apply_responsive_mode(force=True)
+        self._refresh_setup_state()
 
     def _build_ui(self) -> None:
         central = QWidget(self)
@@ -307,8 +325,8 @@ class MainWindow(QMainWindow):
 
     def _build_compact_more_menu(self) -> None:
         menu = QMenu(self)
-        self.compact_ack_action = menu.addAction("알림 확인", self._acknowledge_selected)
         self.compact_settings_action = menu.addAction("설정", self.open_settings)
+        self.compact_ack_action = menu.addAction("알림 확인", self._acknowledge_selected)
         menu.addSeparator()
         screen_menu = menu.addMenu("화면")
         self.compact_always_on_top_action = QAction("항상 위에 표시", self, checkable=True)
@@ -388,8 +406,23 @@ class MainWindow(QMainWindow):
         self._dashboard_mode = target
         target_page = self.full_page if target == self.FULL_MODE else self.compact_page
         self.dashboard_stack.setCurrentWidget(target_page)
+        self._render_active_table_if_needed()
         if selected_ip:
             self._select_ip(self._active_table(), selected_ip)
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802 - Qt API
+        super().showEvent(event)
+        self._hidden_to_tray = False
+        self._render_active_table_if_needed()
+        if (
+            self._setup_required
+            and not self._initial_setup_offer_scheduled
+            and not self._initial_setup_offered
+            and not self.demo_mode
+            and not self.startup_issue
+        ):
+            self._initial_setup_offer_scheduled = True
+            QTimer.singleShot(0, self._offer_initial_setup)
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt API
         super().resizeEvent(event)
@@ -407,10 +440,10 @@ class MainWindow(QMainWindow):
         show_action = menu.addAction("대시보드 열기")
         show_action.triggered.connect(self.show_dashboard)
         menu.addSeparator()
-        menu.addAction("지금 점검", self.coordinator.check_now)
-        menu.addAction("자동 점검 시작", self.coordinator.start_automatic)
-        menu.addAction("자동 점검 일시정지", self.coordinator.pause_automatic)
-        menu.addAction("설정", self.open_settings)
+        self.tray_check_now_action = menu.addAction("지금 점검", self.coordinator.check_now)
+        self.tray_start_action = menu.addAction("자동 점검 시작", self.coordinator.start_automatic)
+        self.tray_pause_action = menu.addAction("자동 점검 일시정지", self.coordinator.pause_automatic)
+        self.tray_settings_action = menu.addAction("설정", self.open_settings)
         menu.addSeparator()
         quit_action = menu.addAction("종료")
         quit_action.triggered.connect(self.request_quit)
@@ -481,6 +514,74 @@ class MainWindow(QMainWindow):
         self.ack_button.setEnabled(False)
         self.compact_ack_action.setEnabled(False)
 
+    def _readiness(self) -> tuple[bool, str]:
+        if self.setup_readiness_check is None:
+            return True, ""
+        try:
+            result = self.setup_readiness_check(self.settings)
+        except Exception:
+            LOGGER.exception("Initial setup readiness check failed")
+            return False, "장비와 자격 증명 설정을 확인해 주세요."
+        if isinstance(result, tuple):
+            ready = bool(result[0]) if result else False
+            reason = str(result[1]) if len(result) > 1 and result[1] else ""
+            return ready, reason
+        return bool(result), ""
+
+    def _refresh_setup_state(self) -> bool:
+        ready, reason = self._readiness()
+        self._setup_required = not ready
+        self.settings_button.setText("설정 시작" if self._setup_required else "설정")
+        self.compact_settings_action.setText("설정 시작" if self._setup_required else "설정")
+        self.compact_more_button.setText("설정 시작" if self._setup_required else "더보기")
+        if self._setup_required and self._current_view is None:
+            self.status_label.setText("설정 필요")
+            self.compact_status_label.setText("설정 필요")
+            self.problem_label.setText("문제 IP: 점검 전")
+            self.reason_label.setText(
+                "먼저 장비와 자격 증명을 등록해 주세요. "
+                + (reason or "저장 후 ‘지금 점검’을 눌러 상태를 확인할 수 있습니다.")
+            )
+            self.statusBar().showMessage("처음 사용하려면 ‘설정 시작’을 눌러 장비 정보를 등록하세요.")
+        if self.tray_icon.isVisible():
+            tooltip = (
+                "Aruba 미니보드 — 설정 필요"
+                if self._setup_required
+                else f"Aruba 미니보드 — {self.status_label.text()}"
+            )
+            self.tray_icon.setToolTip(tooltip)
+        self._update_monitoring_action_availability()
+        return ready
+
+    def _update_monitoring_action_availability(self) -> None:
+        ready = not self._setup_required
+        busy = bool(self.coordinator.busy)
+        automatic = bool(self.coordinator.automatic)
+        check_enabled = ready and not busy
+        start_enabled = ready and not busy and not automatic
+        pause_enabled = ready and automatic
+        self.check_now_button.setEnabled(check_enabled)
+        self.start_button.setEnabled(start_enabled)
+        self.pause_button.setEnabled(pause_enabled)
+        self.compact_check_now_button.setEnabled(check_enabled)
+        self.compact_auto_button.setEnabled(pause_enabled or start_enabled)
+        for name, enabled in (
+            ("tray_check_now_action", check_enabled),
+            ("tray_start_action", start_enabled),
+            ("tray_pause_action", pause_enabled),
+        ):
+            action = getattr(self, name, None)
+            if action is not None:
+                action.setEnabled(enabled)
+
+    @Slot()
+    def _offer_initial_setup(self) -> None:
+        self._initial_setup_offer_scheduled = False
+        if self._initial_setup_offered or not self._setup_required:
+            return
+        self._initial_setup_offered = True
+        self.open_settings(initial_setup=True)
+
     @Slot(object)
     def update_snapshot(self, result: Any) -> None:
         view = DashboardView.from_source(result)
@@ -492,6 +593,7 @@ class MainWindow(QMainWindow):
         self._parse_results = value(result, "parse_results", {})
         self._previous_devices = dict(value(result, "previous_devices", {}) or {})
         self._active_incidents = sequence(result, "active_incidents")
+        self._refresh_open_detail()
         self.status_label.setText(view.status)
         self.compact_status_label.setText(view.status)
         self._apply_status_style(view.status_key)
@@ -531,17 +633,42 @@ class MainWindow(QMainWindow):
     def _populate_table(self, devices: list[DeviceView]) -> None:
         selected_ip = self._selected_ip()
         display_devices = self._scope_adjusted_devices(devices)
+        self._latest_display_devices = display_devices
         for device in display_devices:
             self._devices_by_ip.setdefault(device.ip, device.source)
-        self._populate_full_table(display_devices)
-        compact_devices = self._compact_devices(display_devices)
-        self._populate_compact_table(compact_devices)
+        self._table_dirty[self.FULL_MODE] = True
+        self._table_dirty[self.COMPACT_MODE] = True
+        if not self._hidden_to_tray and self.isVisible():
+            self._render_active_table_if_needed()
         if selected_ip:
             self._select_ip(self._active_table(), selected_ip)
 
+    def _render_active_table_if_needed(self) -> None:
+        mode = self._dashboard_mode
+        if mode is None or self._hidden_to_tray or not self._table_dirty.get(mode, False):
+            return
+        started = time.perf_counter() if PERFORMANCE_LOGGER.isEnabledFor(logging.INFO) else None
+        if mode == self.FULL_MODE:
+            self._populate_full_table(self._latest_display_devices)
+            row_count = len(self._latest_display_devices)
+        else:
+            compact_devices = self._compact_devices(self._latest_display_devices)
+            self._populate_compact_table(compact_devices)
+            row_count = len(compact_devices)
+        self._table_dirty[mode] = False
+        if started is not None:
+            PERFORMANCE_LOGGER.info(
+                "ui_render duration_ms=%d mode=%s rows=%d",
+                round((time.perf_counter() - started) * 1000),
+                mode,
+                row_count,
+            )
+
     def _populate_full_table(self, devices: list[DeviceView]) -> None:
+        devices = sorted(devices, key=lambda item: item.ip)
+        self.table.setUpdatesEnabled(False)
         self.table.setSortingEnabled(False)
-        self.table.setRowCount(len(devices))
+        self._ensure_table_shape(self.table, [device.ip for device in devices], len(self.COLUMNS))
         for row, device in enumerate(devices):
             registered = self._device_is_registered(device)
             display_status = device.status if registered else "감시 제외"
@@ -562,7 +689,9 @@ class MainWindow(QMainWindow):
                 display_status_key, STATUS_STYLES["unknown"]
             )
             for column, text in enumerate(values):
-                item = QTableWidgetItem(text)
+                item = self.table.item(row, column) or QTableWidgetItem()
+                if item.text() != text:
+                    item.setText(text)
                 item.setData(Qt.UserRole, device.ip)
                 item.setToolTip(str(text))
                 if column == 6:
@@ -573,12 +702,19 @@ class MainWindow(QMainWindow):
                     item.setIcon(status_icon(display_status_key))
                 elif column == 8 and not registered:
                     item.setForeground(QColor(STATUS_STYLES["unknown"][0]))
-                self.table.setItem(row, column, item)
+                if self.table.item(row, column) is None:
+                    self.table.setItem(row, column, item)
         self.table.setSortingEnabled(True)
         self.table.sortItems(0, Qt.AscendingOrder)
+        self.table.setUpdatesEnabled(True)
 
     def _populate_compact_table(self, devices: list[DeviceView]) -> None:
-        self.compact_table.setRowCount(len(devices))
+        self.compact_table.setUpdatesEnabled(False)
+        self._ensure_table_shape(
+            self.compact_table,
+            [device.ip for device in devices],
+            len(self.COMPACT_COLUMNS),
+        )
         for row, device in enumerate(devices):
             name = device.alias or device.hostname or "컨트롤러"
             values = (
@@ -600,7 +736,9 @@ class MainWindow(QMainWindow):
                 "missing": "attention",
             }.get(device.distribution_state, "unknown")
             for column, text in enumerate(values):
-                item = QTableWidgetItem(text)
+                item = self.compact_table.item(row, column) or QTableWidgetItem()
+                if item.text() != text:
+                    item.setText(text)
                 item.setData(Qt.UserRole, device.ip)
                 item.setToolTip(f"{name}\nIP: {device.ip}" if column == 0 else str(text))
                 if column in {1, 2}:
@@ -611,7 +749,21 @@ class MainWindow(QMainWindow):
                     font.setBold(True)
                     item.setFont(font)
                     item.setIcon(status_icon(style_key))
-                self.compact_table.setItem(row, column, item)
+                if self.compact_table.item(row, column) is None:
+                    self.compact_table.setItem(row, column, item)
+        self.compact_table.setUpdatesEnabled(True)
+
+    @staticmethod
+    def _ensure_table_shape(table: QTableWidget, identities: list[str], columns: int) -> None:
+        existing = [
+            display(table.item(row, 0).data(Qt.UserRole), "")
+            if table.item(row, 0) is not None
+            else ""
+            for row in range(table.rowCount())
+        ]
+        if existing != identities or table.columnCount() != columns:
+            table.clearContents()
+            table.setRowCount(len(identities))
 
     def _compact_devices(self, devices: list[DeviceView]) -> list[DeviceView]:
         by_ip = {device.ip: device for device in devices}
@@ -719,7 +871,11 @@ class MainWindow(QMainWindow):
         icon = status_icon(key)
         self.setWindowIcon(icon)
         self.tray_icon.setIcon(icon)
-        self.tray_icon.setToolTip(f"Aruba 미니보드 — {self.status_label.text()}")
+        self.tray_icon.setToolTip(
+            "Aruba 미니보드 — 설정 필요"
+            if self._setup_required
+            else f"Aruba 미니보드 — {self.status_label.text()}"
+        )
 
     def _notify_from_result(self, result: Any) -> None:
         if self.notification_service is None:
@@ -851,21 +1007,19 @@ class MainWindow(QMainWindow):
     def _busy_changed(self, busy: bool) -> None:
         self.busy_label.setText("● 점검 중" if busy else "")
         self.compact_busy_label.setText("● 점검 중" if busy else "")
-        self.start_button.setEnabled(not busy and not self.coordinator.automatic)
-        self.pause_button.setEnabled(self.coordinator.automatic)
         self.settings_button.setEnabled(not busy)
-        self.compact_check_now_button.setEnabled(not busy)
-        self.compact_auto_button.setEnabled(self.coordinator.automatic or not busy)
         self.compact_settings_action.setEnabled(not busy)
+        if hasattr(self, "tray_settings_action"):
+            self.tray_settings_action.setEnabled(not busy)
+        self._update_monitoring_action_availability()
+        self._selection_changed()
         if self._quitting and not busy:
             self._complete_quit()
 
     @Slot(bool)
     def _automatic_changed(self, automatic: bool) -> None:
-        self.start_button.setEnabled(not automatic and not self.coordinator.busy)
-        self.pause_button.setEnabled(automatic)
         self.compact_auto_button.setText("일시정지" if automatic else "자동 시작")
-        self.compact_auto_button.setEnabled(automatic or not self.coordinator.busy)
+        self._update_monitoring_action_availability()
         if not automatic:
             self.next_check_label.setText("다음 점검: 일시정지")
         self.settings.polling.automatic_enabled = automatic
@@ -878,8 +1032,16 @@ class MainWindow(QMainWindow):
         )
 
     @Slot()
-    def open_settings(self) -> None:
-        dialog = SettingsDialog(self.settings, self.credential_service, self)
+    def open_settings(self, *, initial_setup: bool = False) -> None:
+        if initial_setup:
+            dialog = SettingsDialog(
+                self.settings,
+                self.credential_service,
+                self,
+                initial_setup=True,
+            )
+        else:
+            dialog = SettingsDialog(self.settings, self.credential_service, self)
         dialog.connection_test_requested.connect(self._connection_test_requested)
         if self.notification_service is not None:
             dialog.sound_test_requested.connect(self.notification_service.test_sound)
@@ -895,6 +1057,7 @@ class MainWindow(QMainWindow):
                 return
             if self.apply_settings(dialog.settings):
                 dialog.commit_staged_credentials()
+                self._refresh_setup_state()
                 return
 
     @Slot(object)
@@ -936,7 +1099,18 @@ class MainWindow(QMainWindow):
             member.ip.strip() for member in settings.cluster.members if member.ip.strip()
         )
         self._base_settings_fingerprint = settings_fingerprint(settings)
-        self.coordinator.set_interval(settings.polling.interval_seconds)
+        effective_interval = getattr(
+            settings,
+            "effective_poll_interval_seconds",
+            settings.polling.interval_seconds,
+        )
+        self.coordinator.set_interval(effective_interval)
+        if effective_interval != settings.polling.interval_seconds:
+            self.statusBar().showMessage(
+                f"저사양 모드: 자동 점검 주기를 {effective_interval}초로 적용했습니다. "
+                "‘지금 점검’은 즉시 실행됩니다.",
+                8000,
+            )
         self.set_opacity_percent(settings.ui.opacity_percent, persist=False)
         self.set_always_on_top(settings.ui.always_on_top, persist=False)
         if self._current_view is not None:
@@ -1058,21 +1232,50 @@ class MainWindow(QMainWindow):
         source = self._devices_by_ip.get(ip)
         if source is None:
             return
+        existing = self._detail_windows.get(ip)
+        if existing is not None:
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+        # Keep one operational detail window. Besides reducing window clutter,
+        # this prevents several dialogs from retaining separate multi-megabyte
+        # command snapshots across polling cycles.
+        for previous_ip, previous_dialog in list(self._detail_windows.items()):
+            self._detail_windows.pop(previous_ip, None)
+            previous_dialog.close()
         dialog = DetailDialog(
             source,
             self,
+            previous_device=self._previous_devices.get(ip),
             raw_outputs=self._raw_outputs,
             parsed_results=self._parse_results,
-            previous_device=self._previous_devices.get(ip),
         )
-        self._detail_windows.append(dialog)
-        dialog.destroyed.connect(lambda: self._detail_windows.remove(dialog) if dialog in self._detail_windows else None)
+        self._detail_windows[ip] = dialog
+        dialog.destroyed.connect(lambda: self._detail_windows.pop(ip, None))
         dialog.show()
+
+    def _refresh_open_detail(self) -> None:
+        """Keep the one operational detail window on the current poll cycle."""
+
+        for ip, dialog in list(self._detail_windows.items()):
+            source = self._devices_by_ip.get(ip)
+            if source is None:
+                self._detail_windows.pop(ip, None)
+                dialog.close()
+                continue
+            dialog.update_snapshot(
+                source,
+                raw_outputs=self._raw_outputs,
+                parsed_results=self._parse_results,
+                previous_device=self._previous_devices.get(ip),
+            )
 
     @Slot()
     def _selection_changed(self) -> None:
-        if self._current_view is None:
+        if self._current_view is None or self.coordinator.busy:
             self.ack_button.setEnabled(False)
+            self.compact_ack_action.setEnabled(False)
             return
         selected_ip = self._selected_ip()
         if selected_ip:
@@ -1098,6 +1301,9 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _acknowledge_selected(self) -> None:
+        if self.coordinator.busy:
+            self.statusBar().showMessage("점검이 끝난 뒤 알림을 확인 처리하세요.", 5000)
+            return
         ip = self._selected_ip()
         if ip:
             selected_device = next(
@@ -1199,6 +1405,7 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def show_dashboard(self) -> None:
+        self._hidden_to_tray = False
         self.show()
         self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
         self.raise_()
@@ -1236,10 +1443,15 @@ class MainWindow(QMainWindow):
         self._save_window_state()
         if not self._quitting and self.tray_icon.isVisible():
             event.ignore()
+            self._hidden_to_tray = True
             self.hide()
             self.tray_icon.showMessage(
                 "Aruba 미니 대시보드",
-                "모니터링은 시스템 트레이에서 계속 실행됩니다.",
+                (
+                    "설정이 필요합니다. 트레이에서 대시보드를 다시 열 수 있습니다."
+                    if self._setup_required
+                    else "모니터링은 시스템 트레이에서 계속 실행됩니다."
+                ),
                 QSystemTrayIcon.Information,
                 4000,
             )
@@ -1264,44 +1476,58 @@ class MainWindow(QMainWindow):
         ui.opacity_percent = self.opacity_slider.value()
         ui.always_on_top = self.always_on_top_action.isChecked()
         self.settings.polling.automatic_enabled = self.coordinator.automatic
-        if self.settings_store is not None:
+        current_fingerprint = settings_fingerprint(self.settings)
+        changed = current_fingerprint != self._base_settings_fingerprint
+        if self.settings_store is not None and changed:
             try:
                 self.settings_store.save(self.settings)
-                self._base_settings_fingerprint = settings_fingerprint(self.settings)
             except Exception:
                 LOGGER.exception("Could not persist window state")
                 return
+        self._base_settings_fingerprint = current_fingerprint
+        if changed:
+            self._mirror_all_settings()
         else:
-            self._base_settings_fingerprint = settings_fingerprint(self.settings)
-        self._mirror_all_settings()
+            # A debounced quick option may still be pending even though the
+            # authoritative in-memory fingerprint already matches.
+            self._preference_save_timer.stop()
+            self._flush_preference_mirror()
 
     def _persist_preference(self, key: str, value_: Any) -> None:
         if self.storage is None:
             return
+        self._pending_preference_save = True
+        self._preference_save_timer.start()
+
+    @Slot()
+    def _flush_preference_mirror(self) -> None:
+        if self.storage is None or not self._pending_preference_save:
+            return
         try:
+            timed_batch_setter = getattr(self.storage, "try_set_preferences", None)
+            if callable(timed_batch_setter):
+                timed_batch_setter(self._settings_preference_values(), lock_timeout_ms=50)
+                self._pending_preference_save = False
+                return
             batch_setter = getattr(self.storage, "set_preferences", None)
             if callable(batch_setter):
                 # Rewrite the complete mirror so advancing its fingerprint can
                 # never make unrelated stale preference rows authoritative.
                 batch_setter(self._settings_preference_values())
+                self._pending_preference_save = False
                 return
             setter = getattr(self.storage, "set_setting", None)
             if callable(setter):
-                setter(key, value_)
+                for setting_key, setting_value in self._settings_preference_values().items():
+                    setter(setting_key, setting_value)
+                self._pending_preference_save = False
         except Exception:
-            LOGGER.exception("Could not persist UI preference %s", key)
+            LOGGER.exception("Could not persist UI preference mirror")
 
     def _mirror_all_settings(self) -> None:
-        values = self._settings_preference_values()
-        batch_setter = getattr(self.storage, "set_preferences", None) if self.storage is not None else None
-        if callable(batch_setter):
-            try:
-                batch_setter(values)
-            except Exception:
-                LOGGER.exception("Could not persist settings preference mirror")
-            return
-        for key, value_ in values.items():
-            self._persist_preference(key, value_)
+        self._preference_save_timer.stop()
+        self._pending_preference_save = True
+        self._flush_preference_mirror()
 
     def _settings_preference_values(self) -> dict[str, Any]:
         polling = self.settings.polling
@@ -1332,6 +1558,14 @@ class MainWindow(QMainWindow):
             "ui.window_width": ui.window_width,
             "ui.window_height": ui.window_height,
         }
+        performance = getattr(self.settings, "performance", None)
+        if performance is not None:
+            values["performance.low_spec_mode"] = bool(
+                getattr(performance, "low_spec_mode", False)
+            )
+            values["performance.performance_logging"] = bool(
+                getattr(performance, "performance_logging", False)
+            )
         values["_base_config_fingerprint"] = self._base_settings_fingerprint
         return values
 

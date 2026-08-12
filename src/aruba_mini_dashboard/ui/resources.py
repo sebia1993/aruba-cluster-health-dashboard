@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 from PySide6.QtGui import QIcon
@@ -20,6 +21,13 @@ def resource_path(name: str) -> Path:
     return Path(__file__).resolve().parent / "resources" / name
 
 
+@lru_cache(maxsize=4)
+def _status_icon_for_filename(filename: str) -> QIcon:
+    """Load each immutable status icon once for the lifetime of the UI."""
+
+    return QIcon(str(resource_path(filename)))
+
+
 def status_icon(status: str) -> QIcon:
     key = str(status).casefold()
     if key in {"normal", "ok", "healthy", "정상"}:
@@ -30,4 +38,4 @@ def status_icon(status: str) -> QIcon:
         filename = "status_failure.svg"
     else:
         filename = "status_unknown.svg"
-    return QIcon(str(resource_path(filename)))
+    return _status_icon_for_filename(filename)

@@ -15,7 +15,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -23,6 +23,9 @@ from .config import AppPaths, default_app_paths
 
 
 SCHEMA_VERSION = 4
+HISTORY_RETENTION_DAYS = 180
+HISTORY_RETENTION_MAX_ROWS = 10_000
+HISTORY_MAINTENANCE_INTERVAL = timedelta(days=1)
 _T = TypeVar("_T")
 _SECRET_KEYS = {"password", "passwd", "secret", "enable_secret", "credential_blob", "token"}
 
@@ -79,8 +82,8 @@ class SQLiteStorage:
         self,
         path_or_paths: str | os.PathLike[str] | AppPaths | None = None,
         *,
-        busy_timeout_ms: int = 1500,
-        lock_retries: int = 3,
+        busy_timeout_ms: int = 50,
+        lock_retries: int = 1,
         initialize: bool = True,
     ) -> None:
         if isinstance(path_or_paths, AppPaths):
@@ -374,6 +377,25 @@ class SQLiteStorage:
         row = self._read(lambda db: db.execute("SELECT value_json FROM preferences WHERE key=?", (str(key),)).fetchone())
         return default if row is None else json.loads(row[0])
 
+    def get_preferences(self, keys: Iterable[str] | None = None) -> dict[str, Any]:
+        """Load a preference set with one SQLite read instead of N key reads."""
+
+        normalized = None if keys is None else tuple(dict.fromkeys(str(key) for key in keys))
+        if normalized == ():
+            return {}
+
+        def operation(db: sqlite3.Connection) -> list[sqlite3.Row]:
+            if normalized is None:
+                return db.execute("SELECT key, value_json FROM preferences").fetchall()
+            placeholders = ",".join("?" for _ in normalized)
+            return db.execute(
+                f"SELECT key, value_json FROM preferences WHERE key IN ({placeholders})",
+                normalized,
+            ).fetchall()
+
+        rows = self._read(operation)
+        return {str(row["key"]): json.loads(row["value_json"]) for row in rows}
+
     # Compatibility aliases for UI/runtime consumers.
     set_setting = set_preference
     get_setting = get_preference
@@ -421,6 +443,22 @@ class SQLiteStorage:
                 ).fetchall()
             )
         return [ConnectionBaseline(**dict(row)) for row in rows]
+
+    def load_domain_connection_baselines(self):
+        """Restore all correlation baselines from the same SQLite read."""
+
+        from .models import ConnectionBaseline as DomainConnectionBaseline
+
+        return [
+            DomainConnectionBaseline(
+                collector_ip=stored.source_controller_ip,
+                member_ip=stored.member_ip,
+                display_value=stored.connection_type,
+                normalized_value=stored.normalized_connection_type,
+                observed_at=_parse_timestamp(stored.observed_at),
+            )
+            for stored in self.load_connection_baselines()
+        ]
 
     def get(self, member_ip: str):
         """Implement the correlation engine's baseline-store protocol."""
@@ -733,8 +771,31 @@ class SQLiteStorage:
                         ),
                     ),
                 )
+            self._cleanup_history_if_due(db)
 
         self._write(operation)
+
+    def try_set_preferences(
+        self,
+        values: Mapping[str, object],
+        *,
+        lock_timeout_ms: int = 50,
+        updated_at: datetime | str | None = None,
+    ) -> None:
+        """Persist preferences without waiting indefinitely for an app worker.
+
+        UI preference mirroring is best effort because the JSON settings file
+        remains authoritative.  A timed acquisition prevents a long poll
+        transaction on the shared connection from freezing Qt's event loop.
+        """
+
+        acquired = self._lock.acquire(timeout=max(0, int(lock_timeout_ms)) / 1000)
+        if not acquired:
+            raise StorageBusyError("로컬 상태 저장소가 사용 중입니다. 잠시 후 다시 시도하세요.")
+        try:
+            self.set_preferences(values, updated_at=updated_at)
+        finally:
+            self._lock.release()
 
     def acknowledge_connection_change(self, *, event_token: str | None = None, member_ip: str | None = None) -> int:
         if bool(event_token) == bool(member_ip):
@@ -907,6 +968,113 @@ class SQLiteStorage:
     def load_mm_discovered_devices(self) -> list[dict[str, Any]]:
         rows = self._read(lambda db: db.execute("SELECT * FROM mm_discovered_devices ORDER BY ip").fetchall())
         return [dict(row) for row in rows]
+
+    def save_poll_runtime_state(
+        self,
+        *,
+        detector_state: Mapping[str, Mapping[str, object]],
+        device_states: Iterable[tuple[object, bool]],
+        observed_at: datetime | str,
+        failover: tuple[str, str, str, datetime | str | None] | None = None,
+    ) -> None:
+        """Persist one completed poll's non-domain state in one transaction.
+
+        Connection baselines, changes, incidents and their journal transitions
+        intentionally remain in :meth:`save_cycle_domain_state`; that is the
+        separate crash-consistency boundary which must never be split.
+        """
+
+        timestamp = _timestamp(observed_at)
+        streak_rows: list[tuple[str, str, int, int, int, str]] = []
+        for key, counter in detector_state.items():
+            detector, separator, member_ip = str(key).partition("|")
+            if not separator:
+                continue
+            anomaly_count = int(counter["anomaly_streak"])
+            recovery_count = int(counter["recovery_streak"])
+            if anomaly_count < 0 or recovery_count < 0:
+                raise ValueError("streak counts cannot be negative")
+            streak_rows.append(
+                (
+                    detector,
+                    member_ip,
+                    anomaly_count,
+                    recovery_count,
+                    int(bool(counter["active"])),
+                    timestamp,
+                )
+            )
+
+        device_rows: list[tuple[str, str, str, int]] = []
+        normal_rows: list[tuple[str, str, str]] = []
+        discovered_rows: list[tuple[str, str, str, str, int, int]] = []
+        for payload, is_normal in device_states:
+            member_ip = str(getattr(payload, "ip"))
+            encoded = _json_dump(payload)
+            device_rows.append((member_ip, encoded, timestamp, int(bool(is_normal))))
+            if is_normal:
+                normal_rows.append((member_ip, encoded, timestamp))
+            if bool(getattr(payload, "mm_present", False)):
+                discovered_rows.append(
+                    (
+                        member_ip,
+                        str(getattr(payload, "alias", "") or ""),
+                        str(getattr(payload, "hostname", "") or ""),
+                        _timestamp(getattr(payload, "last_seen", None) or observed_at),
+                        0,
+                        0,
+                    )
+                )
+
+        def operation(db: sqlite3.Connection) -> None:
+            db.executemany(
+                """INSERT INTO detector_streaks
+                       (detector, ip, anomaly_count, recovery_count, active, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(detector, ip) DO UPDATE SET
+                       anomaly_count=excluded.anomaly_count,
+                       recovery_count=excluded.recovery_count,
+                       active=excluded.active,
+                       updated_at=excluded.updated_at""",
+                streak_rows,
+            )
+            db.executemany(
+                """INSERT INTO device_states(ip, payload_json, observed_at, is_normal)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(ip) DO UPDATE SET payload_json=excluded.payload_json,
+                       observed_at=excluded.observed_at, is_normal=excluded.is_normal""",
+                device_rows,
+            )
+            db.executemany(
+                """INSERT INTO device_normal_states(ip, payload_json, observed_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(ip) DO UPDATE SET
+                       payload_json=excluded.payload_json,
+                       observed_at=excluded.observed_at""",
+                normal_rows,
+            )
+            db.executemany(
+                """INSERT INTO mm_discovered_devices
+                       (ip, alias, hostname, last_seen_at, missing_streak, recovery_streak)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(ip) DO UPDATE SET alias=excluded.alias,
+                       hostname=excluded.hostname, last_seen_at=excluded.last_seen_at,
+                       missing_streak=excluded.missing_streak,
+                       recovery_streak=excluded.recovery_streak""",
+                discovered_rows,
+            )
+            if failover is not None:
+                primary, actual, error_code, collected_at = failover
+                db.execute(
+                    """INSERT INTO failover_collections
+                           (primary_controller_ip, actual_controller_ip,
+                            primary_error_code, collected_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (primary, actual, error_code, _timestamp(collected_at)),
+                )
+            self._cleanup_history_if_due(db)
+
+        self._write(operation)
 
     def upsert_incident(
         self,
@@ -1087,6 +1255,131 @@ class SQLiteStorage:
         )
         return int(cursor.lastrowid)
 
+    def maintain_history(
+        self,
+        *,
+        now: datetime | str | None = None,
+        max_age_days: int = HISTORY_RETENTION_DAYS,
+        max_rows: int = HISTORY_RETENTION_MAX_ROWS,
+        force: bool = False,
+    ) -> dict[str, int]:
+        """Apply bounded history retention without running a blocking VACUUM."""
+
+        if int(max_age_days) < 1 or int(max_rows) < 1:
+            raise ValueError("history retention limits must be positive")
+        return self._write(
+            lambda db: self._cleanup_history_if_due(
+                db,
+                now=now,
+                max_age_days=int(max_age_days),
+                max_rows=int(max_rows),
+                force=force,
+            )
+        )
+
+    @staticmethod
+    def _cleanup_history_if_due(
+        db: sqlite3.Connection,
+        *,
+        now: datetime | str | None = None,
+        max_age_days: int = HISTORY_RETENTION_DAYS,
+        max_rows: int = HISTORY_RETENTION_MAX_ROWS,
+        force: bool = False,
+    ) -> dict[str, int]:
+        maintenance_at = _parse_timestamp(_timestamp(now))
+        row = db.execute(
+            "SELECT value_json FROM preferences WHERE key='_history_retention_last_run'"
+        ).fetchone()
+        if row is not None and not force:
+            try:
+                last_run = _parse_timestamp(str(json.loads(row["value_json"])))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                last_run = None
+            if last_run is not None and maintenance_at - last_run < HISTORY_MAINTENANCE_INTERVAL:
+                return {
+                    "incidents": 0,
+                    "events": 0,
+                    "failovers": 0,
+                    "connection_changes": 0,
+                }
+
+        cutoff = maintenance_at - timedelta(days=max_age_days)
+        cutoff_text = _timestamp(cutoff)
+        incident_cursor = db.execute(
+            """DELETE FROM incidents
+               WHERE active=0
+                 AND (
+                    COALESCE(resolved_at, last_seen_at) < ?
+                    OR incident_id NOT IN (
+                        SELECT incident_id FROM incidents
+                        WHERE active=0
+                        ORDER BY last_seen_at DESC, incident_id DESC
+                        LIMIT ?
+                    )
+                 )""",
+            (cutoff_text, max_rows),
+        )
+        event_cursor = db.execute(
+            """DELETE FROM events
+               WHERE NOT EXISTS (
+                    SELECT 1 FROM incidents
+                    WHERE incidents.incident_id=events.incident_id
+                      AND incidents.active=1
+               )
+                 AND (
+                    occurred_at < ?
+                    OR id NOT IN (
+                        SELECT candidate.id FROM events AS candidate
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM incidents
+                            WHERE incidents.incident_id=candidate.incident_id
+                              AND incidents.active=1
+                        )
+                        ORDER BY candidate.occurred_at DESC, candidate.id DESC
+                        LIMIT ?
+                    )
+                 )""",
+            (cutoff_text, max_rows),
+        )
+        failover_cursor = db.execute(
+            """DELETE FROM failover_collections
+               WHERE collected_at < ?
+                  OR id NOT IN (
+                      SELECT id FROM failover_collections
+                      ORDER BY collected_at DESC, id DESC
+                      LIMIT ?
+                  )""",
+            (cutoff_text, max_rows),
+        )
+        connection_change_cursor = db.execute(
+            """DELETE FROM connection_changes
+               WHERE acknowledged=1
+                 AND (
+                    last_confirmed_at < ?
+                    OR event_token NOT IN (
+                        SELECT event_token FROM connection_changes
+                        WHERE acknowledged=1
+                        ORDER BY last_confirmed_at DESC, event_token DESC
+                        LIMIT ?
+                    )
+                 )""",
+            (cutoff_text, max_rows),
+        )
+        db.execute(
+            """INSERT INTO preferences(key, value_json, updated_at)
+               VALUES ('_history_retention_last_run', ?, ?)
+               ON CONFLICT(key) DO UPDATE SET
+                   value_json=excluded.value_json,
+                   updated_at=excluded.updated_at""",
+            (_json_dump(_timestamp(maintenance_at)), _timestamp(maintenance_at)),
+        )
+        return {
+            "incidents": max(0, int(incident_cursor.rowcount)),
+            "events": max(0, int(event_cursor.rowcount)),
+            "failovers": max(0, int(failover_cursor.rowcount)),
+            "connection_changes": max(0, int(connection_change_cursor.rowcount)),
+        }
+
     def _require_connection(self) -> sqlite3.Connection:
         if self._connection is None:
             raise StorageError("저장소가 닫혀 있습니다.")
@@ -1121,6 +1414,18 @@ class SQLiteStorage:
                             "로컬 상태 저장소가 사용 중입니다. 잠시 후 다시 시도하세요."
                         ) from exc
                     raise StorageError("로컬 상태를 저장하지 못했습니다.") from exc
+                except BaseException:
+                    # Python-side serialization/callback failures can happen
+                    # after BEGIN and one or more successful statements. Always
+                    # return the shared connection to a clean transaction state
+                    # before propagating the original failure.
+                    try:
+                        connection.rollback()
+                    except sqlite3.DatabaseError as rollback_error:
+                        raise StorageError(
+                            "로컬 상태 저장 트랜잭션을 되돌리지 못했습니다."
+                        ) from rollback_error
+                    raise
             raise AssertionError("unreachable")
 
 

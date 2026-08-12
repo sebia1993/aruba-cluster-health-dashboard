@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
 from aruba_mini_dashboard.collectors.base import (
@@ -185,3 +187,118 @@ def test_missing_mm_credential_does_not_discard_successful_cluster_collection(
     assert (wlc_one.active_clients, wlc_one.standby_clients) == (250, 260)
     assert wlc_one.connection_type == "Type-A"
     storage.close()
+
+
+def test_low_spec_collection_is_sequential_but_preserves_results_and_request_counts(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    fixture_dir = Path(__file__).parent / "fixtures"
+    mm_output = (fixture_dir / "mm_show_switches_normal.txt").read_text(encoding="utf-8")
+    load_output = (fixture_dir / "cluster_load_normal.txt").read_text(encoding="utf-8")
+    membership_output = (fixture_dir / "group_membership_initial.txt").read_text(
+        encoding="utf-8"
+    )
+
+    def exercise(low_spec_mode: bool):
+        paths = AppPaths.from_environment(tmp_path / ("low" if low_spec_mode else "normal")).ensure()
+        persistent = SessionCredentialStore()
+        credentials = CredentialService(persistent=persistent)
+        credential_id = credentials.save(
+            DeviceCredential("operator", "session-secret"),
+            session_only=False,
+        )
+        settings = AppSettings.default()
+        settings.credentials.shared_credential_id = credential_id
+        settings.mobility_master.management_ip = "192.0.2.10"
+        for index, member in enumerate(settings.cluster.members, start=11):
+            member.ip = f"192.0.2.{index}"
+            member.alias = f"WLC-{index - 10:02d}"
+        settings.cluster.primary_controller_ip = "192.0.2.11"
+        settings.performance.low_spec_mode = low_spec_mode
+        calls: list[str] = []
+        concurrency_lock = threading.Lock()
+        active = 0
+        maximum_active = 0
+
+        def enter(source: str) -> None:
+            nonlocal active, maximum_active
+            with concurrency_lock:
+                calls.append(source)
+                active += 1
+                maximum_active = max(maximum_active, active)
+            time.sleep(0.02)
+
+        def leave() -> None:
+            nonlocal active
+            with concurrency_lock:
+                active -= 1
+
+        def collect_mm(_self, _settings, _credential):
+            enter("mm")
+            try:
+                return CollectionBundle(
+                    source="mm",
+                    requested_controller_ip="192.0.2.10",
+                    actual_controller_ip="192.0.2.10",
+                    commands={SHOW_SWITCHES: CommandResult(SHOW_SWITCHES, True, output=mm_output)},
+                )
+            finally:
+                leave()
+
+        def collect_cluster(_self, _settings, _credential):
+            enter("cluster")
+            try:
+                return CollectionBundle(
+                    source="cluster",
+                    requested_controller_ip="192.0.2.11",
+                    actual_controller_ip="192.0.2.11",
+                    commands={
+                        SHOW_CLIENT_DISTRIBUTION: CommandResult(
+                            SHOW_CLIENT_DISTRIBUTION, True, output=load_output
+                        ),
+                        SHOW_GROUP_MEMBERSHIP: CommandResult(
+                            SHOW_GROUP_MEMBERSHIP, True, output=membership_output
+                        ),
+                    },
+                )
+            finally:
+                leave()
+
+        monkeypatch.setattr("aruba_mini_dashboard.main.MmCollector.collect", collect_mm)
+        monkeypatch.setattr("aruba_mini_dashboard.main.ClusterCollector.collect", collect_cluster)
+        storage = SQLiteStorage(paths)
+        runtime = RuntimePoller(settings, paths, credentials, storage, setup_logging(paths))
+        writes = 0
+        original_write = storage._write
+
+        def counted_write(operation):
+            nonlocal writes
+            writes += 1
+            return original_write(operation)
+
+        monkeypatch.setattr(storage, "_write", counted_write)
+        snapshot = runtime()
+        result = {
+            device.ip: (
+                device.mm_status,
+                device.active_clients,
+                device.standby_clients,
+                device.connection_type,
+                device.severity,
+            )
+            for device in snapshot.devices
+        }
+        storage.close()
+        credentials.close()
+        return result, calls, maximum_active, writes
+
+    normal, normal_calls, _normal_concurrency, normal_writes = exercise(False)
+    low, low_calls, low_concurrency, low_writes = exercise(True)
+
+    assert low == normal
+    assert sorted(low_calls) == sorted(normal_calls) == ["cluster", "mm"]
+    assert low_calls == ["mm", "cluster"]
+    assert low_concurrency == 1
+    assert normal_writes <= 2
+    assert low_writes <= 2

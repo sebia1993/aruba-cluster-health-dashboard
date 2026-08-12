@@ -30,6 +30,8 @@ def _make_onedir(tmp_path: Path, *, root_name: str = NAME) -> Path:
     _write(root / "QT_RUNTIME_INVENTORY.json", b"{}")
     _write(root / "_internal" / "PySide6" / "plugins" / "platforms" / "qwindows.dll")
     _write(root / "_internal" / "PySide6" / "plugins" / "imageformats" / "qsvg.dll")
+    _write(root / "_internal" / "PySide6" / "translations" / "qt_ko.qm")
+    _write(root / "_internal" / "PySide6" / "translations" / "qtbase_ko.qm")
     _write(root / "_internal" / "shiboken6" / "MSVCP140.dll")
     _write(root / "_internal" / "shiboken6" / "Shiboken.pyd")
     _write(root / "_internal" / "shiboken6" / "shiboken6.abi3.dll")
@@ -54,6 +56,8 @@ def _valid_zip_entries() -> list[tuple[str, bytes]]:
         (f"{NAME}/QT_RUNTIME_INVENTORY.json", b"{}"),
         (f"{NAME}/_internal/PySide6/plugins/platforms/qwindows.dll", b"plugin"),
         (f"{NAME}/_internal/PySide6/plugins/imageformats/qsvg.dll", b"plugin"),
+        (f"{NAME}/_internal/PySide6/translations/qt_ko.qm", b"translation"),
+        (f"{NAME}/_internal/PySide6/translations/qtbase_ko.qm", b"translation"),
         (f"{NAME}/_internal/shiboken6/MSVCP140.dll", b"binding"),
         (f"{NAME}/_internal/shiboken6/Shiboken.pyd", b"binding"),
         (f"{NAME}/_internal/shiboken6/shiboken6.abi3.dll", b"binding"),
@@ -86,6 +90,7 @@ def _disable_smoke(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     monkeypatch.setattr(verifier, "_verify_pe_metadata", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(verifier, "_verify_qt_runtime_inventory", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(verifier, "_verify_lgpl_runtime_contract", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(verifier, "_embedded_pyz_module_names", lambda *_args, **_kwargs: set())
     return called
 
 
@@ -228,6 +233,32 @@ def test_legacy_path_name_interface_verifies_onedir(
 
     assert called == [root / f"{NAME}.exe"]
     assert "ARUBA_MINI_DASHBOARD_PACKAGE_OK" in capsys.readouterr().out
+
+
+def test_release_rejects_unreviewed_qt_translation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _make_onedir(tmp_path)
+    _disable_smoke(monkeypatch)
+    _write(root / "_internal" / "PySide6" / "translations" / "qt_fr.qm")
+
+    with pytest.raises(SystemExit, match="Qt translation boundary mismatch"):
+        verifier.verify(root, NAME, False)
+
+
+def test_release_rejects_cli_only_modules_frozen_in_pyz(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _make_onedir(tmp_path)
+    _disable_smoke(monkeypatch)
+    monkeypatch.setattr(
+        verifier,
+        "_embedded_pyz_module_names",
+        lambda *_args: {"rich.console", "netmiko.cli_tools.netmiko_show"},
+    )
+
+    with pytest.raises(SystemExit, match="Unused CLI-only modules are frozen in PYZ"):
+        verifier.verify(root, NAME, False)
 
 
 def test_one_file_directory_is_rejected_as_an_unsupported_release(

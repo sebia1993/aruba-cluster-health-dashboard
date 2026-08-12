@@ -9,7 +9,7 @@ import threading
 
 from ..config import ClusterSettings
 from ..credentials import DeviceCredential
-from .aruba_ssh import ArubaSshAdapter
+from .aruba_ssh import ArubaSshAdapter, wait_for_retry_backoff
 from .base import (
     SHOW_CLIENT_DISTRIBUTION,
     SHOW_GROUP_MEMBERSHIP,
@@ -93,10 +93,22 @@ class ClusterCollector:
                     return candidate
                 if operation_error is not None and not operation_error.retryable:
                     break
+                if (
+                    operation_error is not None
+                    and attempt_number <= settings.retries
+                    and wait_for_retry_backoff(self.cancel_event, attempt_number)
+                ):
+                    candidate.terminal_error_code = "CANCELLED"
+                    candidate.terminal_error_message = "점검이 취소되었습니다."
+                    best = candidate
+                    break
         if best is None:
             best = CollectionBundle(source="cluster", requested_controller_ip=primary)
         best.attempts = all_attempts
         best.primary_failed = True
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            best.terminal_error_code = "CANCELLED"
+            best.terminal_error_message = "점검이 취소되었습니다."
         if not best.terminal_error_code:
             best.terminal_error_code = primary_error_code or "CLUSTER_COLLECTION_FAILED"
             best.terminal_error_message = "모든 Cluster 수집 Controller에서 명령 결과를 가져오지 못했습니다."

@@ -58,6 +58,10 @@
     "sound_enabled": false,
     "recovery_notifications": true
   },
+  "performance": {
+    "low_spec_mode": false,
+    "performance_logging": false
+  },
   "ui": {
     "always_on_top": false,
     "opacity_percent": 100,

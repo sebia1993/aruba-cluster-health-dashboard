@@ -3,7 +3,15 @@ from __future__ import annotations
 from typing import Any
 
 from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtWidgets import QComboBox, QSlider, QSpinBox
+from PySide6.QtWidgets import (
+    QComboBox,
+    QSizePolicy,
+    QSlider,
+    QSpinBox,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 
 CLICK_TO_ENABLE_WHEEL_TOOLTIP = (
@@ -97,3 +105,37 @@ class NoWheelSlider(QSlider):
     def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API
         event.ignore()
         self.wheel_ignored.emit()
+
+
+class CollapsibleSection(QWidget):
+    """Small native disclosure section used for infrequently changed settings."""
+
+    def __init__(
+        self,
+        title: str,
+        content: QWidget,
+        parent: QWidget | None = None,
+        *,
+        expanded: bool = False,
+    ) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self.toggle = QToolButton(self)
+        self.toggle.setText(title)
+        self.toggle.setCheckable(True)
+        self.toggle.setChecked(expanded)
+        self.toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.toggle.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.toggle.setAccessibleName(title)
+        self.content = content
+        self.content.setVisible(expanded)
+        self.toggle.toggled.connect(self._set_expanded)
+        layout.addWidget(self.toggle)
+        layout.addWidget(self.content)
+
+    def _set_expanded(self, expanded: bool) -> None:
+        self.toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.content.setVisible(expanded)

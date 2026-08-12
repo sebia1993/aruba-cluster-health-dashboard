@@ -19,6 +19,7 @@ from typing import Any, Mapping
 
 APP_DIRECTORY_NAME = "ArubaMiniDashboard"
 SETTINGS_SCHEMA_VERSION = 1
+LOW_SPEC_MIN_INTERVAL_SECONDS = 120
 
 
 class SettingsError(RuntimeError):
@@ -45,6 +46,7 @@ class AppPaths:
     logs: Path
     app_log: Path
     ssh_debug_log: Path
+    performance_log: Path
     known_hosts: Path
 
     @classmethod
@@ -64,6 +66,7 @@ class AppPaths:
             logs=logs,
             app_log=logs / "app.log",
             ssh_debug_log=logs / "ssh_debug.log",
+            performance_log=logs / "performance.log",
             known_hosts=root / "known_hosts",
         )
 
@@ -158,6 +161,14 @@ class NotificationSettings:
 
 
 @dataclass(slots=True)
+class PerformanceSettings:
+    """Optional resource-saving behavior; detection rules stay unchanged."""
+
+    low_spec_mode: bool = False
+    performance_logging: bool = False
+
+
+@dataclass(slots=True)
 class UiSettings:
     always_on_top: bool = False
     opacity_percent: int = 100
@@ -177,6 +188,7 @@ class AppSettings:
     polling: PollingSettings = field(default_factory=PollingSettings)
     detection: DetectionSettings = field(default_factory=DetectionSettings)
     notifications: NotificationSettings = field(default_factory=NotificationSettings)
+    performance: PerformanceSettings = field(default_factory=PerformanceSettings)
     ui: UiSettings = field(default_factory=UiSettings)
     ssh_debug_logging: bool = False
 
@@ -205,6 +217,7 @@ class AppSettings:
                 polling=PollingSettings(**_mapping(value.get("polling", {}), "polling")),
                 detection=DetectionSettings(**_mapping(value.get("detection", {}), "detection")),
                 notifications=NotificationSettings(**_mapping(value.get("notifications", {}), "notifications")),
+                performance=PerformanceSettings(**_mapping(value.get("performance", {}), "performance")),
                 ui=UiSettings(**_mapping(value.get("ui", {}), "ui")),
                 ssh_debug_logging=value.get("ssh_debug_logging", False),
             )
@@ -223,6 +236,19 @@ class AppSettings:
         result = asdict(self)
         _reject_secret_fields(result)
         return result
+
+    @property
+    def effective_poll_interval_seconds(self) -> int:
+        """Interval used by automatic scheduling.
+
+        Manual checks bypass the scheduler, so enabling low-spec mode never
+        delays an explicit operator request.
+        """
+
+        configured = self.polling.interval_seconds
+        if self.performance.low_spec_mode:
+            return max(configured, LOW_SPEC_MIN_INTERVAL_SECONDS)
+        return configured
 
     def validate(self) -> None:
         """Validate safe ranges while allowing an unconfigured first run."""
@@ -502,6 +528,11 @@ def _settings_schema_errors(settings: AppSettings) -> list[str]:
         ):
             boolean(f"notifications.{field_name}", getattr(notifications, field_name))
         integer("notifications.repeat_interval_minutes", notifications.repeat_interval_minutes)
+
+    performance = settings.performance
+    if exact("performance", performance, PerformanceSettings, "객체"):
+        boolean("performance.low_spec_mode", performance.low_spec_mode)
+        boolean("performance.performance_logging", performance.performance_logging)
 
     ui = settings.ui
     if exact("ui", ui, UiSettings, "객체"):

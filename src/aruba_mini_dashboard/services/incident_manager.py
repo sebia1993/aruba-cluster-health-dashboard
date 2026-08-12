@@ -338,6 +338,23 @@ class IncidentManager:
         values.sort(key=lambda item: (item.severity.value, item.first_detected_at, item.incident_id))
         return values
 
+    def compact_inactive(self) -> int:
+        """Release closed incident objects after their durable save succeeds.
+
+        Active incidents remain authoritative in memory. Callers deliberately
+        invoke this only after SQLite commits, so a locked database keeps the
+        closed objects available for the next persistence retry.
+        """
+
+        inactive_ids = [
+            incident_id
+            for incident_id, incident in self._incidents.items()
+            if not incident.active
+        ]
+        for incident_id in inactive_ids:
+            self._incidents.pop(incident_id, None)
+        return len(inactive_ids)
+
     def events(self) -> list[Incident]:
         return sorted(
             self._incidents.values(),

@@ -9,7 +9,7 @@ import threading
 
 from ..config import MobilityMasterSettings
 from ..credentials import DeviceCredential
-from .aruba_ssh import ArubaSshAdapter
+from .aruba_ssh import ArubaSshAdapter, wait_for_retry_backoff
 from .base import (
     SHOW_SWITCHES,
     AdapterFactory,
@@ -81,6 +81,13 @@ class MmCollector:
                     break
             finally:
                 adapter.close()
+            if attempt_number <= settings.retries and wait_for_retry_backoff(
+                self.cancel_event,
+                attempt_number,
+            ):
+                bundle.terminal_error_code = "CANCELLED"
+                bundle.terminal_error_message = "점검이 취소되었습니다."
+                break
         return bundle
 
 

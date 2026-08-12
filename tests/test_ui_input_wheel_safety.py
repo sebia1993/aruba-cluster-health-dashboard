@@ -60,10 +60,12 @@ def test_every_numeric_setting_and_comparison_mode_uses_click_armed_input() -> N
 
     assert len(spin_boxes) == 17
     assert all(isinstance(widget, ClickArmedSpinBox) for widget in spin_boxes)
-    assert combo_boxes == [dialog.comparison_mode]
+    assert set(combo_boxes) == {dialog.primary_ip, dialog.comparison_mode}
+    assert isinstance(dialog.primary_ip, ClickArmedComboBox)
     assert isinstance(dialog.comparison_mode, ClickArmedComboBox)
-    assert all(widget.toolTip() == CLICK_TO_ENABLE_WHEEL_TOOLTIP for widget in spin_boxes)
-    assert dialog.comparison_mode.toolTip() == CLICK_TO_ENABLE_WHEEL_TOOLTIP
+    assert all(CLICK_TO_ENABLE_WHEEL_TOOLTIP in widget.toolTip() for widget in spin_boxes)
+    assert CLICK_TO_ENABLE_WHEEL_TOOLTIP in dialog.primary_ip.toolTip()
+    assert CLICK_TO_ENABLE_WHEEL_TOOLTIP in dialog.comparison_mode.toolTip()
     dialog.close()
 
 

@@ -52,3 +52,48 @@ print('UI_SCALE_OK')
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "UI_SCALE_OK" in completed.stdout
+
+
+@pytest.mark.gui
+@pytest.mark.parametrize("scale", ["1.0", "1.25", "1.5"])
+def test_simplified_settings_fit_supported_windows_scales(scale: str) -> None:
+    root = Path(__file__).resolve().parents[1]
+    script = r'''
+from PySide6.QtWidgets import QApplication, QDialogButtonBox
+from aruba_mini_dashboard.config import AppSettings
+from aruba_mini_dashboard.ui.settings_dialog import SettingsDialog
+
+app=QApplication([])
+d=SettingsDialog(AppSettings.default(), initial_setup=True)
+d.show(); app.processEvents()
+assert d.width() >= d.minimumWidth() and d.height() >= d.minimumHeight()
+assert d.tabs.count() == 3
+for button in (
+    d.buttons.button(QDialogButtonBox.Save),
+    d.buttons.button(QDialogButtonBox.Cancel),
+    d.mm_test_button,
+    d.cluster_test_button,
+):
+    assert button.height() >= button.minimumSizeHint().height()
+assert d.mm_ip.toolTip()
+assert d.primary_ip.toolTip()
+assert d.low_spec_mode.toolTip()
+assert d.performance_logging.toolTip()
+d.close()
+print('SETTINGS_SCALE_OK')
+'''
+    env = os.environ.copy()
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    env["QT_SCALE_FACTOR"] = scale
+    env["PYTHONPATH"] = str(root / "src")
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "SETTINGS_SCALE_OK" in completed.stdout

@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Signal, Slot
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -39,7 +39,7 @@ class ConnectionTestRequest:
     def __repr__(self) -> str:
         return "ConnectionTestRequest(settings=[NON_SECRET], credential=[REDACTED])"
 
-from .widgets import ClickArmedComboBox, ClickArmedSpinBox, NoWheelSlider
+from .widgets import CollapsibleSection, ClickArmedComboBox, ClickArmedSpinBox
 
 
 class _CredentialFields(QGroupBox):
@@ -54,9 +54,26 @@ class _CredentialFields(QGroupBox):
         self.enable_secret = QLineEdit(self)
         self.enable_secret.setEchoMode(QLineEdit.Password)
         self.enable_secret.setPlaceholderText("선택 입력")
-        layout.addRow("사용자 ID", self.username)
-        layout.addRow("비밀번호", self.password)
-        layout.addRow("Enable 비밀번호", self.enable_secret)
+        descriptions = (
+            (self.username, "장비 로그인에 사용하는 사용자 ID입니다."),
+            (self.password, "저장된 값을 바꿀 때만 입력합니다. 화면이나 설정 파일에 평문 저장되지 않습니다."),
+            (self.enable_secret, "장비가 Enable 진입을 요구할 때만 입력합니다."),
+        )
+        for widget, description in descriptions:
+            widget.setToolTip(description)
+            widget.setStatusTip(description)
+            widget.setAccessibleDescription(description)
+        for text, widget, description in (
+            ("사용자 ID", self.username, descriptions[0][1]),
+            ("비밀번호", self.password, descriptions[1][1]),
+            ("Enable 비밀번호", self.enable_secret, descriptions[2][1]),
+        ):
+            label = QLabel(text, self)
+            label.setBuddy(widget)
+            label.setToolTip(description)
+            label.setAccessibleDescription(description)
+            widget.setAccessibleName(text)
+            layout.addRow(label, widget)
 
     def has_new_value(self) -> bool:
         return bool(self.username.text().strip() or self.password.text() or self.enable_secret.text())
@@ -85,6 +102,8 @@ class SettingsDialog(QDialog):
         settings: AppSettings,
         credential_service: Any | None = None,
         parent: QWidget | None = None,
+        *,
+        initial_setup: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Aruba 미니 대시보드 설정")
@@ -92,25 +111,39 @@ class SettingsDialog(QDialog):
         self.setMinimumSize(580, 520)
         self.settings = copy.deepcopy(settings)
         self.credential_service = credential_service
+        self.initial_setup = initial_setup
         self._staged_new_credential_ids: list[str] = []
         self._staged_old_credential_ids: list[str] = []
 
         layout = QVBoxLayout(self)
+        if initial_setup:
+            guide = QLabel(
+                "처음 사용하려면 MM과 컨트롤러 4대, Primary 및 자격 증명을 등록하세요. "
+                "저장 후 메인 화면에서 ‘지금 점검’을 눌러 확인합니다.",
+                self,
+            )
+            guide.setWordWrap(True)
+            guide.setObjectName("initialSetupGuide")
+            guide.setStyleSheet(
+                "QLabel#initialSetupGuide { background: #EAF3FF; border: 1px solid #7AA7D9; "
+                "border-radius: 5px; padding: 8px; color: #163A5F; }"
+            )
+            guide.setAccessibleName("첫 실행 설정 안내")
+            layout.addWidget(guide)
         self.tabs = QTabWidget(self)
         layout.addWidget(self.tabs)
         self._build_devices_tab()
-        self._build_detection_tab()
         self._build_polling_tab()
         self._build_notifications_tab()
-        self._build_ui_tab()
-        self._build_advanced_tab()
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Cancel,
             parent=self,
         )
         self.buttons.button(QDialogButtonBox.Save).setText("저장")
-        self.buttons.button(QDialogButtonBox.Cancel).setText("취소")
+        self.buttons.button(QDialogButtonBox.Cancel).setText(
+            "나중에 설정" if initial_setup else "취소"
+        )
         self.buttons.accepted.connect(self._apply)
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
@@ -128,6 +161,30 @@ class SettingsDialog(QDialog):
         widget.setSuffix(suffix)
         return widget
 
+    @staticmethod
+    def _describe(widget: QWidget, name: str, description: str) -> QWidget:
+        wheel_note = widget.toolTip()
+        tooltip = description + (f"\n\n{wheel_note}" if wheel_note else "")
+        widget.setToolTip(tooltip)
+        widget.setStatusTip(description)
+        widget.setAccessibleName(name)
+        widget.setAccessibleDescription(description)
+        return widget
+
+    @classmethod
+    def _add_row(
+        cls,
+        form: QFormLayout,
+        label_text: str,
+        widget: QWidget,
+        description: str,
+    ) -> None:
+        cls._describe(widget, label_text, description)
+        label = QLabel(label_text)
+        label.setBuddy(widget)
+        label.setToolTip(description)
+        form.addRow(label, widget)
+
     def _build_devices_tab(self) -> None:
         contents = QWidget(self)
         outer = QVBoxLayout(contents)
@@ -136,30 +193,17 @@ class SettingsDialog(QDialog):
         mm_form = QFormLayout(mm_box)
         mm = self.settings.mobility_master
         self.mm_ip = QLineEdit(mm.management_ip)
-        self.mm_name = QLineEdit(mm.display_name)
-        self.mm_port = self._spin(1, 65535, mm.ssh_port)
-        self.mm_connect_timeout = self._spin(1, 600, mm.connect_timeout_seconds, "초")
-        self.mm_command_timeout = self._spin(1, 600, mm.command_timeout_seconds, "초")
-        self.mm_retries = self._spin(0, 10, mm.retries, "회")
-        self.mm_enable = QCheckBox("Enable 진입 필요")
-        self.mm_enable.setChecked(mm.enable_required)
-        mm_form.addRow("관리 IP", self.mm_ip)
-        mm_form.addRow("표시 이름", self.mm_name)
-        mm_form.addRow("SSH 포트", self.mm_port)
-        mm_form.addRow("연결 제한시간", self.mm_connect_timeout)
-        mm_form.addRow("명령 제한시간", self.mm_command_timeout)
-        mm_form.addRow("재시도 횟수", self.mm_retries)
-        mm_form.addRow("", self.mm_enable)
+        self._add_row(
+            mm_form,
+            "관리 IP",
+            self.mm_ip,
+            "show switches 명령을 실행할 Mobility Master 관리 IP입니다.",
+        )
         outer.addWidget(mm_box)
 
-        cluster_box = QGroupBox("Aruba 7240XM 클러스터", contents)
+        cluster_box = QGroupBox("Aruba 7240XM 컨트롤러", contents)
         cluster_layout = QVBoxLayout(cluster_box)
-        cluster_form = QFormLayout()
         cluster = self.settings.cluster
-        self.cluster_name = QLineEdit(cluster.name)
-        cluster_form.addRow("클러스터 명칭", self.cluster_name)
-        cluster_layout.addLayout(cluster_form)
-
         member_grid = QGridLayout()
         member_grid.addWidget(QLabel("구성원"), 0, 0)
         member_grid.addWidget(QLabel("IP"), 0, 1)
@@ -172,32 +216,92 @@ class SettingsDialog(QDialog):
             alias_edit = QLineEdit(member.alias)
             ip_edit.setPlaceholderText(f"WLC-{index:02d} IP")
             alias_edit.setPlaceholderText(f"WLC-{index:02d}")
+            self._describe(
+                ip_edit,
+                f"컨트롤러 {index} IP",
+                "감시할 Aruba 7240XM 구성원의 관리 IP입니다.",
+            )
+            self._describe(
+                alias_edit,
+                f"컨트롤러 {index} 별칭",
+                "대시보드에서 IP와 함께 표시할 알아보기 쉬운 이름입니다.",
+            )
             self.member_ips.append(ip_edit)
             self.member_aliases.append(alias_edit)
             member_grid.addWidget(QLabel(str(index)), index, 0)
             member_grid.addWidget(ip_edit, index, 1)
             member_grid.addWidget(alias_edit, index, 2)
+            ip_edit.textChanged.connect(self._refresh_primary_choices)
         cluster_layout.addLayout(member_grid)
 
         endpoint_form = QFormLayout()
-        self.primary_ip = QLineEdit(cluster.primary_controller_ip)
-        self.fallback_ips = QLineEdit(", ".join(cluster.fallback_controller_ips))
-        self.fallback_ips.setPlaceholderText("쉼표로 구분, 순서대로 시도")
+        self.primary_ip = ClickArmedComboBox()
+        self._configured_primary_ip = cluster.primary_controller_ip
+        self._refresh_primary_choices()
+        self._add_row(
+            endpoint_form,
+            "Primary Controller",
+            self.primary_ip,
+            "클러스터 명령을 먼저 수집할 컨트롤러입니다. 등록한 4대 중에서 선택합니다.",
+        )
+        fallback_note = QLabel(
+            "Primary 연결 실패 시 나머지 등록 컨트롤러를 위의 등록 순서대로 자동 시도합니다."
+        )
+        fallback_note.setWordWrap(True)
+        fallback_note.setAccessibleName("대체 컨트롤러 자동 선택 안내")
+        endpoint_form.addRow(fallback_note)
+        cluster_layout.addLayout(endpoint_form)
+        outer.addWidget(cluster_box)
+
+        connection_content = QWidget(contents)
+        connection_layout = QVBoxLayout(connection_content)
+        connection_layout.setContentsMargins(12, 2, 0, 4)
+        mm_connection = QGroupBox("MM SSH", connection_content)
+        mm_connection_form = QFormLayout(mm_connection)
+        self.mm_port = self._spin(1, 65535, mm.ssh_port)
+        self.mm_connect_timeout = self._spin(1, 600, mm.connect_timeout_seconds, "초")
+        self.mm_command_timeout = self._spin(1, 600, mm.command_timeout_seconds, "초")
+        self.mm_retries = self._spin(0, 10, mm.retries, "회")
+        self.mm_enable = QCheckBox("Enable 진입 필요")
+        self.mm_enable.setChecked(mm.enable_required)
+        for label, widget, description in (
+            ("SSH 포트", self.mm_port, "MM SSH 포트입니다. 기본값 22, 허용 범위 1~65535입니다."),
+            ("연결 제한시간", self.mm_connect_timeout, "MM TCP/SSH 연결을 기다리는 최대 시간입니다. 기본값 10초입니다."),
+            ("명령 제한시간", self.mm_command_timeout, "MM 명령 응답을 기다리는 최대 시간입니다. 기본값 20초입니다."),
+            ("재시도 횟수", self.mm_retries, "일시적인 연결 실패 시 추가 시도 횟수입니다. 기본값 2회입니다."),
+        ):
+            self._add_row(mm_connection_form, label, widget, description)
+        self._describe(self.mm_enable, "MM Enable 진입", "MM 계정이 show 명령 전에 Enable 진입을 요구할 때 사용합니다.")
+        mm_connection_form.addRow(self.mm_enable)
+        connection_layout.addWidget(mm_connection)
+
+        cluster_connection = QGroupBox("컨트롤러 SSH", connection_content)
+        cluster_connection_form = QFormLayout(cluster_connection)
         self.cluster_port = self._spin(1, 65535, cluster.ssh_port)
         self.cluster_connect_timeout = self._spin(1, 600, cluster.connect_timeout_seconds, "초")
         self.cluster_command_timeout = self._spin(1, 600, cluster.command_timeout_seconds, "초")
         self.cluster_retries = self._spin(0, 10, cluster.retries, "회")
         self.cluster_enable = QCheckBox("Enable 진입 필요")
         self.cluster_enable.setChecked(cluster.enable_required)
-        endpoint_form.addRow("Primary Controller IP", self.primary_ip)
-        endpoint_form.addRow("대체 Controller IP", self.fallback_ips)
-        endpoint_form.addRow("SSH 포트", self.cluster_port)
-        endpoint_form.addRow("연결 제한시간", self.cluster_connect_timeout)
-        endpoint_form.addRow("명령 제한시간", self.cluster_command_timeout)
-        endpoint_form.addRow("재시도 횟수", self.cluster_retries)
-        endpoint_form.addRow("", self.cluster_enable)
-        cluster_layout.addLayout(endpoint_form)
-        outer.addWidget(cluster_box)
+        for label, widget, description in (
+            ("SSH 포트", self.cluster_port, "컨트롤러 SSH 포트입니다. 기본값 22, 허용 범위 1~65535입니다."),
+            ("연결 제한시간", self.cluster_connect_timeout, "컨트롤러 연결을 기다리는 최대 시간입니다. 기본값 10초입니다."),
+            ("명령 제한시간", self.cluster_command_timeout, "클러스터 명령 응답을 기다리는 최대 시간입니다. 기본값 20초입니다."),
+            ("재시도 횟수", self.cluster_retries, "동일 컨트롤러의 추가 시도 횟수입니다. 이후 자동으로 다음 등록 장비를 시도합니다."),
+        ):
+            self._add_row(cluster_connection_form, label, widget, description)
+        self._describe(self.cluster_enable, "컨트롤러 Enable 진입", "컨트롤러가 show 명령 전에 Enable 진입을 요구할 때 사용합니다.")
+        cluster_connection_form.addRow(self.cluster_enable)
+        connection_layout.addWidget(cluster_connection)
+        reset_connection = QPushButton("연결 기본값 복원", connection_content)
+        self._describe(
+            reset_connection,
+            "연결 기본값 복원",
+            "SSH 포트, 제한시간, 재시도와 Enable 옵션만 기본값으로 돌립니다.",
+        )
+        reset_connection.clicked.connect(self._reset_connection_defaults)
+        connection_layout.addWidget(reset_connection)
+        outer.addWidget(CollapsibleSection("고급 연결 설정", connection_content, contents))
 
         credentials_box = QGroupBox("접속 계정", contents)
         credentials_layout = QVBoxLayout(credentials_box)
@@ -206,6 +310,16 @@ class SettingsDialog(QDialog):
         self.session_only = QCheckBox("세션 전용 자격 증명 (프로그램 종료 시 삭제)")
         self._initial_session_only = self._configured_session_only()
         self.session_only.setChecked(self._initial_session_only)
+        self._describe(
+            self.shared_credentials,
+            "공통 계정 사용",
+            "MM과 컨트롤러가 같은 로그인 계정을 사용할 때 선택합니다.",
+        )
+        self._describe(
+            self.session_only,
+            "세션 전용 자격 증명",
+            "선택하면 자격 증명을 메모리에만 보관하고 프로그램 종료 시 삭제합니다.",
+        )
         credentials_layout.addWidget(self.shared_credentials)
         credentials_layout.addWidget(self.session_only)
         self.shared_fields = _CredentialFields("공통 계정")
@@ -221,6 +335,16 @@ class SettingsDialog(QDialog):
         tests = QHBoxLayout()
         self.mm_test_button = QPushButton("MM 연결 테스트")
         self.cluster_test_button = QPushButton("클러스터 연결 테스트")
+        self._describe(
+            self.mm_test_button,
+            "MM 연결 테스트",
+            "저장 전에 입력한 MM 설정으로 읽기 전용 SSH 호스트 키와 로그인을 확인합니다.",
+        )
+        self._describe(
+            self.cluster_test_button,
+            "클러스터 연결 테스트",
+            "Primary 및 자동 Fallback 순서로 읽기 전용 SSH 호스트 키와 로그인을 확인합니다.",
+        )
         self.mm_test_button.clicked.connect(lambda: self._emit_connection_test("mm"))
         self.cluster_test_button.clicked.connect(lambda: self._emit_connection_test("cluster"))
         tests.addWidget(self.mm_test_button)
@@ -234,9 +358,42 @@ class SettingsDialog(QDialog):
         scroll.setWidget(contents)
         self.tabs.addTab(scroll, "장비·자격 증명")
 
-    def _build_detection_tab(self) -> None:
-        page = QWidget(self)
-        form = QFormLayout(page)
+    @Slot()
+    def _refresh_primary_choices(self) -> None:
+        if not hasattr(self, "primary_ip"):
+            return
+        selected = self.primary_ip.currentData() or getattr(self, "_configured_primary_ip", "")
+        choices = [edit.text().strip() for edit in self.member_ips if edit.text().strip()]
+        self.primary_ip.blockSignals(True)
+        self.primary_ip.clear()
+        self.primary_ip.addItem("선택하세요", "")
+        for index, ip in enumerate(choices, start=1):
+            self.primary_ip.addItem(f"{index}. {ip}", ip)
+        self.primary_ip.setCurrentIndex(max(0, self.primary_ip.findData(selected)))
+        self.primary_ip.blockSignals(False)
+
+    def _reset_connection_defaults(self) -> None:
+        defaults = AppSettings.default()
+        for widget, value_ in (
+            (self.mm_port, defaults.mobility_master.ssh_port),
+            (self.mm_connect_timeout, defaults.mobility_master.connect_timeout_seconds),
+            (self.mm_command_timeout, defaults.mobility_master.command_timeout_seconds),
+            (self.mm_retries, defaults.mobility_master.retries),
+            (self.cluster_port, defaults.cluster.ssh_port),
+            (self.cluster_connect_timeout, defaults.cluster.connect_timeout_seconds),
+            (self.cluster_command_timeout, defaults.cluster.command_timeout_seconds),
+            (self.cluster_retries, defaults.cluster.retries),
+        ):
+            widget.setValue(value_)
+        self.mm_enable.setChecked(defaults.mobility_master.enable_required)
+        self.cluster_enable.setChecked(defaults.cluster.enable_required)
+
+    def _build_detection_section(self, parent: QWidget) -> CollapsibleSection:
+        content = QWidget(parent)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(12, 2, 0, 4)
+        form_widget = QWidget(content)
+        form = QFormLayout(form_widget)
         d = self.settings.detection
         self.low_threshold = self._spin(0, 1_000_000, d.low_client_threshold)
         self.anomaly_cycles = self._spin(1, 100, d.anomaly_cycles, "회")
@@ -249,32 +406,88 @@ class SettingsDialog(QDialog):
         self.minimum_total = self._spin(0, 1_000_000, d.minimum_cluster_active_clients)
         self.minimum_peer = self._spin(0, 1_000_000, d.minimum_peer_median)
         self.missing_cycles = self._spin(1, 100, d.missing_cycles, "회")
-        form.addRow("Low Client Threshold", self.low_threshold)
-        form.addRow("연속 이상 감지", self.anomaly_cycles)
-        form.addRow("복구 확인", self.recovery_cycles)
-        form.addRow("감지 모드", self.comparison_mode)
-        form.addRow("상대 비교 기준", self.relative_ratio)
-        form.addRow("클러스터 최소 전체 Active", self.minimum_total)
-        form.addRow("Peer 중앙값 최소", self.minimum_peer)
-        form.addRow("행 누락 활성화", self.missing_cycles)
-        self.tabs.addTab(page, "감지 기준")
+        rows = (
+            ("Low Client Threshold", self.low_threshold, "Active와 Standby가 모두 이 값 이하인지 확인합니다. 기본값 10입니다."),
+            ("연속 이상 감지", self.anomaly_cycles, "Client 저하가 이 횟수만큼 연속될 때 장애를 활성화합니다. 기본값 3회입니다."),
+            ("복구 확인", self.recovery_cycles, "정상 값이 이 횟수만큼 연속된 뒤 복구로 판단합니다. 기본값 2회입니다."),
+            ("감지 모드", self.comparison_mode, "절대 기준만 또는 다른 장비 중앙값과의 상대 비교를 함께 사용합니다."),
+            ("상대 비교 기준", self.relative_ratio, "정상 Peer 중앙값 대비 이 비율 이하인지 확인합니다. 기본값 25%입니다."),
+            ("클러스터 최소 전체 Active", self.minimum_total, "전체 사용량이 낮을 때 특정 장비 장애로 오판하지 않는 하한입니다. 기본값 50입니다."),
+            ("Peer 중앙값 최소", self.minimum_peer, "다른 장비가 충분한 Client를 보유했는지 확인하는 하한입니다. 기본값 30입니다."),
+            ("행 누락 활성화", self.missing_cycles, "구성원 행이 이 횟수만큼 연속 누락될 때 경고합니다. 기본값 3회입니다."),
+        )
+        for label, widget, description in rows:
+            self._add_row(form, label, widget, description)
+        layout.addWidget(form_widget)
+        reset = QPushButton("감지 기본값 복원", content)
+        self._describe(
+            reset,
+            "감지 기본값 복원",
+            "고급 감지 기준만 안전한 기본값으로 돌립니다.",
+        )
+        reset.clicked.connect(self._reset_detection_defaults)
+        layout.addWidget(reset)
+        return CollapsibleSection("고급 감지 기준", content, parent)
+
+    def _reset_detection_defaults(self) -> None:
+        defaults = AppSettings.default().detection
+        self.low_threshold.setValue(defaults.low_client_threshold)
+        self.anomaly_cycles.setValue(defaults.anomaly_cycles)
+        self.recovery_cycles.setValue(defaults.recovery_cycles)
+        self.comparison_mode.setCurrentIndex(
+            max(0, self.comparison_mode.findData(defaults.comparison_mode))
+        )
+        self.relative_ratio.setValue(defaults.relative_ratio_percent)
+        self.minimum_total.setValue(defaults.minimum_cluster_active_clients)
+        self.minimum_peer.setValue(defaults.minimum_peer_median)
+        self.missing_cycles.setValue(defaults.missing_cycles)
 
     def _build_polling_tab(self) -> None:
         page = QWidget(self)
-        form = QFormLayout(page)
+        layout = QVBoxLayout(page)
+        form_widget = QWidget(page)
+        form = QFormLayout(form_widget)
         self.poll_interval = self._spin(10, 3600, self.settings.polling.interval_seconds, "초")
-        self.auto_start = QCheckBox("프로그램 시작 후 자동 점검 복원")
-        self.auto_start.setChecked(self.settings.polling.automatic_enabled)
-        form.addRow("점검 주기", self.poll_interval)
-        form.addRow("", self.auto_start)
+        self._add_row(
+            form,
+            "점검 주기",
+            self.poll_interval,
+            "자동 점검 간격입니다. 10~3600초이며 기본값은 60초입니다.",
+        )
+        performance = getattr(self.settings, "performance", None)
+        self.low_spec_mode = QCheckBox("저사양 모드")
+        self.low_spec_mode.setChecked(bool(getattr(performance, "low_spec_mode", False)))
+        self._describe(
+            self.low_spec_mode,
+            "저사양 모드",
+            "자동 점검은 최소 120초 간격으로 실행하고 MM과 클러스터를 순차 수집합니다. "
+            "‘지금 점검’은 즉시 실행되며 명령, 감지 기준과 결과 정확성은 바뀌지 않습니다.",
+        )
+        form.addRow(self.low_spec_mode)
+        self.performance_logging = QCheckBox("선택적 성능 로그")
+        self.performance_logging.setChecked(
+            bool(getattr(performance, "performance_logging", False))
+        )
+        self._describe(
+            self.performance_logging,
+            "선택적 성능 로그",
+            "시작·수집·저장·화면 처리 시간과 개수만 별도 회전 로그에 기록합니다. "
+            "IP, 사용자 ID, 자격 증명과 원본 명령 출력은 기록하지 않습니다. 기본값은 꺼짐입니다.",
+        )
+        form.addRow(self.performance_logging)
         note = QLabel("점검 중 예약 시각이 도래하면 해당 회차는 건너뛰며, 중복 SSH 작업을 실행하지 않습니다.")
         note.setWordWrap(True)
         form.addRow(note)
-        self.tabs.addTab(page, "점검")
+        layout.addWidget(form_widget)
+        layout.addWidget(self._build_detection_section(page))
+        layout.addStretch(1)
+        self.tabs.addTab(page, "운영")
 
     def _build_notifications_tab(self) -> None:
         page = QWidget(self)
-        form = QFormLayout(page)
+        layout = QVBoxLayout(page)
+        form_widget = QWidget(page)
+        form = QFormLayout(form_widget)
         n = self.settings.notifications
         self.notify_new = QCheckBox("신규 장애 즉시 알림")
         self.notify_new.setChecked(n.notify_new_incidents)
@@ -285,11 +498,13 @@ class SettingsDialog(QDialog):
         self.sound_enabled.setChecked(n.sound_enabled)
         self.recovery_notifications = QCheckBox("복구 알림")
         self.recovery_notifications.setChecked(n.recovery_notifications)
-        form.addRow(self.notify_new)
-        form.addRow(self.repeat_unack)
-        form.addRow("반복 알림 간격", self.repeat_minutes)
-        form.addRow(self.sound_enabled)
-        form.addRow(self.recovery_notifications)
+        for widget, name, description in (
+            (self.notify_new, "신규 장애 즉시 알림", "새 장애가 활성화될 때 Windows 알림을 표시합니다."),
+            (self.sound_enabled, "알림음 사용", "새 장애 알림과 함께 로컬 알림음을 재생합니다."),
+            (self.recovery_notifications, "복구 알림", "활성 장애가 정상으로 복구될 때 알림을 표시합니다."),
+        ):
+            self._describe(widget, name, description)
+            form.addRow(widget)
         test_row = QWidget(page)
         test_layout = QHBoxLayout(test_row)
         test_layout.setContentsMargins(0, 0, 0, 0)
@@ -297,61 +512,74 @@ class SettingsDialog(QDialog):
         windows_test = QPushButton("Windows 알림 테스트")
         sound_test.clicked.connect(self.sound_test_requested)
         windows_test.clicked.connect(self.notification_test_requested)
+        self._describe(
+            sound_test,
+            "알림음 테스트",
+            "현재 선택과 무관하게 로컬 알림음을 한 번 시험합니다.",
+        )
+        self._describe(
+            windows_test,
+            "Windows 알림 테스트",
+            "현재 알림 설정으로 Windows 알림 표시 가능 여부를 시험합니다.",
+        )
         test_layout.addWidget(sound_test)
         test_layout.addWidget(windows_test)
         test_layout.addStretch(1)
         form.addRow("테스트", test_row)
-        self.tabs.addTab(page, "알림")
+        layout.addWidget(form_widget)
 
-    def _build_ui_tab(self) -> None:
-        page = QWidget(self)
-        form = QFormLayout(page)
-        ui = self.settings.ui
-        self.always_on_top = QCheckBox("항상 위에 표시")
-        self.always_on_top.setChecked(ui.always_on_top)
-        opacity_row = QWidget(page)
-        opacity_layout = QHBoxLayout(opacity_row)
-        opacity_layout.setContentsMargins(0, 0, 0, 0)
-        self.opacity = NoWheelSlider(Qt.Horizontal)
-        self.opacity.setRange(40, 100)
-        self.opacity.setValue(ui.opacity_percent)
-        self.opacity_value = QLabel(f"{ui.opacity_percent}%")
-        self.opacity.valueChanged.connect(lambda value: self.opacity_value.setText(f"{value}%"))
-        opacity_layout.addWidget(self.opacity, 1)
-        opacity_layout.addWidget(self.opacity_value)
-        reset = QPushButton("기본값 복원")
-        reset.clicked.connect(self._reset_ui_defaults)
-        form.addRow(self.always_on_top)
-        form.addRow("창 투명도", opacity_row)
-        form.addRow("", reset)
-        note = QLabel("마우스 휠로는 투명도가 변경되지 않습니다. 창 위치와 크기는 종료 시 저장됩니다.")
-        note.setWordWrap(True)
-        form.addRow(note)
-        self.tabs.addTab(page, "화면")
-
-    def _build_advanced_tab(self) -> None:
-        page = QWidget(self)
-        form = QFormLayout(page)
+        repeat_content = QWidget(page)
+        repeat_layout = QVBoxLayout(repeat_content)
+        repeat_layout.setContentsMargins(12, 2, 0, 4)
+        repeat_form_widget = QWidget(repeat_content)
+        repeat_form = QFormLayout(repeat_form_widget)
+        self._describe(
+            self.repeat_unack,
+            "미확인 장애 반복 알림",
+            "운영자가 확인 처리하지 않은 활성 장애를 설정 간격으로 다시 알립니다.",
+        )
+        repeat_form.addRow(self.repeat_unack)
+        self._add_row(
+            repeat_form,
+            "반복 알림 간격",
+            self.repeat_minutes,
+            "반복 알림 간격입니다. 1~1440분이며 기본값은 10분입니다.",
+        )
         self.ssh_debug_logging = QCheckBox("SSH 디버그 로그 사용")
         self.ssh_debug_logging.setChecked(self.settings.ssh_debug_logging)
-        warning = QLabel(
-            "파싱 실패 분석을 위해 비식별화되지 않은 장비 출력 일부가 ssh_debug.log에 "
-            "기록될 수 있습니다. 필요한 기간에만 사용하고 공유 전에 내용을 확인하세요."
+        self._describe(
+            self.ssh_debug_logging,
+            "SSH 디버그 로그",
+            "파싱 문제 분석용 상세 로그입니다. 장비 출력 일부가 포함될 수 있어 필요한 기간에만 사용합니다.",
         )
+        repeat_form.addRow(self.ssh_debug_logging)
+        repeat_layout.addWidget(repeat_form_widget)
+        warning = QLabel("SSH 디버그 로그를 공유하기 전에 반드시 민감한 장비 정보를 확인하세요.")
         warning.setWordWrap(True)
         warning.setStyleSheet("color: #8A5A00;")
-        form.addRow(self.ssh_debug_logging)
-        form.addRow(warning)
-        self.tabs.addTab(page, "고급")
+        repeat_layout.addWidget(warning)
+        reset = QPushButton("알림 고급값 복원", repeat_content)
+        self._describe(
+            reset,
+            "알림 고급값 복원",
+            "반복 알림 간격과 SSH 디버그 로그 옵션만 기본값으로 돌립니다.",
+        )
+        reset.clicked.connect(self._reset_notification_defaults)
+        repeat_layout.addWidget(reset)
+        layout.addWidget(CollapsibleSection("고급 반복 알림·진단", repeat_content, page))
+        layout.addStretch(1)
+        self.tabs.addTab(page, "알림")
+
+    def _reset_notification_defaults(self) -> None:
+        defaults = AppSettings.default().notifications
+        self.repeat_unack.setChecked(defaults.repeat_unacknowledged)
+        self.repeat_minutes.setValue(defaults.repeat_interval_minutes)
+        self.ssh_debug_logging.setChecked(False)
 
     def _update_credential_mode(self, shared: bool) -> None:
         self.shared_fields.setVisible(shared)
         self.mm_fields.setVisible(not shared)
         self.cluster_fields.setVisible(not shared)
-
-    def _reset_ui_defaults(self) -> None:
-        self.always_on_top.setChecked(False)
-        self.opacity.setValue(100)
 
     def _emit_connection_test(self, role: str) -> None:
         try:
@@ -374,7 +602,10 @@ class SettingsDialog(QDialog):
     def _apply(self) -> None:
         try:
             candidate = self._collect_settings(save_credentials=True)
-            candidate.validate()
+            if self.initial_setup:
+                candidate.validate_for_monitoring()
+            else:
+                candidate.validate()
         except Exception as exc:
             self.rollback_staged_credentials()
             QMessageBox.warning(self, "설정을 저장할 수 없음", str(exc))
@@ -386,7 +617,6 @@ class SettingsDialog(QDialog):
         settings = copy.deepcopy(self.settings)
         mm = settings.mobility_master
         mm.management_ip = self.mm_ip.text().strip()
-        mm.display_name = self.mm_name.text().strip() or "Aruba Mobility Master"
         mm.ssh_port = self.mm_port.value()
         mm.connect_timeout_seconds = self.mm_connect_timeout.value()
         mm.command_timeout_seconds = self.mm_command_timeout.value()
@@ -394,14 +624,15 @@ class SettingsDialog(QDialog):
         mm.enable_required = self.mm_enable.isChecked()
 
         cluster = settings.cluster
-        cluster.name = self.cluster_name.text().strip() or "Aruba 7240XM Cluster"
         cluster.members = [
             ClusterMemberSettings(ip=ip.text().strip(), alias=alias.text().strip())
             for ip, alias in zip(self.member_ips, self.member_aliases, strict=True)
         ]
-        cluster.primary_controller_ip = self.primary_ip.text().strip()
+        cluster.primary_controller_ip = str(self.primary_ip.currentData() or "").strip()
         cluster.fallback_controller_ips = [
-            item.strip() for item in self.fallback_ips.text().split(",") if item.strip()
+            member.ip
+            for member in cluster.members
+            if member.ip and member.ip != cluster.primary_controller_ip
         ]
         cluster.ssh_port = self.cluster_port.value()
         cluster.connect_timeout_seconds = self.cluster_connect_timeout.value()
@@ -412,7 +643,10 @@ class SettingsDialog(QDialog):
         settings.credentials.use_shared_credentials = self.shared_credentials.isChecked()
         settings.credentials.session_only = self.session_only.isChecked()
         settings.polling.interval_seconds = self.poll_interval.value()
-        settings.polling.automatic_enabled = self.auto_start.isChecked()
+        if self.initial_setup:
+            # First-run saving prepares the app only. The operator explicitly
+            # starts the first live SSH collection from the dashboard.
+            settings.polling.automatic_enabled = False
         settings.detection.low_client_threshold = self.low_threshold.value()
         settings.detection.anomaly_cycles = self.anomaly_cycles.value()
         settings.detection.recovery_cycles = self.recovery_cycles.value()
@@ -426,9 +660,11 @@ class SettingsDialog(QDialog):
         settings.notifications.repeat_interval_minutes = self.repeat_minutes.value()
         settings.notifications.sound_enabled = self.sound_enabled.isChecked()
         settings.notifications.recovery_notifications = self.recovery_notifications.isChecked()
-        settings.ui.always_on_top = self.always_on_top.isChecked()
-        settings.ui.opacity_percent = self.opacity.value()
         settings.ssh_debug_logging = self.ssh_debug_logging.isChecked()
+        performance = getattr(settings, "performance", None)
+        if performance is not None:
+            performance.low_spec_mode = self.low_spec_mode.isChecked()
+            performance.performance_logging = self.performance_logging.isChecked()
 
         if save_credentials:
             # Validate every non-secret field before touching Credential

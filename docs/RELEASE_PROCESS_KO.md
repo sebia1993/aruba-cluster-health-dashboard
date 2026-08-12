@@ -33,6 +33,9 @@ Actions에서 재현 가능하게 빌드하고, 검증된 자산만 GitHub Prere
   MIT Prerelease입니다.
 - `v0.2.0`: 등록 장비 중심 감시 범위, 간단/전체 반응형 화면과 설정 입력
   안전화를 추가한 Prerelease입니다. 새 annotated tag와 새 Release로만 게시합니다.
+- `v0.3.0`: 첫 실행 설정 안내, 3개 탭 설정 단순화, 도움말, 저사양 모드,
+  선택적 성능 로그와 내부 성능 최적화를 추가한 Prerelease입니다. 감지 규칙과
+  결과 정확성은 유지하며 새 annotated tag와 새 Release로만 게시합니다.
 
 ## 로컬 검증
 
@@ -40,29 +43,30 @@ CPython 3.11.9 x64와 Windows PowerShell 5.1 환경에서 실행합니다.
 
 ```powershell
 .\scripts\run_tests.ps1
-.\scripts\package_release.ps1 -Version 0.2.0
+.\scripts\package_release.ps1 -Version 0.3.0
 ```
 
 성공하면 `dist\release`에는 다음 두 파일만 생성됩니다.
 
 ```text
-ArubaMiniDashboard-v0.2.0-windows-x64.zip
-ArubaMiniDashboard-v0.2.0-windows-x64.zip.sha256
+ArubaMiniDashboard-v0.3.0-windows-x64.zip
+ArubaMiniDashboard-v0.3.0-windows-x64.zip.sha256
 ```
 
 다른 위치로 전달된 자산은 다시 빌드하지 않고 다음과 같이 검증할 수 있습니다.
 
 ```powershell
 .\scripts\package_release.ps1 `
-  -Version 0.2.0 `
+  -Version 0.3.0 `
   -OutputDirectory artifacts\release `
   -VerifyOnly
 ```
 
 검증기는 SHA-256, ZIP 최상위 폴더, 경로 순회·대소문자 충돌·민감 파일,
-Qt exact inventory, PySide6/shiboken6/Paramiko/scp 외부 소스와 PYZ 비포함,
-필수 라이선스 문서, 압축 해제 후 EXE smoke를 확인합니다. one-file과 EXE 단독
-배포는 지원하지 않습니다.
+Qt exact inventory와 한국어 번역 2개, PySide6/shiboken6/Paramiko/scp 외부
+소스와 PYZ 비포함, 금지된 CLI 전용 모듈, 필수 라이선스·성능 보고서,
+압축 해제 후 EXE smoke를 확인합니다. one-file과 EXE 단독 배포는 지원하지
+않습니다.
 
 ## GitHub 준비
 
@@ -73,8 +77,8 @@ Qt exact inventory, PySide6/shiboken6/Paramiko/scp 외부 소스와 PYZ 비포�
 ```powershell
 git switch main
 git pull --ff-only
-git tag -a v0.2.0 -m "Aruba Mini Dashboard v0.2.0"
-git push origin v0.2.0
+git tag -a v0.3.0 -m "Aruba Mini Dashboard v0.3.0"
+git push origin v0.3.0
 ```
 
 태그가 잘못된 커밋을 가리키면 Release workflow를 실행하지 않습니다. 게시된
@@ -85,7 +89,7 @@ git push origin v0.2.0
 GitHub의 **Actions → Build and publish Windows prerelease → Run workflow**에서
 반드시 `main` 브랜치를 선택합니다. 입력값은 다음과 같습니다.
 
-- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.2.0`
+- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.3.0`
 - `release_mode`:
   - `build-only`: 빌드·검증 후 Actions artifact만 생성
   - `draft-prerelease`: 검증된 두 자산을 새 Prerelease Draft에 업로드하고 정지
@@ -130,7 +134,12 @@ workflow는 다음 순서를 바꿀 수 없도록 구성되어 있습니다.
 - 빌드에 사용한 정확한 source commit과 Python 버전
 - GitHub 자동 Source code 아카이브가 Windows 실행 패키지가 아니라는 설명
 - 실제 Aruba 장비, 사내 SSH, Python 미설치 클린 Windows 11, 실제 DPI,
-  알림 정책, 코드 서명이 별도 현장 검증이라는 제한사항
+  알림 정책, 저사양 PC/HDD/장시간 운전과 코드 서명이 별도 현장 검증이라는
+  제한사항
+- 저사양 모드의 자동 간격 최소 120초·순차 수집과 수동 점검 즉시 실행,
+  일반 모드와 동일한 명령·감지 규칙·결과 정확성
+- v0.3.0 성능 수치는 실제로 측정한 값만 기재하고, 미측정 항목은 측정 불가로
+  표시했다는 설명
 
 ## 게시 후 확인
 
@@ -141,6 +150,7 @@ workflow는 다음 순서를 바꿀 수 없도록 구성되어 있습니다.
 - [ ] `Source code (zip/tar.gz)`가 Windows 실행 패키지가 아님을 notes에 명시함
 - [ ] MIT License 링크와 제3자 고지 위치가 notes에 명시됨
 - [ ] 실제 장비·클린 Windows·DPI·알림·코드 서명 미검증 경계를 명시함
+- [ ] 저사양 PC/HDD/느린 네트워크/장시간 운전의 실제 검증 여부를 명시함
 - [ ] ZIP 전체를 해제한 뒤 `ArubaMiniDashboard.exe --demo`가 실행됨
 
 현장 검수에는 `WINDOWS11_QA_CHECKLIST_KO.md`를 사용하고, 검증 자료에는 사내
