@@ -76,6 +76,11 @@ PROHIBITED_FROZEN_MODULE_ROOTS = {
     "rich",
     "ruamel",
 }
+EXPECTED_PYTHON_RUNTIME_VERSION = "3.13.15"
+EXPECTED_PYTHON_RUNTIME_DLLS = {
+    "_internal/python3.dll",
+    "_internal/python313.dll",
+}
 
 MAX_ZIP_ENTRIES = 10_000
 MAX_ZIP_MEMBER_SIZE = 1024 * 1024 * 1024
@@ -858,6 +863,45 @@ def _verify_pe_metadata(executable: Path, name: str, expected_version: str | Non
         )
 
 
+def _verify_embedded_python_runtime(root: Path, files: list[Path]) -> None:
+    """Verify the exact standard-GIL CPython runtime carried by the onedir."""
+
+    internal_root = root / "_internal"
+    actual_runtime_dlls = {
+        path.relative_to(root).as_posix().casefold()
+        for path in files
+        if re.fullmatch(r"python[^/]*\.dll", path.name, flags=re.IGNORECASE)
+    }
+    if actual_runtime_dlls != EXPECTED_PYTHON_RUNTIME_DLLS:
+        _fail(
+            "Embedded Python runtime DLL boundary mismatch: "
+            f"missing={sorted(EXPECTED_PYTHON_RUNTIME_DLLS - actual_runtime_dlls)}, "
+            f"unreviewed={sorted(actual_runtime_dlls - EXPECTED_PYTHON_RUNTIME_DLLS)}"
+        )
+
+    for runtime_name in ("python3.dll", "python313.dll"):
+        runtime = internal_root / runtime_name
+        values, machine = _pe_metadata(runtime)
+        if machine != 0x8664:
+            _fail(
+                "Embedded Python runtime is not AMD64 PE for the windows-x64 package: "
+                f"{runtime.name} machine={machine!r}"
+            )
+        required = {
+            "ProductName": "Python",
+            "FileDescription": "Python Core",
+            "OriginalFilename": runtime_name,
+            "FileVersion": EXPECTED_PYTHON_RUNTIME_VERSION,
+            "ProductVersion": EXPECTED_PYTHON_RUNTIME_VERSION,
+        }
+        for key, expected in required.items():
+            if values.get(key) != expected:
+                _fail(
+                    f"Embedded Python runtime metadata mismatch for {runtime.name}: "
+                    f"{key}={values.get(key)!r}, expected {expected!r}"
+                )
+
+
 def _verify_release_directory(
     root: Path,
     name: str,
@@ -875,6 +919,7 @@ def _verify_release_directory(
     if not executable.is_file() or _is_reparse_or_symlink(executable):
         _fail(f"Executable missing: {executable}")
     _verify_release_documents(root)
+    _verify_embedded_python_runtime(root, files)
     _verify_onedir_qt_contract(root, files)
     _verify_lgpl_runtime_contract(root, files, executable)
     frozen_modules = _embedded_pyz_module_names(executable)

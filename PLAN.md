@@ -57,7 +57,7 @@ Credential Manager 또는 프로세스 메모리에만 둔다. 외부 전송·�
 - PyInstaller 산출물 구성과 Python 환경을 제거한 로컬 smoke 경로
 - ZIP 안전 경로·대소문자 충돌·민감 파일·미사용 Qt 모듈 차단과 격리 추출
 - 런타임 잠금 파일과 제3자 고지 정합성, Windows PE 제품/버전 메타데이터
-- GitHub Actions의 정확한 Python 3.11.9, immutable annotated tag와 자산 digest
+- GitHub Actions의 정확한 CPython 3.13.15 x64 표준 GIL runtime, immutable annotated tag와 자산 digest
   재검증 경로
 
 ## 외부 검증 대기 항목

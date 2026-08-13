@@ -12,6 +12,7 @@ from aruba_mini_dashboard.collectors.aruba_ssh import (
     MAX_COMMAND_OUTPUT_LINES,
     ArubaSshAdapter,
     _BoundedOutputAccumulator,
+    classify_ssh_exception,
     validate_bounded_output,
     validate_read_only_command,
 )
@@ -339,6 +340,40 @@ def test_cluster_auth_failure_still_uses_approved_fallback(tmp_path: Path) -> No
     assert factory.calls == ["192.0.2.11", "192.0.2.12"]
 
 
+def test_cluster_algorithm_incompatibility_skips_retry_but_allows_fallback(
+    tmp_path: Path,
+) -> None:
+    factory = ScriptedFactory(
+        {
+            "192.0.2.11": [
+                {"connect_error": fatal("SSH_ALGORITHM_INCOMPATIBLE")}
+            ],
+            "192.0.2.12": [
+                {
+                    SHOW_CLIENT_DISTRIBUTION: "fallback-load",
+                    SHOW_GROUP_MEMBERSHIP: "fallback-membership",
+                }
+            ],
+        }
+    )
+
+    result = ClusterCollector(
+        known_hosts_path=tmp_path / "known_hosts",
+        adapter_factory=factory,
+    ).collect(
+        ClusterSettings(
+            primary_controller_ip="192.0.2.11",
+            fallback_controller_ips=["192.0.2.12"],
+            retries=2,
+        ),
+        credential(),
+    )
+
+    assert result.complete is True
+    assert result.actual_controller_ip == "192.0.2.12"
+    assert factory.calls == ["192.0.2.11", "192.0.2.12"]
+
+
 def test_cluster_does_not_merge_partial_results_between_controllers(tmp_path: Path) -> None:
     factory = ScriptedFactory(
         {
@@ -405,6 +440,7 @@ def test_adapter_enforces_strict_app_known_hosts_and_read_only_allowlist(tmp_pat
     assert captured["alt_host_keys"] is True
     assert captured["use_keys"] is False
     assert captured["allow_agent"] is False
+    assert captured["blocking_timeout"] == options.command_timeout_seconds
     assert connection.commands == ["no paging", SHOW_SWITCHES]
 
 
@@ -444,6 +480,27 @@ def test_output_and_command_guards_fail_closed() -> None:
     with pytest.raises(SshOperationError) as empty_error:
         validate_bounded_output("  \n")
     assert empty_error.value.code == "EMPTY_OUTPUT"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (
+        type("IncompatiblePeer", (Exception,), {})("private algorithm detail"),
+        RuntimeError(
+            "Incompatible ssh peer (no acceptable host key algorithm); private detail"
+        ),
+    ),
+)
+def test_ssh_algorithm_incompatibility_is_sanitized_and_not_retried(
+    failure: BaseException,
+) -> None:
+    result = classify_ssh_exception(failure, operation="connect")
+
+    assert result.code == "SSH_ALGORITHM_INCOMPATIBLE"
+    assert result.retryable is False
+    assert result.operation == "connect"
+    assert "private" not in result.user_message.casefold()
+    assert "host key" not in result.user_message.casefold()
 
 
 def test_stream_accumulator_preserves_exact_size_and_split_crlf_line_limits() -> None:
@@ -538,6 +595,44 @@ def test_no_paging_rejection_text_selects_pager_fallback(tmp_path: Path) -> None
         assert adapter.run_read_only(SHOW_SWITCHES) == "show output\ncontroller#"
 
 
+def test_paging_setup_cannot_report_connected_after_bounded_transport_abort(
+    tmp_path: Path,
+) -> None:
+    class FakeTransportClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class IncompatibleNetmiko:
+        __module__ = "netmiko.fake"
+
+        def __init__(self) -> None:
+            self.remote_conn_pre = FakeTransportClient()
+            self.remote_conn = object()
+
+    connection = IncompatibleNetmiko()
+    options = SshConnectionOptions(
+        "192.0.2.10",
+        22,
+        10,
+        20,
+        tmp_path / "known_hosts",
+    )
+    adapter = ArubaSshAdapter(
+        options,
+        credential(),
+        connection_factory=lambda **_kwargs: connection,
+    )
+
+    with pytest.raises(SshOperationError) as exc_info:
+        adapter.connect()
+
+    assert exc_info.value.code == "BOUNDED_READ_UNAVAILABLE"
+    assert connection.remote_conn_pre is None
+
+
 def test_streaming_netmiko_path_aborts_transport_at_output_limit(tmp_path: Path) -> None:
     class FakeChannel:
         def __init__(self):
@@ -585,6 +680,144 @@ def test_streaming_netmiko_path_aborts_transport_at_output_limit(tmp_path: Path)
         adapter.run_read_only(SHOW_SWITCHES)
     assert exc_info.value.code == "OUTPUT_LIMIT_EXCEEDED"
     assert connection.remote_conn_pre is None
+
+
+def test_netmiko_close_falls_back_to_raw_channel_when_client_close_fails(
+    tmp_path: Path,
+) -> None:
+    class FailingTransportClient:
+        def close(self) -> None:
+            raise OSError("simulated client close failure")
+
+    class RawChannel:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeNetmiko:
+        __module__ = "netmiko.fake"
+
+        def __init__(self) -> None:
+            self.remote_conn_pre = FailingTransportClient()
+            self.remote_conn = RawChannel()
+
+    connection = FakeNetmiko()
+    adapter = ArubaSshAdapter(
+        SshConnectionOptions(
+            "192.0.2.10",
+            22,
+            10,
+            20,
+            tmp_path / "known_hosts",
+        ),
+        credential(),
+    )
+    adapter._connection = connection
+    raw_channel = connection.remote_conn
+
+    adapter.close()
+
+    assert raw_channel.closed is True
+    assert connection.remote_conn is None
+    assert connection.remote_conn_pre is None
+
+
+def test_abort_interrupts_active_netmiko_transport_without_cli_disconnect(
+    tmp_path: Path,
+) -> None:
+    class BlockingTransport:
+        def __init__(self) -> None:
+            self.closed = threading.Event()
+
+        def shutdown(self, _how: int) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed.set()
+
+    class FakeNetmiko:
+        __module__ = "netmiko.fake"
+
+        def __init__(self) -> None:
+            self.remote_conn_pre = BlockingTransport()
+            self.remote_conn = None
+
+    closed_adapters: list[ArubaSshAdapter] = []
+    connection = FakeNetmiko()
+    transport = connection.remote_conn_pre
+    adapter = ArubaSshAdapter(
+        SshConnectionOptions(
+            "192.0.2.10",
+            22,
+            10,
+            20,
+            tmp_path / "known_hosts",
+        ),
+        credential(),
+        on_close=closed_adapters.append,
+    )
+    adapter._connection = connection
+    adapter._raw_socket = transport
+
+    adapter.abort()
+
+    assert transport.closed.is_set()
+    assert connection.remote_conn_pre is transport
+    adapter.close()
+    adapter.close()
+    assert closed_adapters == [adapter]
+
+
+def test_command_transport_error_after_abort_is_canonical_cancelled(
+    tmp_path: Path,
+) -> None:
+    class FakeChannel:
+        @staticmethod
+        def read_buffer():
+            return ""
+
+    class FakeNetmiko:
+        __module__ = "netmiko.fake"
+
+        def __init__(self) -> None:
+            self.remote_conn_pre = object()
+            self.remote_conn = None
+            self.channel = FakeChannel()
+            self._read_buffer = ""
+            self.base_prompt = "controller"
+            self.disable_lf_normalization = True
+            self.ansi_escape_codes = False
+
+        def _prompt_handler(self, _auto_find_prompt):
+            return r"controller\#"
+
+        @staticmethod
+        def normalize_cmd(command):
+            return command + "\n"
+
+        def write_channel(self, _command):
+            adapter.abort()
+            raise OSError("fixture transport was closed")
+
+    connection = FakeNetmiko()
+    adapter = ArubaSshAdapter(
+        SshConnectionOptions(
+            "192.0.2.10",
+            22,
+            10,
+            20,
+            tmp_path / "known_hosts",
+        ),
+        credential(),
+    )
+    adapter._connection = connection
+
+    with pytest.raises(SshOperationError) as exc_info:
+        adapter.run_read_only(SHOW_SWITCHES)
+
+    assert exc_info.value.code == "CANCELLED"
 
 
 def test_streaming_netmiko_detects_pager_marker_split_across_chunks(tmp_path: Path) -> None:
@@ -667,13 +900,17 @@ def test_host_key_scan_is_pre_authentication_and_has_no_credential_argument(monk
 
     fake_socket = SimpleNamespace(close=lambda: None)
 
-    def create_connection(address, timeout):
-        calls["socket_address"] = address
+    def create_connection(host, port, timeout, cancel_event):
+        calls["socket_address"] = (host, port)
         calls["socket_timeout"] = timeout
+        calls["cancel_event"] = cancel_event
         return fake_socket
 
     monkeypatch.setitem(sys.modules, "paramiko", SimpleNamespace(Transport=FakeTransport))
-    monkeypatch.setattr("socket.create_connection", create_connection)
+    monkeypatch.setattr(
+        "aruba_mini_dashboard.collectors.ssh_host_keys.open_cancellable_ipv4_socket",
+        create_connection,
+    )
 
     scanned = scan_ssh_host_key("192.0.2.10", 2222, timeout=5)
 

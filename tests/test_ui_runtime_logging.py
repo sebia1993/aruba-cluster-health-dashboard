@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -14,6 +13,7 @@ from aruba_mini_dashboard.collectors.base import (
     SHOW_SWITCHES,
     CollectionBundle,
     CommandResult,
+    SshConnectionOptions,
 )
 from aruba_mini_dashboard.config import AppPaths, AppSettings, SettingsError, SettingsStore
 from aruba_mini_dashboard.credentials import (
@@ -34,6 +34,56 @@ class CaptureLogger:
 
     def debug(self, message: str, *args) -> None:
         self.messages.append(message % args)
+
+
+def test_runtime_tracks_and_aborts_only_live_ssh_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    context = setup_logging(paths)
+    runtime = RuntimePoller(
+        AppSettings.default(),
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        SQLiteStorage(":memory:"),
+        context,
+    )
+    adapter = runtime._create_tracked_adapter(
+        SshConnectionOptions(
+            "192.0.2.10",
+            22,
+            10,
+            20,
+            paths.known_hosts,
+        ),
+        DeviceCredential("operator", "not-a-real-secret"),
+        threading.Event(),
+    )
+    aborted: list[bool] = []
+    monkeypatch.setattr(adapter, "abort", lambda: aborted.append(True))
+
+    runtime.cancel_active_connections()
+    assert aborted == [True]
+
+    adapter.close()
+    runtime.cancel_active_connections()
+    assert aborted == [True]
+
+    late_adapter = runtime._create_tracked_adapter(
+        SshConnectionOptions(
+            "192.0.2.11",
+            22,
+            10,
+            20,
+            paths.known_hosts,
+        ),
+        DeviceCredential("operator", "not-a-real-secret"),
+        threading.Event(),
+    )
+    assert late_adapter._aborted is True
+    late_adapter.close()
+    context.close()
 
 
 def test_string_false_cannot_enable_ssh_debug_excerpt_logging(tmp_path: Path) -> None:
@@ -227,6 +277,7 @@ def test_low_spec_collection_is_bounded_parallel_and_preserves_runtime_parity(
         calls: list[str] = []
         requests: list[str] = []
         concurrency_lock = threading.Lock()
+        concurrency_gate = threading.Barrier(2, timeout=2)
         active = 0
         maximum_active = 0
 
@@ -236,7 +287,9 @@ def test_low_spec_collection_is_bounded_parallel_and_preserves_runtime_parity(
                 calls.append(source)
                 active += 1
                 maximum_active = max(maximum_active, active)
-            time.sleep(0.02)
+            # Prove both submitted collectors can enter concurrently without
+            # relying on a short scheduler-dependent sleep.
+            concurrency_gate.wait()
 
         def leave() -> None:
             nonlocal active

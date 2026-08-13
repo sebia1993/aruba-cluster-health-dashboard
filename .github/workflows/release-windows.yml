@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing annotated release tag, for example v0.3.6"
+        description: "Existing annotated release tag, for example v0.3.7"
         required: true
         type: string
       release_mode:
@@ -200,16 +200,16 @@ jobs:
       - name: Set up exact build Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11.9"
+          python-version: "3.13.15"
           cache: pip
           cache-dependency-path: requirements-lock.txt
 
       - name: Create the repository virtual environment
         shell: pwsh
         run: |
-          python -c "import sys; assert sys.version_info[:3] == (3, 11, 9), sys.version"
+          python -c "import platform,struct,sys,sysconfig; assert sys.implementation.name == 'cpython'; assert sys.version_info[:3] == (3, 13, 15), sys.version; assert struct.calcsize('P') * 8 == 64; assert platform.machine() == 'AMD64'; assert not sysconfig.get_config_var('Py_GIL_DISABLED'); assert sys._is_gil_enabled()"
           python -m venv .venv
-          .\.venv\Scripts\python.exe -c "import sys; assert sys.version_info[:3] == (3, 11, 9), sys.version"
+          .\.venv\Scripts\python.exe -c "import platform,struct,sys,sysconfig; assert sys.implementation.name == 'cpython'; assert sys.version_info[:3] == (3, 13, 15), sys.version; assert struct.calcsize('P') * 8 == 64; assert platform.machine() == 'AMD64'; assert not sysconfig.get_config_var('Py_GIL_DISABLED'); assert sys._is_gil_enabled()"
 
       - name: Run tests, build, package, and extracted-EXE verification
         id: assets
@@ -248,12 +248,14 @@ jobs:
       - name: Set up exact verification Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11.9"
+          python-version: "3.13.15"
 
       - name: Install the locked verifier environment
         shell: pwsh
         run: |
+          python -c "import platform,struct,sys,sysconfig; assert sys.implementation.name == 'cpython'; assert sys.version_info[:3] == (3, 13, 15), sys.version; assert struct.calcsize('P') * 8 == 64; assert platform.machine() == 'AMD64'; assert not sysconfig.get_config_var('Py_GIL_DISABLED'); assert sys._is_gil_enabled()"
           python -m venv .venv
+          .\.venv\Scripts\python.exe -c "import platform,struct,sys,sysconfig; assert sys.implementation.name == 'cpython'; assert sys.version_info[:3] == (3, 13, 15), sys.version; assert struct.calcsize('P') * 8 == 64; assert platform.machine() == 'AMD64'; assert not sysconfig.get_config_var('Py_GIL_DISABLED'); assert sys._is_gil_enabled()"
           .\.venv\Scripts\python.exe -m pip install --disable-pip-version-check --require-hashes -r .\requirements-lock.txt
 
       - name: Download the release handoff
@@ -298,12 +300,14 @@ jobs:
       - name: Set up exact verification Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11.9"
+          python-version: "3.13.15"
 
       - name: Install the locked verifier environment
         shell: pwsh
         run: |
+          python -c "import platform,struct,sys,sysconfig; assert sys.implementation.name == 'cpython'; assert sys.version_info[:3] == (3, 13, 15), sys.version; assert struct.calcsize('P') * 8 == 64; assert platform.machine() == 'AMD64'; assert not sysconfig.get_config_var('Py_GIL_DISABLED'); assert sys._is_gil_enabled()"
           python -m venv .venv
+          .\.venv\Scripts\python.exe -c "import platform,struct,sys,sysconfig; assert sys.implementation.name == 'cpython'; assert sys.version_info[:3] == (3, 13, 15), sys.version; assert struct.calcsize('P') * 8 == 64; assert platform.machine() == 'AMD64'; assert not sysconfig.get_config_var('Py_GIL_DISABLED'); assert sys._is_gil_enabled()"
           .\.venv\Scripts\python.exe -m pip install --disable-pip-version-check --require-hashes -r .\requirements-lock.txt
 
       - name: Download the independently verified handoff
@@ -441,8 +445,9 @@ jobs:
           ## 검증 기준
 
           - 소스 커밋: ``$($env:AMD_SOURCE_COMMIT)``
-          - Python: ``3.11.9``
-          - 테스트, 제3자 고지 정합성, PyInstaller 빌드, PE 버전 리소스, Qt exact inventory,
+          - Python: ``3.13.15`` (Windows x64 standard GIL runtime)
+          - 테스트, 제3자 고지 정합성, PyInstaller 빌드, 앱 PE 버전 리소스,
+            내장 Python DLL 집합·AMD64·3.13.15 메타데이터, Qt exact inventory,
             LGPL Python 소스의 외부 제공·PYZ 비포함, 원본 onedir 검증, ZIP 안전 경로와
             민감 파일 검사, 압축 해제 후 EXE 스모크 검증 통과
           - 상세 변경 이력: https://github.com/$($env:AMD_REPOSITORY)/blob/$($env:AMD_SOURCE_COMMIT)/CHANGELOG.md
@@ -468,13 +473,27 @@ jobs:
           - Windows 네이티브 트레이 메뉴 항목은 화면 오버레이가 아니라 ``요소 목록``의 정적
             카탈로그에서 확인합니다.
 
+          ## v0.3.7 안정성·보안 강화
+
+          - 종료 요청은 새 작업을 차단하고 재시도 대기를 깨운 뒤 연결 중인 TCP socket과
+            활성 SSH 전송을 닫습니다. worker thread나 프로세스를 강제로 종료하지 않습니다.
+          - Paramiko 5.0.0에서 구형 장비와 안전한 SSH 알고리즘을 협상할 수 없으면
+            ``SSH_ALGORITHM_INCOMPATIBLE``로 안내하며 약한 legacy 알고리즘을 자동 활성화하지 않습니다.
+          - SQLite 필수 schema 제약·인덱스와 저장 JSON 한도를 검증하고 비밀 필드 이름을
+            거부합니다. Authorization Bearer/Basic 전체 값과 등록된 자격 증명은 로그에서
+            마스킹하며 로그 기록 실패 시 원문 record를 표준 오류로 다시 출력하지 않습니다.
+          - 복원된 메인 창과 설정·상세·개발자 대화상자는 현재 사용 가능한 화면 영역 안에
+            맞춰 배치합니다.
+
           ## 현장 확인 범위
 
           실제 Aruba 장비 출력과 사내 SSH 환경, 코드 서명, Python 미설치 클린 Windows 11,
           실제 100%/125%/150% DPI, 저사양 PC·HDD·느린 네트워크·24시간 이상 운전 및
           조직 정책이 적용된 알림 검증은 별도 현장 확인이 필요합니다.
+          실제 구형 ArubaOS와 Paramiko 5.0.0의 KEX·호스트 키·서명 알고리즘 호환성,
+          사내망에서 진행 중인 연결·명령의 종료 지연도 별도 현장 확인이 필요합니다.
           실제 물리 F12/Fn 키 매핑, 창 포커스, 시스템 트레이 카탈로그, 조직 클립보드 정책,
-          고대비 테마와 다중 모니터에서의 개발자 모드도 별도 현장 확인이 필요합니다.
+          고대비 테마와 다중 모니터에서의 개발자 모드·대화상자 화면 경계도 별도 현장 확인이 필요합니다.
           실제 장비 설정을 변경하는 명령은 지원하지 않지만, 운영망 적용 전 읽기 전용 계정과
           호스트 키 정책을 현장 기준으로 다시 확인하십시오.
           "@

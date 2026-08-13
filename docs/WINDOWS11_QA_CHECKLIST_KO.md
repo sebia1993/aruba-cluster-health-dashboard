@@ -22,6 +22,8 @@
 - [ ] `dist\ArubaMiniDashboard` onedir 폴더 전체를 검수 PC에 복사함
 - [ ] Windows 11 x64 일반 사용자 계정이며 관리자 권한 없이 검수함
 - [ ] Python이 설치되지 않은 깨끗한 PC/VM에서 검수함
+- [ ] 배포 runtime이 CPython 3.13.15 Windows x64 표준 GIL 빌드이며 실험적
+      free-threaded(`3.13t`) runtime이 아님
 - [ ] 인터넷 차단 상태이며 승인된 사내 SSH 경로만 허용함
 - [ ] 로컬 일반 경로에서 `ArubaMiniDashboard.exe`가 추가 설치 없이 실행됨
 - [ ] 한글·공백 포함 경로에서도 배포 폴더를 손상 없이 실행함
@@ -74,6 +76,9 @@ Netmiko·Paramiko·Windows Credential Manager, 동결 fixture 탐색, 데모
 - [ ] Primary와 응답 가능한 각 Fallback의 지문을 독립적으로 확인함
 - [ ] Primary 지문 스캔 실패 시 다음 Fallback의 지문 확인을 계속함
 - [ ] 저장된 값과 다른 지문을 자동 승인·교체하지 않고 접속을 차단함
+- [ ] 구형 ArubaOS에서 Paramiko 5.0.0의 KEX·호스트 키·서명 알고리즘 협상을
+      확인하고, 실패 시 원문 예외나 장비 정보 없이 `SSH_ALGORITHM_INCOMPATIBLE`로 표시됨
+- [ ] 알고리즘 비호환을 우회하기 위해 약한 legacy 알고리즘을 자동 활성화하지 않음
 - [ ] 세 show 명령, 선택적 `enable`/`no paging` 외 명령이 실행되지 않음을
       장비 감사 로그 또는 승인된 시험으로 확인함
 - [ ] 앱이 장비 설정 모드에 진입하거나 구성을 저장·변경하지 않음을 확인함
@@ -87,7 +92,10 @@ Netmiko·Paramiko·Windows Credential Manager, 동결 fixture 탐색, 데모
 - [ ] 한 Controller의 부분 결과와 다른 Controller 결과를 섞지 않음
 - [ ] 모든 수집 Controller 실패 시 Cluster 상태가 확인 불가로 표시됨
 - [ ] MM 인증 실패, timeout, 빈 출력과 파싱 실패가 WLC Down으로 표시되지 않음
-- [ ] 취소 또는 종료 요청 시 재시도 대기가 즉시 해제되고 열린 SSH 세션을 닫음
+- [ ] 취소 또는 종료 요청 시 재시도 대기가 즉시 해제되고 연결 중인 TCP socket과
+      활성 SSH 전송을 닫음
+- [ ] 종료 중 GUI가 응답하며 worker thread나 프로세스를 강제로 종료하지 않고,
+      정리 완료 뒤 앱 프로세스와 `aruba-active-ssh-cancel` thread가 남지 않음
 
 ## 저사양 모드와 성능
 
@@ -153,6 +161,10 @@ Netmiko·Paramiko·Windows Credential Manager, 동결 fixture 탐색, 데모
 - [ ] 간단 보기에는 등록 WLC만, 전체 보기에는 미등록 장비도 `감시 제외`로 표시됨
 - [ ] 미등록 장비의 Down·누락이 전체 상태, 문제 IP와 알림을 변경하지 않음
 - [ ] 항상 위 변경 후 창 위치·크기·최대화 상태가 유지되고 재시작 후 복원됨
+- [ ] 이전 모니터를 제거하거나 배율·작업 영역을 바꾼 뒤 복원된 메인 창이 현재
+      모니터의 사용 가능한 영역 안에 표시됨
+- [ ] 설정·장비 상세·UI 요소 정보·요소 목록 창이 100%/125%/150%와 다중
+      모니터에서 화면 밖으로 잘리지 않고 최소 조작 영역을 유지함
 - [ ] 투명도 40~100%, 숫자 표시, 마우스 휠 차단, 기본값 복원이 정상임
 - [ ] 설정 숫자·감지 모드는 hover/Tab 휠로 바뀌지 않고 직접 클릭 후 휠로만 변경됨
 - [ ] 설정 입력의 직접 입력·증감 버튼·키보드·목록 선택이 정상이며 포커스 이탈 후 휠이 다시 잠김
@@ -211,7 +223,16 @@ Fn Lock, 제조사 단축키, Windows 셸·트레이 표면과 조직 클립보�
 
 - [ ] `%LOCALAPPDATA%\ArubaMiniDashboard`에 설정, DB와 로그가 생성됨
 - [ ] `app.db`에 원본 명령 출력과 credential blob이 없음
+- [ ] 기본 키, `NOT NULL`/`CHECK`, 필수 인덱스 열·정렬 순서 또는 partial index
+      조건이 손상된 SQLite를 정상 schema로 오인하지 않고 자동 점검을 중지함
+- [ ] 저장 JSON의 256KiB·깊이 32·노드 20,000개 경계와 중복 키, 비유한 수,
+      잘못된 시간·자료형을 실패 안전하게 거부함
+- [ ] password·secret·authorization·credential blob·private key·API key 의미의
+      snake_case, kebab-case, camelCase 필드가 설정과 SQLite payload에 저장되지 않음
 - [ ] 일반 로그에 장비 명령 원문과 비밀번호·Enable Secret이 없음
+- [ ] `Authorization: Bearer ...`와 `Authorization: Basic ...`의 scheme 뒤 값
+      전체가 로그에서 마스킹되며 다음 정상 필드는 보존됨
+- [ ] 로그 파일 잠금·쓰기 실패 시 마스킹 전 record 본문을 stderr에 다시 출력하지 않음
 - [ ] SSH 디버그를 켜고 끌 수 있으며, 기록은 제한된 마스킹 excerpt임
 - [ ] 일반 모드의 일반/SSH 디버그 로그가 파일당 5MB, 백업 최대 5개로 회전함
 - [ ] 저사양 모드의 일반/SSH 디버그 로그가 파일당 2MB, 백업 최대 2개로 회전함

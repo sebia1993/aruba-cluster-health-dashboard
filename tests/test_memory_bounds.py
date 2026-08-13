@@ -9,6 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 import aruba_mini_dashboard.lazy_text_mapping as lazy_text_mapping
+import aruba_mini_dashboard.main as runtime_main
 from aruba_mini_dashboard.config import AppPaths, AppSettings
 from aruba_mini_dashboard.credentials import CredentialService, SessionCredentialStore
 from aruba_mini_dashboard.lazy_text_mapping import (
@@ -17,12 +18,18 @@ from aruba_mini_dashboard.lazy_text_mapping import (
 )
 from aruba_mini_dashboard.logging_setup import setup_logging
 from aruba_mini_dashboard.main import RuntimePoller
-from aruba_mini_dashboard.models import PollCycleResult
+from aruba_mini_dashboard.models import (
+    HealthSignal,
+    IncidentType,
+    OverallHealth,
+    PollCycleResult,
+    Severity,
+)
 from aruba_mini_dashboard.services.notification_service import (
     NotificationEvent,
     NotificationService,
 )
-from aruba_mini_dashboard.storage import SQLiteStorage
+from aruba_mini_dashboard.storage import SQLiteStorage, StorageBusyError
 
 
 class _FakeTray:
@@ -115,6 +122,98 @@ def test_runtime_poller_uses_lazy_raw_outputs_in_low_spec_mode(tmp_path: Path) -
         assert snapshot.raw_outputs["show test"] == raw
     finally:
         storage.close()
+
+
+def test_domain_persistence_retry_state_is_bounded_during_long_storage_outage(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A persistently locked DB must not turn lifecycle history into a leak."""
+
+    retry_limit = 8
+    monkeypatch.setattr(runtime_main, "MAX_PENDING_DOMAIN_TRANSITIONS", retry_limit)
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    storage = SQLiteStorage(":memory:")
+    logging_context = setup_logging(paths)
+    runtime = RuntimePoller(
+        AppSettings.default(),
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        storage,
+        logging_context,
+    )
+    original_flush = runtime.baseline_store.flush
+    base = datetime(2026, 8, 13, 9, 0, 0)
+    member_ip = "192.0.2.11"
+
+    def lifecycle_health(index: int, active: bool) -> OverallHealth:
+        return OverallHealth(
+            checked_at=base + timedelta(minutes=index),
+            severity=Severity.WARNING if active else Severity.NORMAL,
+            devices=[],
+            monitoring_scope_ips=(member_ip,),
+            signals=(
+                [
+                    HealthSignal(
+                        incident_type=IncidentType.CLIENT_DISTRIBUTION,
+                        severity=Severity.WARNING,
+                        reason="fixture anomaly",
+                        ip=member_ip,
+                        source="fixture",
+                    )
+                ]
+                if active
+                else []
+            ),
+        )
+
+    initial = lifecycle_health(0, True)
+    runtime._persist_incidents(
+        runtime.incident_manager.process(initial, now=initial.checked_at)
+    )
+    durable_incident_id = runtime.incident_manager.active_incidents()[0].incident_id
+    assert storage.load_domain_incidents(active_only=True)[0].incident_id == (
+        durable_incident_id
+    )
+
+    def locked(*_args: object, **_kwargs: object) -> None:
+        raise StorageBusyError("locked")
+
+    monkeypatch.setattr(runtime.baseline_store, "flush", locked)
+    for index in range(1, 23):
+        active = index % 2 == 0
+        health = lifecycle_health(index, active)
+        transitions = runtime.incident_manager.process(health, now=health.checked_at)
+        runtime._persist_incidents(transitions)
+        assert len(runtime._pending_persistence_transitions) <= retry_limit
+        assert len(runtime.incident_manager.events()) <= retry_limit + 1
+
+    assert len(runtime._pending_persistence_transitions) == retry_limit
+    active_before_retry = runtime.incident_manager.active_incidents()
+    assert len(active_before_retry) == 1
+
+    monkeypatch.setattr(runtime.baseline_store, "flush", original_flush)
+    runtime._persist_incidents([])
+
+    assert runtime._pending_persistence_transitions == []
+    assert runtime.incident_manager.active_incidents()[0].incident_id == (
+        active_before_retry[0].incident_id
+    )
+    assert runtime.incident_manager.events() == runtime.incident_manager.active_incidents()
+    assert len(storage.list_events()) == retry_limit + 1
+    persisted_active = storage.load_domain_incidents(active_only=True)
+    assert [item.incident_id for item in persisted_active] == [
+        active_before_retry[0].incident_id
+    ]
+    durable_incident = next(
+        item
+        for item in storage.load_domain_incidents()
+        if item.incident_id == durable_incident_id
+    )
+    assert durable_incident.active is False
+
+    logging_context.close()
+    storage.close()
 
 
 def test_unencodable_diagnostic_text_is_retained_exactly() -> None:

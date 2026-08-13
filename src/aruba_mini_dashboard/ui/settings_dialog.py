@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from PySide6.QtCore import Signal, Slot
+from PySide6.QtCore import QSize, Signal, Slot
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -46,6 +46,7 @@ from .widgets import (
     ClickArmedSpinBox,
     CollapsibleSection,
     SubtleTabWidget,
+    fit_window_to_available_screen,
 )
 
 
@@ -115,8 +116,6 @@ class SettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Aruba 미니 대시보드 설정")
-        self.resize(700, 650)
-        self.setMinimumSize(580, 520)
         self.settings = copy.deepcopy(settings)
         self.credential_service = credential_service
         self.initial_setup = initial_setup
@@ -159,6 +158,12 @@ class SettingsDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         self.root_layout.addWidget(self.buttons)
         self._register_developer_inspector()
+        fit_window_to_available_screen(
+            self,
+            QSize(700, 650),
+            minimum_size=QSize(420, 320),
+            center_on_parent=True,
+        )
 
     @staticmethod
     def _spin(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import threading
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Iterable, Mapping, Sequence, TypeVar
@@ -12,14 +13,15 @@ from aruba_mini_dashboard.models import ParseIssue, ParseResult, ParseStatus
 T = TypeVar("T")
 
 
-ANSI_CSI_RE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 PAGER_RE = re.compile(
-    r"(?:--\s*more\s*--|press\s+(?:any\s+key|space)\s+to\s+continue|"
-    r"more:\s*<space>|\(q\)uit)",
+    r"(?:--[^\S\r\n]*more[^\S\r\n]*--|"
+    r"press[^\S\r\n]+(?:any[^\S\r\n]+key|space)[^\S\r\n]+to[^\S\r\n]+continue|"
+    r"more:[^\S\r\n]*<space>|\(q\)uit)",
     re.IGNORECASE,
 )
 CREDENTIAL_LINE_RE = re.compile(
-    r"(?im)^(\s*(?:password|passwd|enable[\s_-]+secret)\s*[:=])\s*.*$"
+    r"(?im)^([^\S\r\n]*(?:password|passwd|enable(?:[^\S\r\n]|[_-])+secret)"
+    r"[^\S\r\n]*[:=])[^\S\r\n]*.*$"
 )
 IPV4_CANDIDATE_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])")
 SEPARATOR_RE = re.compile(r"^\s*[-=+_]{3,}(?:\s+[-=+_]{2,})*\s*$")
@@ -31,8 +33,28 @@ FOOTER_RE = re.compile(
 TRAILING_LINE_WHITESPACE_RE = re.compile(r"[^\S\n]+(?=\n|$)")
 HEADER_SEPARATOR_RE = re.compile(r"[\s_-]+")
 HEADER_SEGMENT_RE = re.compile(r"\S(?:.*?\S)?(?=\s{2,}|$)")
-NONNEGATIVE_INT_RE = re.compile(r"\d+")
+PLAIN_NONNEGATIVE_INT_RE = re.compile(r"[0-9]+")
+GROUPED_NONNEGATIVE_INT_RE = re.compile(r"[0-9]{1,3}(?:,[0-9]{3})+")
 LOOSE_IPV4_RE = re.compile(r"\d+\.\d+\.\d+\.\d+")
+MAX_NUMERIC_FIELD_DIGITS = 20
+MAX_TABLE_LINE_CHARACTERS = 8_192
+PARSE_CANCEL_CHECK_INTERVAL = 256
+
+
+class ParserCancelledError(RuntimeError):
+    """Cooperative cancellation raised while walking a bounded table."""
+
+
+def check_parser_cancelled(
+    cancel_event: threading.Event | None,
+    item_index: int | None = None,
+) -> None:
+    if cancel_event is None:
+        return
+    if item_index is not None and item_index % PARSE_CANCEL_CHECK_INTERVAL:
+        return
+    if cancel_event.is_set():
+        raise ParserCancelledError("parser cancelled")
 
 
 def _apply_backspaces(value: str) -> str:
@@ -44,6 +66,62 @@ def _apply_backspaces(value: str) -> str:
         else:
             chars.append(char)
     return "".join(chars)
+
+
+def _strip_terminal_sequences(value: str) -> str:
+    """Remove CSI/OSC terminal controls in one bounded, linear pass.
+
+    A regex that searches for an OSC terminator from every ``ESC ]`` prefix is
+    quadratic on a malformed response containing many unterminated prefixes.
+    Treat an unterminated OSC as decoration through end-of-output; retaining it
+    could render arbitrary terminal control text in diagnostics anyway.
+    """
+
+    if "\x1b" not in value:
+        return value
+    result: list[str] = []
+    index = 0
+    length = len(value)
+    while index < length:
+        character = value[index]
+        if character != "\x1b":
+            result.append(character)
+            index += 1
+            continue
+
+        index += 1
+        if index >= length:
+            break
+        introducer = value[index]
+        if introducer == "]":
+            index += 1
+            while index < length:
+                if value[index] == "\x07":
+                    index += 1
+                    break
+                if (
+                    value[index] == "\x1b"
+                    and index + 1 < length
+                    and value[index + 1] == "\\"
+                ):
+                    index += 2
+                    break
+                index += 1
+            continue
+        if introducer == "[":
+            index += 1
+            while index < length and "0" <= value[index] <= "?":
+                index += 1
+            while index < length and " " <= value[index] <= "/":
+                index += 1
+            if index < length and "@" <= value[index] <= "~":
+                index += 1
+            continue
+        # Unknown two-byte escape: discard the ESC byte while preserving the
+        # following printable character as ordinary text.
+        result.append(introducer)
+        index += 1
+    return "".join(result)
 
 
 def sanitize_output(output: str | bytes | None) -> str:
@@ -74,7 +152,7 @@ def sanitize_output(output: str | bytes | None) -> str:
             return value
 
     value = value.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
-    value = ANSI_CSI_RE.sub("", value)
+    value = _strip_terminal_sequences(value)
     value = _apply_backspaces(value)
     value = PAGER_RE.sub("", value)
     value = CREDENTIAL_LINE_RE.sub(r"\1 [REDACTED]", value)
@@ -125,10 +203,24 @@ def find_ipv4(value: str) -> str | None:
 
 
 def parse_nonnegative_int(value: str) -> int | None:
-    candidate = value.strip().replace(",", "")
-    if not NONNEGATIVE_INT_RE.fullmatch(candidate):
+    candidate = value.strip()
+    if "," in candidate:
+        if not GROUPED_NONNEGATIVE_INT_RE.fullmatch(candidate):
+            return None
+        digits = candidate.replace(",", "")
+    else:
+        if not PLAIN_NONNEGATIVE_INT_RE.fullmatch(candidate):
+            return None
+        digits = candidate
+    # Avoid Python's large-decimal conversion limit and pointless big-integer
+    # work on a malformed device response. Twenty digits still accommodates
+    # every unsigned 64-bit decimal representation used by counters.
+    if len(digits) > MAX_NUMERIC_FIELD_DIGITS:
         return None
-    return int(candidate)
+    try:
+        return int(digits)
+    except ValueError:
+        return None
 
 
 @dataclass(slots=True, frozen=True)
@@ -212,10 +304,19 @@ def find_header_layout(
     lines: Sequence[str],
     aliases: Mapping[str, Sequence[str]],
     required: Iterable[str],
+    *,
+    cancel_event: threading.Event | None = None,
 ) -> HeaderLayout | None:
     required_set = set(required)
     for line_index, line in enumerate(lines):
+        check_parser_cancelled(cancel_event, line_index)
         if not line.strip():
+            continue
+        # The three supported Aruba tables use short fixed-width rows. Do not
+        # run the header regexes across a multi-megabyte unbroken line from a
+        # malformed or hostile peer; valid headers later in the output remain
+        # discoverable.
+        if len(line) > MAX_TABLE_LINE_CHARACTERS:
             continue
         columns = _map_segment_headers(line, aliases)
         if not required_set.issubset(columns):

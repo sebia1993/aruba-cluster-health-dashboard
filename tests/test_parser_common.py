@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from aruba_mini_dashboard.parsers.common import (
     _alias_pattern,
+    _strip_terminal_sequences,
     normalize_header,
     sanitize_output,
 )
@@ -42,3 +43,23 @@ def test_parser_normalization_caches_are_bounded_and_behavior_preserving() -> No
     assert first is second
     assert first.search("Switch-IP       Name") is not None
     assert _alias_pattern.cache_info().maxsize == 128
+
+
+def test_terminal_sequence_stripping_is_linear_and_fail_closed_on_unterminated_osc() -> None:
+    assert _strip_terminal_sequences("before\x1b[31mred\x1b[0mafter") == "beforeredafter"
+    assert _strip_terminal_sequences("before\x1b]title\x07after") == "beforeafter"
+    assert _strip_terminal_sequences("before\x1b]title\x1b\\after") == "beforeafter"
+
+    # A repeated unterminated OSC prefix made the previous regex rescan the
+    # remaining suffix for every prefix. The single-pass implementation drops
+    # the first unterminated control and its remainder without pathological CPU.
+    assert _strip_terminal_sequences("\x1b]" * 50_000) == ""
+
+
+def test_sanitizer_does_not_backtrack_across_many_whitespace_only_lines() -> None:
+    value = " \n" * 50_000
+
+    clean = sanitize_output(value)
+
+    assert " " not in clean
+    assert clean.count("\n") == 50_000

@@ -22,7 +22,11 @@ def test_windows_ci_is_read_only_and_uses_pinned_actions() -> None:
     assert text.count("actions/checkout@") == 1
     assert text.count("actions/setup-python@") == 1
     assert "ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION" not in text
-    assert 'python-version: "3.11.9"' in text
+    assert text.count('python-version: "3.13.15"') == 1
+    assert text.count("sys.version_info[:3] == (3, 13, 15)") == 2
+    assert text.count("platform.machine() == 'AMD64'") == 2
+    assert text.count("not sysconfig.get_config_var('Py_GIL_DISABLED')") == 2
+    assert text.count("sys._is_gil_enabled()") == 2
     assert "package_release.ps1 -Version" in text
 
 

@@ -14,7 +14,7 @@ replace the separate licenses or rights of bundled third-party components.
 
 ## 검토된 런타임 / Reviewed runtimes
 
-- Paramiko 4.0.0: `_internal\paramiko\*.py`
+- Paramiko 5.0.0: `_internal\paramiko\*.py`
 - scp 0.16.1: `_internal\scp.py`
 - PySide6-Essentials / Qt 6.11.0: 외부 순수 Python 소스
   `_internal\PySide6\__init__.py`와 `_internal\PySide6\` 아래의 검토된 DLL,
@@ -43,11 +43,11 @@ Python source is permitted in the release package.
 1. 실행 중인 대시보드를 완전히 종료하고 배포 폴더 전체를 별도 위치에
    복사하여 백업합니다. / Exit the dashboard completely and back up the entire
    distribution directory.
-2. 현재 패키지와 **동일한 버전**의 공식 배포본을 준비합니다: Paramiko 4.0.0,
+2. 현재 패키지와 **동일한 버전**의 공식 배포본을 준비합니다: Paramiko 5.0.0,
    scp 0.16.1, PySide6-Essentials 6.11.0, shiboken6 6.11.0. Python 모듈은
-   CPython 3.11과 호환되어야 하며 Qt DLL/PYD/plugin은 모두 같은 Qt 6.11.0
+   CPython 3.13.15 x64 표준 GIL 빌드와 호환되어야 하며 Qt DLL/PYD/plugin은 모두 같은 Qt 6.11.0
    세트여야 합니다. / Obtain official, same-version distributions. Python
-   sources must support CPython 3.11, and all Qt DLL/PYD/plugin files must remain
+   sources must support the CPython 3.13.15 x64 standard GIL build, and all Qt DLL/PYD/plugin files must remain
    a matched Qt 6.11.0 set.
 3. Paramiko는 `_internal\paramiko\` 디렉터리 전체를 한 세트로, scp는
    `_internal\scp.py`를 교체합니다. 서로 다른 버전의 일부 파일만 혼합하지
@@ -116,7 +116,7 @@ identified in the packaged notices, inventories, and license files.
 
 ## 출처 / Sources
 
-- Paramiko 4.0.0: <https://github.com/paramiko/paramiko/tree/4.0.0>
+- Paramiko 5.0.0: <https://github.com/paramiko/paramiko/tree/5.0.0>
 - scp 0.16.1: <https://github.com/jbardin/scp.py/tree/v0.16.1>
 - Qt for Python 6.11.0: <https://code.qt.io/cgit/pyside/pyside-setup.git/tag/?h=v6.11.0>
 - Qt licensing: <https://doc.qt.io/qt-6/licensing.html>

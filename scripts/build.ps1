@@ -31,21 +31,29 @@ $python = Join-Path $venv "Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python)) {
     $launcherName = [System.IO.Path]::GetFileName([string]$PythonLauncher)
     if ($launcherName -in @("py", "py.exe")) {
-        & $PythonLauncher -3.11 -m venv $venv
+        & $PythonLauncher -3.13 -m venv $venv
     }
     else {
         & $PythonLauncher -m venv $venv
     }
-    if ($LASTEXITCODE -ne 0) { throw "Failed to create Python 3.11 virtual environment." }
+    if ($LASTEXITCODE -ne 0) { throw "Failed to create Python 3.13 virtual environment." }
 }
 
 $actual = & $python -c "import sys; print('.'.join(map(str, sys.version_info[:3])))"
-if ($actual.Trim() -ne "3.11.9") {
-    throw "Build requires CPython 3.11.9; found $actual"
+if ($LASTEXITCODE -ne 0 -or $actual.Trim() -ne "3.13.15") {
+    throw "Build requires CPython 3.13.15; found $actual"
+}
+$implementation = & $python -c "import sys; print(sys.implementation.name)"
+if ($LASTEXITCODE -ne 0 -or $implementation.Trim() -ne "cpython") {
+    throw "Build requires CPython; found $implementation"
 }
 $architecture = & $python -c "import platform,struct; print(str(struct.calcsize(chr(80)) * 8) + chr(58) + platform.machine())"
-if ($LASTEXITCODE -ne 0 -or -not $architecture.Trim().StartsWith("64:")) {
+if ($LASTEXITCODE -ne 0 -or $architecture.Trim() -ne "64:AMD64") {
     throw "Build requires 64-bit CPython for the windows-x64 package; found $architecture"
+}
+$gilContract = & $python -c "import sys,sysconfig; print(str(int(bool(sysconfig.get_config_var('Py_GIL_DISABLED')))) + ':' + str(int(sys._is_gil_enabled())))"
+if ($LASTEXITCODE -ne 0 -or $gilContract.Trim() -ne "0:1") {
+    throw "Build requires the standard GIL-enabled CPython runtime; found GIL contract $gilContract"
 }
 
 & $python -m pip install --disable-pip-version-check --require-hashes -r (Join-Path $repo "requirements-lock.txt")

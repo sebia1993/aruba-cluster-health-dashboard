@@ -15,7 +15,7 @@ from time import monotonic
 import weakref
 from typing import Any, Iterable
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QCursor, QKeyEvent, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
@@ -36,6 +36,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from .widgets import fit_window_to_available_screen
 
 
 _STABLE_ID_PATTERN = re.compile(r"[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*\Z")
@@ -189,7 +191,6 @@ class DeveloperInspectorDetailDialog(QDialog):
         self._metadata: UiElementMetadata | None = None
         self.setWindowTitle("UI 요소 정보")
         self.setModal(False)
-        self.resize(560, 430)
 
         root = QVBoxLayout(self)
         form = QFormLayout()
@@ -222,6 +223,12 @@ class DeveloperInspectorDetailDialog(QDialog):
         self.copy_button.clicked.connect(self.copy_request)
         close_button.clicked.connect(self.hide)
         root.addWidget(buttons)
+        fit_window_to_available_screen(
+            self,
+            QSize(560, 430),
+            minimum_size=QSize(320, 300),
+            center_on_parent=True,
+        )
 
     def _read_only_line(self) -> QLineEdit:
         line = QLineEdit(self)
@@ -261,7 +268,6 @@ class DeveloperInspectorCatalogDialog(QDialog):
         self.setProperty("uiInspectorInternal", True)
         self.setWindowTitle("UI 요소 목록")
         self.setModal(False)
-        self.resize(590, 420)
         self._metadata_by_id: dict[str, UiElementMetadata] = {}
 
         root = QVBoxLayout(self)
@@ -277,6 +283,12 @@ class DeveloperInspectorCatalogDialog(QDialog):
         self.details_button.clicked.connect(self._request_current)
         self.close_button.clicked.connect(self.hide)
         root.addWidget(buttons)
+        fit_window_to_available_screen(
+            self,
+            QSize(590, 420),
+            minimum_size=QSize(320, 240),
+            center_on_parent=True,
+        )
 
     def set_catalog(self, metadata_items: Iterable[UiElementMetadata]) -> None:
         selected_id = None

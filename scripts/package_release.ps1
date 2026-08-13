@@ -90,15 +90,33 @@ function Resolve-Python {
 }
 
 function Resolve-BootstrapPython {
+    function Test-ExactBuildPython {
+        param(
+            [Parameter(Mandatory = $true)][string]$Candidate,
+            [AllowEmptyCollection()][string[]]$InterpreterArguments = @()
+        )
+
+        try {
+            $contract = & $Candidate @InterpreterArguments -c "import platform,struct,sys,sysconfig; print('|'.join((sys.implementation.name, '.'.join(map(str, sys.version_info[:3])), str(struct.calcsize('P') * 8), platform.machine(), str(int(bool(sysconfig.get_config_var('Py_GIL_DISABLED')))), str(int(sys._is_gil_enabled())))))" 2>$null
+            return $LASTEXITCODE -eq 0 -and $contract.Trim() -eq "cpython|3.13.15|64|AMD64|0|1"
+        }
+        catch {
+            return $false
+        }
+    }
+
     $venvPython = Join-Path $repo ".venv\Scripts\python.exe"
-    if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
+    if ((Test-Path -LiteralPath $venvPython -PathType Leaf) -and (Test-ExactBuildPython -Candidate $venvPython)) {
         return $venvPython
     }
-    $pythonCommand = Get-Command "python" -ErrorAction SilentlyContinue
-    if (-not $pythonCommand) {
-        throw "Python 3.11.9 is required to create the clean release environment."
+    $pythonLauncher = Get-Command "py" -ErrorAction SilentlyContinue
+    if (-not $pythonLauncher) {
+        throw "CPython 3.13.15 x64 (standard GIL build) and the Windows py launcher are required to create the clean release environment."
     }
-    return $pythonCommand.Source
+    if (-not (Test-ExactBuildPython -Candidate $pythonLauncher.Source -InterpreterArguments @("-3.13"))) {
+        throw "The Windows py -3.13 launcher target must be CPython 3.13.15 x64 with the standard GIL enabled."
+    }
+    return $pythonLauncher.Source
 }
 
 function Get-ReproducibleTimestamp {

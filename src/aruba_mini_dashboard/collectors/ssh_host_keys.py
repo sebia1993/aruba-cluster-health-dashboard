@@ -12,6 +12,12 @@ from time import monotonic
 from dataclasses import dataclass
 from pathlib import Path
 
+from .cancellable_socket import (
+    SocketConnectCancelledError,
+    close_socket_quietly,
+    open_cancellable_ipv4_socket,
+)
+
 
 class SshHostKeyError(RuntimeError):
     pass
@@ -78,7 +84,12 @@ def scan_ssh_host_key(
     sock: socket.socket | None = None
     transport = None
     try:
-        sock = socket.create_connection((str(host).strip(), int(port)), timeout=bounded_timeout)
+        sock = open_cancellable_ipv4_socket(
+            str(host).strip(),
+            int(port),
+            bounded_timeout,
+            cancel_event,
+        )
         transport = paramiko.Transport(sock)
         completed = threading.Event()
         transport.start_client(event=completed, timeout=bounded_timeout)
@@ -101,13 +112,23 @@ def scan_ssh_host_key(
         )
     except SshHostKeyError:
         raise
+    except SocketConnectCancelledError:
+        raise SshHostKeyCancelledError("SSH 지문 확인이 취소되었습니다.") from None
     except Exception as exc:
+        if cancel_event is not None and cancel_event.is_set():
+            raise SshHostKeyCancelledError("SSH 지문 확인이 취소되었습니다.") from None
         raise SshHostKeyError("SSH 서버 지문을 확인하지 못했습니다.") from exc
     finally:
         if transport is not None:
-            transport.close()
-        elif sock is not None:
-            sock.close()
+            try:
+                transport.close()
+            except Exception:
+                # A cleanup failure must not replace the sanitized scan result
+                # or primary error. Close the underlying socket directly as a
+                # final leak-prevention fallback.
+                close_socket_quietly(sock)
+        else:
+            close_socket_quietly(sock)
 
 
 def check_scanned_host_key(scanned: ScannedHostKey, known_hosts_path: Path) -> HostKeyCheck:
@@ -138,9 +159,9 @@ def register_scanned_host_key(scanned: ScannedHostKey, known_hosts_path: Path) -
     if existing and scanned.algorithm in existing and existing[scanned.algorithm] != scanned.key:
         raise SshHostKeyMismatchError("저장된 SSH 키와 새 키가 달라 자동 교체하지 않았습니다.")
     host_keys.add(scanned.target, scanned.algorithm, scanned.key)
-    destination.parent.mkdir(parents=True, exist_ok=True)
     temporary: Path | None = None
     try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
         descriptor, name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
         os.close(descriptor)
         temporary = Path(name)
@@ -150,8 +171,14 @@ def register_scanned_host_key(scanned: ScannedHostKey, known_hosts_path: Path) -
     except OSError as exc:
         raise SshHostKeyError("승인된 SSH 키를 저장하지 못했습니다.") from exc
     finally:
-        if temporary is not None and temporary.exists():
-            temporary.unlink(missing_ok=True)
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                # Preserve the actionable registration failure. A same-folder
+                # temporary file contains only the public host key and can be
+                # retried/cleaned on the next explicit approval.
+                pass
 
 
 def ensure_approved_host_key(

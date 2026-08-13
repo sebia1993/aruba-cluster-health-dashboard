@@ -70,6 +70,7 @@ def test_live_instance_guard_is_per_data_root_and_releases_cleanly(tmp_path: Pat
     first_lock = main_module._acquire_instance_lock(first_paths)
     second_lock = None
     try:
+        assert first_lock.staleLockTime() == 0
         with pytest.raises(main_module.InstanceAlreadyRunningError):
             main_module._acquire_instance_lock(first_paths)
         second_lock = main_module._acquire_instance_lock(second_paths)
@@ -90,7 +91,7 @@ def test_instance_guard_recovers_a_lock_left_by_crashed_process(tmp_path: Path) 
         "import os, sys\n"
         "from PySide6.QtCore import QLockFile\n"
         "lock = QLockFile(sys.argv[1])\n"
-        "lock.setStaleLockTime(30000)\n"
+        "lock.setStaleLockTime(0)\n"
         "assert lock.tryLock(0)\n"
         "os._exit(0)\n"
     )

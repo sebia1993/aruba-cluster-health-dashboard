@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -14,11 +15,14 @@ from aruba_mini_dashboard.config import (
     SettingsValidationError,
 )
 from aruba_mini_dashboard.credentials import (
+    MAX_CREDENTIAL_BLOB_BYTES,
+    CredentialError,
     CredentialNotFoundError,
     CredentialService,
     DeviceCredential,
     SessionCredentialStore,
     WindowsCredentialStore,
+    credential_target,
     new_credential_id,
 )
 
@@ -206,7 +210,33 @@ def test_plaintext_secret_keys_are_rejected_without_echo_and_file_is_preserved(
     assert settings_path.read_text(encoding="utf-8") == encoded
 
 
-@pytest.mark.parametrize("key", ("password", "enable_secret", "api-token", "access_token"))
+@pytest.mark.parametrize(
+    "key",
+    (
+        "password",
+        "enable_secret",
+        "api-token",
+        "access_token",
+        "clientSecret",
+        "apiKey",
+        "private-key",
+        "Authorization",
+        "password_value",
+        "token_value",
+        "access_token_value",
+        "secret_key",
+        "credentialBlobValue",
+        "apiKeyValue",
+        "private_key_value",
+        "authorizationHeader",
+        "clientsecret",
+        "userpassword",
+        "dbpassword",
+        "accesstoken",
+        "refreshtoken",
+        "bearertoken",
+    ),
+)
 def test_unknown_nested_secret_keys_are_never_ignored(key: str) -> None:
     payload = AppSettings.default().to_dict()
     payload["legacy"] = {key: "sensitive-value"}
@@ -215,6 +245,28 @@ def test_unknown_nested_secret_keys_are_never_ignored(key: str) -> None:
         AppSettings.from_dict(payload)
 
     assert "sensitive-value" not in str(raised.value)
+
+
+def test_secret_field_rejection_does_not_echo_untrusted_key_text() -> None:
+    canary = "CANARY-SECRET-IN-KEY"
+    payload = AppSettings.default().to_dict()
+    payload["legacy"] = {f"password_{canary}": "ordinary-value"}
+
+    with pytest.raises(SettingsValidationError) as raised:
+        AppSettings.from_dict(payload)
+
+    assert canary not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "key",
+    ("tokenizer", "event_tokens", "secretary_name", "passwordless", "tokenization_mode"),
+)
+def test_non_secret_token_like_unknown_keys_are_not_false_positives(key: str) -> None:
+    payload = AppSettings.default().to_dict()
+    payload["legacy"] = {key: "ordinary-value"}
+
+    AppSettings.from_dict(payload)
 
 
 def test_invalid_credential_identifier_is_rejected_as_a_settings_error(tmp_path: Path) -> None:
@@ -238,6 +290,26 @@ def test_settings_validate_bounds_and_monitoring_completeness() -> None:
     settings.polling.interval_seconds = 60
     with pytest.raises(SettingsValidationError, match="MM 관리 IP"):
         settings.validate_for_monitoring()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("window_x", -(2**31) - 1),
+        ("window_x", 2**31),
+        ("window_y", -(2**63)),
+        ("window_y", 2**63 - 1),
+    ),
+)
+def test_window_coordinates_are_bounded_before_qpoint_construction(
+    field_name: str,
+    value: int,
+) -> None:
+    settings = AppSettings.default()
+    setattr(settings.ui, field_name, value)
+
+    with pytest.raises(SettingsValidationError, match="창 [XY] 좌표"):
+        settings.validate()
 
 
 def test_performance_settings_are_additive_and_low_mode_has_effective_interval() -> None:
@@ -278,6 +350,120 @@ def test_windows_credential_store_round_trip_uses_generic_blob() -> None:
     store.delete(identifier)
     with pytest.raises(CredentialNotFoundError):
         store.get(identifier)
+
+
+def test_windows_credential_store_rejects_corrupt_types_and_oversized_blob() -> None:
+    api = FakeCredentialApi()
+    store = WindowsCredentialStore(api)
+    identifier = new_credential_id()
+    target = credential_target(identifier)
+    sentinel = "malformed-secret-must-not-be-repeated"
+
+    invalid_records = (
+        {
+            "UserName": "operator",
+            "CredentialBlob": json.dumps(
+                {"password": {"nested": sentinel}, "enable_secret": ""}
+            ),
+        },
+        {
+            "UserName": 123,
+            "CredentialBlob": json.dumps({"password": "valid", "enable_secret": ""}),
+        },
+        {
+            "UserName": "operator",
+            "CredentialBlob": json.dumps(
+                {"password": "x" * MAX_CREDENTIAL_BLOB_BYTES, "enable_secret": ""}
+            ),
+        },
+        {
+            "UserName": "operator",
+            "CredentialBlob": '{"password":"first","password":"second"}',
+        },
+        {
+            "UserName": "operator",
+            "CredentialBlob": '{"password":"valid","enable_secret":"","diagnostic":NaN}',
+        },
+        {
+            "UserName": "operator",
+            "CredentialBlob": '{"password":"valid","enable_secret":"","diagnostic":Infinity}',
+        },
+        {
+            "UserName": "operator",
+            "CredentialBlob": '{"password":"valid","enable_secret":"","diagnostic":1e999}',
+        },
+    )
+    for record in invalid_records:
+        api.records[target] = record
+        with pytest.raises(CredentialError) as raised:
+            store.get(identifier)
+        assert sentinel not in str(raised.value)
+
+    with pytest.raises(ValueError, match="형식"):
+        DeviceCredential(123, "password")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="Windows 저장 한도"):
+        DeviceCredential("u" * 514, "password")
+
+
+def test_credential_service_does_not_expose_half_published_session_value() -> None:
+    saved = threading.Event()
+    release = threading.Event()
+
+    class BlockingSessionStore(SessionCredentialStore):
+        def save(self, credential_id: str, credential: DeviceCredential) -> str:
+            result = super().save(credential_id, credential)
+            saved.set()
+            if not release.wait(timeout=2):
+                raise AssertionError("test did not release session save")
+            return result
+
+    session = BlockingSessionStore()
+    service = CredentialService(
+        persistent=SessionCredentialStore(),
+        session=session,
+    )
+    identifier = new_credential_id()
+    write_errors: list[BaseException] = []
+    read_results: list[DeviceCredential] = []
+    read_errors: list[BaseException] = []
+    reader_started = threading.Event()
+
+    def write() -> None:
+        try:
+            service.save(
+                DeviceCredential("operator", "temporary"),
+                session_only=True,
+                credential_id=identifier,
+            )
+        except BaseException as exc:
+            write_errors.append(exc)
+
+    def read() -> None:
+        reader_started.set()
+        try:
+            read_results.append(service.get(identifier))
+        except BaseException as exc:
+            read_errors.append(exc)
+
+    writer = threading.Thread(target=write, daemon=True)
+    reader = threading.Thread(target=read, daemon=True)
+    writer.start()
+    assert saved.wait(timeout=2)
+    reader.start()
+    assert reader_started.wait(timeout=2)
+    try:
+        reader.join(timeout=0.1)
+        assert reader.is_alive(), "reader observed the store before session routing committed"
+    finally:
+        release.set()
+        writer.join(timeout=2)
+        reader.join(timeout=2)
+
+    assert not writer.is_alive()
+    assert not reader.is_alive()
+    assert write_errors == []
+    assert read_errors == []
+    assert read_results == [DeviceCredential("operator", "temporary")]
 
 
 def test_session_credentials_are_cleared_without_touching_persistent_store() -> None:

@@ -121,7 +121,7 @@ def _target_environment() -> dict[str, str]:
             "os_name": "nt",
             "platform_system": "Windows",
             "sys_platform": "win32",
-            "python_version": "3.11",
+            "python_version": "3.13",
             "python_full_version": platform.python_version(),
         }
     )
@@ -451,7 +451,7 @@ def build_notice(project_root: Path) -> str:
             "Third-party terms remain the terms of their respective copyright holders.",
             "This inventory is compliance evidence, not legal advice.",
             "",
-            "Target runtime: Windows x64, CPython 3.11",
+            "Target runtime: Windows x64, CPython 3.13.15 (standard GIL build)",
             "Dependency authority: pyproject.toml + requirements-lock.txt",
             "",
         ]

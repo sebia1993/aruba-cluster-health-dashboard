@@ -3,14 +3,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, repr=False)
 class AppError(Exception):
     code: str
     user_message: str
     technical_message: str = ""
 
+    def __post_init__(self) -> None:
+        # BaseException captures every constructor argument in ``args`` before
+        # the dataclass initializer runs. Remove the explicitly opt-in
+        # technical detail from that incidental representation.
+        self.args = (self.code, self.user_message)
+
     def __str__(self) -> str:
         return self.user_message
+
+    def __repr__(self) -> str:
+        # ``technical_message`` can contain a sanitized parser excerpt or an
+        # implementation detail. Keep it available to explicit callers, but do
+        # not expose it through incidental ``%r``/trace logging.
+        return f"AppError(code={self.code!r})"
 
 
 ERROR_MESSAGES: dict[str, str] = {
@@ -19,6 +31,7 @@ ERROR_MESSAGES: dict[str, str] = {
     "SSH_BANNER_MISSING": "SSH 응답을 확인하지 못했습니다. SSH 서비스와 장비 상태를 확인하세요.",
     "SSH_HOST_KEY_UNKNOWN": "승인되지 않은 SSH 호스트 키입니다. 설정에서 지문을 확인하세요.",
     "SSH_HOST_KEY_MISMATCH": "SSH 호스트 키가 이전 승인 값과 다릅니다. 장비 변경 여부를 확인하세요.",
+    "SSH_ALGORITHM_INCOMPATIBLE": "장비와 안전한 SSH 암호 알고리즘을 협상하지 못했습니다. 장비 SSH 설정과 지원 알고리즘을 확인하세요.",
     "PROMPT_NOT_FOUND": "장비 명령 프롬프트를 확인하지 못했습니다.",
     "COMMAND_TIMEOUT": "장비 명령 실행 시간이 초과되었습니다.",
     "PAGING_INCOMPLETE": "명령 출력의 페이징을 끝까지 처리하지 못했습니다.",

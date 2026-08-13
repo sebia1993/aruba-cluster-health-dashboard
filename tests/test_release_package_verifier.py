@@ -88,6 +88,9 @@ def _disable_smoke(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
 
     monkeypatch.setattr(verifier, "_run_executable_smoke", record)
     monkeypatch.setattr(verifier, "_verify_pe_metadata", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        verifier, "_verify_embedded_python_runtime", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(verifier, "_verify_qt_runtime_inventory", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(verifier, "_verify_lgpl_runtime_contract", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(verifier, "_embedded_pyz_module_names", lambda *_args, **_kwargs: set())
@@ -221,6 +224,51 @@ def test_pe_metadata_rejects_non_amd64_executable(monkeypatch: pytest.MonkeyPatc
 
     with pytest.raises(SystemExit, match="not AMD64 PE"):
         verifier._verify_pe_metadata(Path(f"{NAME}.exe"), NAME, "0.1.1")
+
+
+def test_embedded_python_runtime_requires_exact_standard_gil_31315(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / NAME
+    python3 = root / "_internal" / "python3.dll"
+    python313 = root / "_internal" / "python313.dll"
+    _write(python3, b"stable-abi")
+    _write(python313, b"core-runtime")
+    files = [python3, python313]
+    metadata = {
+        "ProductName": "Python",
+        "FileDescription": "Python Core",
+        "FileVersion": "3.13.15",
+        "ProductVersion": "3.13.15",
+    }
+
+    def metadata_for(path: Path) -> tuple[dict[str, str], int]:
+        return ({**metadata, "OriginalFilename": path.name}, 0x8664)
+
+    monkeypatch.setattr(verifier, "_pe_metadata", metadata_for)
+
+    verifier._verify_embedded_python_runtime(root, files)
+
+    metadata["ProductVersion"] = "3.13.1"
+    with pytest.raises(SystemExit, match="Embedded Python runtime metadata mismatch"):
+        verifier._verify_embedded_python_runtime(root, files)
+
+
+def test_embedded_python_runtime_rejects_free_threaded_or_extra_dll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / NAME
+    python3 = root / "_internal" / "python3.dll"
+    python313 = root / "_internal" / "python313.dll"
+    nested_python313t = root / "_internal" / "unreviewed" / "python313t.dll"
+    for path in (python3, python313, nested_python313t):
+        _write(path, b"runtime")
+    monkeypatch.setattr(verifier, "_pe_metadata", lambda _path: ({}, 0x8664))
+
+    with pytest.raises(SystemExit, match="Embedded Python runtime DLL boundary mismatch"):
+        verifier._verify_embedded_python_runtime(
+            root, [python3, python313, nested_python313t]
+        )
 
 
 def test_legacy_path_name_interface_verifies_onedir(
