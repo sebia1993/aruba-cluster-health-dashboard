@@ -1,4 +1,4 @@
-Aruba Mini Dashboard 0.3.6
+Aruba Mini Dashboard 0.3.7
 ==========================
 
 용도
@@ -6,6 +6,9 @@ Aruba Mini Dashboard 0.3.6
 Aruba Mobility Master와 Aruba 7240XM Cluster의 세 show 명령 결과를 장비 IP
 기준으로 종합하는 Windows 11 로컬 미니 대시보드입니다. 외부 서버, 클라우드,
 텔레메트리를 사용하지 않습니다.
+
+배포본에는 CPython 3.13.15 x64 표준 GIL runtime이 포함됩니다. 최종 사용자 PC에
+Python을 별도로 설치할 필요가 없으며 실험적 free-threaded runtime은 사용하지 않습니다.
 
 처음 설정
 ---------
@@ -109,6 +112,13 @@ JSON, SQLite, 일반 로그와 배포 폴더에 저장하지 않습니다.
 수집으로 표시되면 임의로 특정 장비 장애로 해석하지 말고 오류 코드와 파싱
 상태를 확인하십시오.
 
+구형 SSH 장비와 Paramiko 5.0.0이 안전한 알고리즘을 협상하지 못하면
+SSH_ALGORITHM_INCOMPATIBLE 오류로 표시합니다. 프로그램은 호환성을 위해 약한
+알고리즘을 자동 활성화하지 않으므로 운영 전 실제 ArubaOS에서 확인하십시오.
+
+종료 요청은 새 점검을 차단하고 재시도 대기를 깨운 뒤 연결 중인 TCP socket과
+활성 SSH 전송을 닫습니다. worker thread나 프로세스를 강제로 종료하지 않습니다.
+
 배포 폴더의 LICENSE.txt는 Aruba Mini Dashboard 자체에 적용되는 MIT License
 원문이며 루트 LICENSE와 바이트 단위로 동일합니다. 이 라이선스는 함께 제공되는
 제3자 구성요소의 저작권이나 별도 라이선스를 대체하지 않습니다.
@@ -119,7 +129,7 @@ THIRD_PARTY_NOTICES.txt에는 Python, Qt/PySide, SSH 및 암호화 런타임의 
 
 QT_THIRD_PARTY_NOTICES.txt와 QT_RUNTIME_INVENTORY.json은 실제 Qt DLL/plugin
 목록과 해시를 기록합니다. LGPL_RUNTIME_INVENTORY.json과
-LGPL_RUNTIME_LICENSES 폴더는 외부 소스로 제공되는 Paramiko 4.0.0 및 scp
+LGPL_RUNTIME_LICENSES 폴더는 외부 소스로 제공되는 Paramiko 5.0.0 및 scp
 0.16.1의 파일·버전·라이선스 증거를 기록합니다. Aruba Mini Dashboard의 배포
 조건은 사용자가 LGPL 구성요소를 자신의 용도로 수정하거나 그 수정 사항을
 디버깅하기 위해 리버스 엔지니어링하는 것을 제한하지 않습니다. 교체와 복구
@@ -148,6 +158,12 @@ Demo는 운영 설정과 운영 SQLite를 사용하지 않습니다.
 일반 모드의 app.log와 ssh_debug.log는 파일당 5MB·백업 5개, 저사양 모드는
 파일당 2MB·백업 2개입니다. performance.log는 최대 1MB·백업 2개입니다.
 
+SQLite는 시작할 때 필수 기본 키·제약조건·인덱스를 확인하고, 저장 JSON의
+크기·깊이·노드 수와 형식을 제한합니다. 중복 JSON 키, 잘못된 시간·자료형과
+비밀 필드 이름은 실패 안전하게 거부합니다. 로그의 Authorization Bearer/Basic
+값과 등록된 자격 증명은 마스킹하며, 로그 기록 실패 시에도 마스킹 전 record를
+표준 오류로 다시 출력하지 않습니다.
+
 활성 장애와 확인 대기 상태는 보관 한도로 삭제하지 않습니다. 종료 장애,
 일반 사건, 확인 완료 Connection-Type 변화와 Failover 이력은 하루 최대 한 번 정리하며 각 테이블에서 최근
 180일 이내, 최대 10,000건을 유지합니다.
@@ -155,6 +171,12 @@ Demo는 운영 설정과 운영 SQLite를 사용하지 않습니다.
 이번 점검에서 관측된 장비, 활성 사건과 확인 대기 변화는 항상 보존합니다.
 SQLite가 잠긴 경우 화면 경로의 대기를 짧게 제한하고, 저장하지 못한 운영 상태는
 메모리에 유지한 뒤 다음 점검에서 다시 저장합니다.
+시작 중 기존 기준값·탐지 상태·확인 대기 변화·활성 장애를 완전하게 복원하지
+못하면 원본 SQLite를 변경 없이 닫고, 자동 점검이 꺼진 격리 메모리 저장소로
+전환해 확인 필요성을 안내합니다. 미등록 inventory 정리와 검증은 한
+transaction이므로 실패 시 함께 rollback하며, 활성 장애 10,000건 초과는
+부분 복원하지 않고 실패 안전하게 거부합니다. 동일 논리 장애의 중복 활성 행도
+임의로 하나만 선택하지 않고 원본 DB를 보존한 채 확인 대상으로 안내합니다.
 
 세부 화면의 최근 원본과 로그에는 사내 IP/Hostname 등 운영 정보가 남을 수
 있으므로 외부 공유 전에 반드시 비식별화하십시오.

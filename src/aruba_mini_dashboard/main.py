@@ -28,7 +28,7 @@ from .collectors.base import (
     SshOperationError,
 )
 from .collectors.aruba_ssh import ArubaSshAdapter
-from .collectors.cluster_collector import ClusterCollector
+from .collectors.cluster_collector import ClusterCollector, HOST_KEY_TRUST_ERROR_CODES
 from .collectors.mm_collector import MmCollector
 from .collectors.ssh_host_keys import (
     SshHostKeyCancelledError,
@@ -66,10 +66,16 @@ from .models import (
     Severity,
 )
 from .parsers import parse_group_membership, parse_load_distribution, parse_show_switches
+from .parsers.common import ParserCancelledError
 from .services.anomaly_detector import AnomalyDetector, AnomalySettings
 from .services.notification_service import NotificationService
 from .services.poll_coordinator import PollCoordinator
-from .storage import SQLiteStorage, StorageError
+from .storage import (
+    SQLiteStorage,
+    StorageBusyError,
+    StorageCorruptError,
+    StorageError,
+)
 from .ui.developer_inspector import DeveloperInspectorController
 from .ui.main_window import MainWindow
 
@@ -78,7 +84,12 @@ LOGGER = logging.getLogger(__name__)
 
 
 _INSTANCE_LOCK_FILENAME = ".aruba-mini-dashboard.lock"
-_INSTANCE_LOCK_STALE_TIME_MS = 30_000
+MAX_PENDING_DOMAIN_TRANSITIONS = 10_000
+# This lock is held for the entire application lifetime.  Qt explicitly
+# requires age-based stale detection to be disabled for long-lived locks;
+# otherwise an old file plus a reused PID can let a second dashboard start.
+# Dead-owner recovery still uses the PID/application identity in QLockFile.
+_INSTANCE_LOCK_STALE_TIME_MS = 0
 
 
 class InstanceAlreadyRunningError(RuntimeError):
@@ -245,6 +256,11 @@ class CachedBaselineStore:
         try:
             for baseline in storage.load_domain_connection_baselines():
                 self._values[baseline.member_ip] = baseline
+        except StorageError:
+            # Baselines are authoritative comparison state. Treating a
+            # transiently unreadable file store as a first run can create a
+            # false Connection-Type change and then overwrite the old state.
+            raise
         except Exception:
             LOGGER.warning("Connection baseline restore failed; starting with an empty cache", exc_info=True)
 
@@ -404,6 +420,8 @@ class RuntimePoller:
         logging_context: LoggingContext,
     ) -> None:
         self._lock = threading.RLock()
+        self._active_adapters: set[ArubaSshAdapter] = set()
+        self._network_shutdown_requested = False
         self.settings = copy.deepcopy(settings)
         self.paths = paths
         self.credential_service = credential_service
@@ -414,30 +432,80 @@ class RuntimePoller:
             for member in self.settings.cluster.members
             if member.ip.strip()
         }
-        if len(configured_members) == 4:
-            try:
-                # Run before loading snapshots/MM inventory so an upgraded
-                # database with years of churn cannot inflate startup memory
-                # first. Incomplete/default settings deliberately skip cleanup:
-                # a missing or corrupt JSON file must never erase the previous
-                # registered inventory before the operator can recover it.
-                storage.maintain_device_inventory(configured_members)
-            except Exception:
-                LOGGER.warning("Stale device inventory maintenance deferred", exc_info=True)
         self.baseline_store = CachedBaselineStore(storage)
+        self.detector = self._create_detector()
+        pending_changes = self._load_pending_connection_changes()
+        self.incident_manager = self._create_incident_manager()
+        # Every incident restored at startup is already durable. During a
+        # storage outage, a closed durable incident must stay in memory until
+        # its inactive state can be written; otherwise a restart could revive
+        # the stale active row after retry-journal compaction.
+        self._durable_incident_ids = {
+            incident.incident_id for incident in self.incident_manager.events()
+        }
+        self._pending_persistence_transitions: list[Any] = []
+        self._pending_connection_acknowledgements: set[str] = set()
         try:
-            restored_devices = storage.load_device_states()
+            (
+                _removed_inventory,
+                restored_devices,
+                restored_mm_devices,
+            ) = storage.load_runtime_inventory(
+                configured_members if len(configured_members) == 4 else None
+            )
+        except StorageError:
+            raise
         except Exception:
-            LOGGER.warning("Previous device snapshot restore failed", exc_info=True)
+            # Preserve compatibility with test/fallback stores whose optional
+            # inventory implementation fails unexpectedly. A real SQLite
+            # busy/corrupt result above must never take this best-effort path.
+            LOGGER.warning("Previous device inventory restore failed", exc_info=True)
             restored_devices = {}
+            restored_mm_devices = []
         self._last_devices: dict[str, Any] = {
             ip: row.get("payload", {}) for ip, row in restored_devices.items()
         }
-        self.detector = self._create_detector()
-        self.engine = self._create_engine()
-        self.incident_manager = self._create_incident_manager()
-        self._pending_persistence_transitions: list[Any] = []
-        self._pending_connection_acknowledgements: set[str] = set()
+        known_mm = {
+            row["ip"]: row.get("hostname") or row.get("alias")
+            for row in restored_mm_devices
+        }
+        self.engine = self._create_engine(
+            pending_changes,
+            known_mm_devices=known_mm,
+        )
+
+    def _create_tracked_adapter(
+        self,
+        options: Any,
+        credential: Any,
+        cancellation_event: threading.Event | None,
+    ) -> ArubaSshAdapter:
+        adapter = ArubaSshAdapter(
+            options,
+            credential,
+            cancel_event=cancellation_event,
+            logger=self.logging_context.ssh_logger,
+            on_close=self._unregister_adapter,
+        )
+        with self._lock:
+            self._active_adapters.add(adapter)
+            abort_immediately = self._network_shutdown_requested
+        if abort_immediately:
+            adapter.abort()
+        return adapter
+
+    def _unregister_adapter(self, adapter: ArubaSshAdapter) -> None:
+        with self._lock:
+            self._active_adapters.discard(adapter)
+
+    def cancel_active_connections(self) -> None:
+        """Interrupt every currently connecting or collecting SSH transport."""
+
+        with self._lock:
+            self._network_shutdown_requested = True
+            adapters = tuple(self._active_adapters)
+        for adapter in adapters:
+            adapter.abort()
 
     def _create_detector(self, state: dict[str, dict[str, object]] | None = None) -> AnomalyDetector:
         if state is None:
@@ -450,33 +518,48 @@ class RuntimePoller:
                     }
                     for row in self.storage.load_streaks()
                 }
+            except StorageError:
+                raise
             except Exception:
                 LOGGER.warning("Detector streak restore failed; starting from zero", exc_info=True)
                 state = {}
         return AnomalyDetector(self._anomaly_settings(self.settings), state=state)
 
-    def _create_engine(self, pending_changes: list[Any] | None = None):
+    def _load_pending_connection_changes(self) -> list[Any]:
+        try:
+            return self.storage.load_pending_connection_changes()
+        except StorageError:
+            raise
+        except Exception:
+            LOGGER.warning("Pending Connection-Type event restore failed", exc_info=True)
+            return []
+
+    def _create_engine(
+        self,
+        pending_changes: list[Any] | None = None,
+        *,
+        known_mm_devices: dict[str, str | None] | None = None,
+    ):
         from .services.correlation_engine import CorrelationEngine
 
-        try:
-            known_mm = {
-                row["ip"]: row.get("hostname") or row.get("alias")
-                for row in self.storage.load_mm_discovered_devices()
-            }
-        except Exception:
-            LOGGER.warning("MM device restore failed", exc_info=True)
-            known_mm = {}
-        if pending_changes is None:
+        if known_mm_devices is None:
             try:
-                pending_changes = self.storage.load_pending_connection_changes()
+                known_mm_devices = {
+                    row["ip"]: row.get("hostname") or row.get("alias")
+                    for row in self.storage.load_mm_discovered_devices()
+                }
+            except StorageError:
+                raise
             except Exception:
-                LOGGER.warning("Pending Connection-Type event restore failed", exc_info=True)
-                pending_changes = []
+                LOGGER.warning("MM device restore failed", exc_info=True)
+                known_mm_devices = {}
+        if pending_changes is None:
+            pending_changes = self._load_pending_connection_changes()
         return CorrelationEngine(
             settings=self._anomaly_settings(self.settings),
             detector=self.detector,
             baseline_store=self.baseline_store,
-            known_mm_devices=known_mm,
+            known_mm_devices=known_mm_devices,
             pending_connection_changes=pending_changes,
         )
 
@@ -484,18 +567,29 @@ class RuntimePoller:
         from .services.incident_manager import IncidentManager
 
         notifications = self.settings.notifications
+        restored_from_storage = incidents is None
         if incidents is None:
             try:
                 incidents = self.storage.load_domain_incidents(active_only=True)
+            except StorageError:
+                raise
             except Exception:
                 LOGGER.warning("Incident restore failed", exc_info=True)
                 incidents = []
-        return IncidentManager(
-            incidents,
-            repeat_unacknowledged=notifications.repeat_unacknowledged,
-            repeat_interval=timedelta(minutes=notifications.repeat_interval_minutes),
-            recovery_notifications=notifications.recovery_notifications,
-        )
+        try:
+            return IncidentManager(
+                incidents,
+                repeat_unacknowledged=notifications.repeat_unacknowledged,
+                repeat_interval=timedelta(minutes=notifications.repeat_interval_minutes),
+                recovery_notifications=notifications.recovery_notifications,
+            )
+        except (TypeError, ValueError):
+            if restored_from_storage:
+                raise StorageCorruptError(
+                    "저장된 활성 장애 상태가 서로 충돌합니다. "
+                    "원본 데이터베이스를 보존한 채 확인하세요."
+                ) from None
+            raise
 
     @staticmethod
     def _anomaly_settings(settings: AppSettings) -> AnomalySettings:
@@ -673,6 +767,7 @@ class RuntimePoller:
             self.detector = self._create_detector({})
             self.engine = self._create_engine()
             self.incident_manager = self._create_incident_manager()
+            self._durable_incident_ids = set()
             self._last_devices = {}
             self._pending_persistence_transitions.clear()
             self._pending_connection_acknowledgements.clear()
@@ -767,6 +862,7 @@ class RuntimePoller:
             (credential.username, credential.password, credential.enable_secret)
         ):
             authenticated_hosts: list[str] = []
+            authenticated_scans: list[Any] = []
             last_auth_error: SshOperationError | None = None
             for scanned in scans:
                 host = scanned.host
@@ -778,17 +874,23 @@ class RuntimePoller:
                     known_hosts_path=self.paths.known_hosts,
                     enable_required=endpoint.enable_required,
                 )
-                adapter = ArubaSshAdapter(
+                adapter = self._create_tracked_adapter(
                     options,
                     credential,
-                    cancel_event=cancellation_event,
-                    logger=self.logging_context.ssh_logger,
+                    cancellation_event,
                 )
                 try:
                     adapter.connect()
                     authenticated_hosts.append(host)
+                    authenticated_scans.append(scanned)
                 except SshOperationError as exc:
                     last_auth_error = exc
+                    if exc.code in HOST_KEY_TRUST_ERROR_CODES:
+                        # The key was verified immediately before credentials
+                        # were used.  If it changes during that narrow window,
+                        # never let a fallback success conceal the changed or
+                        # unapproved identity.
+                        raise
                     if role == "mm":
                         raise
                     LOGGER.info("Cluster connection test failed for %s: %s", host, exc.code)
@@ -798,7 +900,9 @@ class RuntimePoller:
                 if last_auth_error is not None:
                     raise last_auth_error
                 raise RuntimeError("인증 가능한 Cluster 수집 Controller가 없습니다.")
-            first_scan = scans[0]
+            # Report the identity that was actually authenticated.  A failed
+            # Primary scan may precede a successful fallback scan.
+            first_scan = authenticated_scans[0]
             skipped_note = (
                 f" 연결할 수 없어 건너뛴 Controller {len(scan_failures)}개가 있습니다."
                 if scan_failures
@@ -851,11 +955,10 @@ class RuntimePoller:
         cancel_event = cancellation_event or threading.Event()
 
         def adapter_factory(options, credential):
-            return ArubaSshAdapter(
+            return self._create_tracked_adapter(
                 options,
                 credential,
-                cancel_event=cancel_event,
-                logger=self.logging_context.ssh_logger,
+                cancel_event,
             )
 
         mm_collector = MmCollector(
@@ -914,13 +1017,32 @@ class RuntimePoller:
 
         checked_at = datetime.now(timezone.utc)
         errors: list[CollectionError] = []
-        mm_result = self._parse_command(mm_bundle, SHOW_SWITCHES, parse_show_switches, errors)
+        mm_result = self._parse_command(
+            mm_bundle,
+            SHOW_SWITCHES,
+            parse_show_switches,
+            errors,
+            cancellation_event=cancel_event,
+        )
         load_result = self._parse_command(
-            cluster_bundle, SHOW_CLIENT_DISTRIBUTION, parse_load_distribution, errors
+            cluster_bundle,
+            SHOW_CLIENT_DISTRIBUTION,
+            parse_load_distribution,
+            errors,
+            cancellation_event=cancel_event,
         )
         membership_result = self._parse_command(
-            cluster_bundle, SHOW_GROUP_MEMBERSHIP, parse_group_membership, errors
+            cluster_bundle,
+            SHOW_GROUP_MEMBERSHIP,
+            parse_group_membership,
+            errors,
+            cancellation_event=cancel_event,
         )
+        # Parsing is bounded but can still overlap an operator quit for large
+        # outputs.  Do not mutate detector/incident state or SQLite if the
+        # cancellation arrived before correlation began.
+        if cancel_event.is_set():
+            raise RuntimeError("점검이 취소되었습니다.")
         expected = {member.ip.strip(): member.alias.strip() for member in settings.cluster.members if member.ip.strip()}
         cycle = PollCycleResult(
             checked_at=checked_at,
@@ -1058,6 +1180,8 @@ class RuntimePoller:
         command: str,
         parser: Any,
         errors: list[CollectionError],
+        *,
+        cancellation_event: threading.Event | None = None,
     ) -> Any | None:
         result = bundle.commands.get(command)
         if result is None or not result.success:
@@ -1071,7 +1195,34 @@ class RuntimePoller:
                 )
             )
             return None
-        parsed = parser(result.output)
+        try:
+            parsed = (
+                parser(result.output)
+                if cancellation_event is None
+                else parser(result.output, cancel_event=cancellation_event)
+            )
+        except ParserCancelledError:
+            raise RuntimeError("점검이 취소되었습니다.") from None
+        except Exception as exc:
+            # A changed or malformed response from one source must not discard
+            # independently collected MM/Cluster results. Do not log the raw
+            # exception message: parser exceptions can embed device output.
+            LOGGER.error(
+                "%s PARSE_FAILED: parser raised %s",
+                command,
+                type(exc).__name__,
+            )
+            errors.append(
+                CollectionError(
+                    source=command,
+                    code="PARSE_FAILED",
+                    user_message="명령 출력을 안전하게 해석하지 못했습니다.",
+                    target_ip=bundle.actual_controller_ip
+                    or bundle.requested_controller_ip
+                    or None,
+                )
+            )
+            return None
         if parsed.status is not ParseStatus.COMPLETE:
             code = "PARSE_FAILED" if parsed.status is ParseStatus.FAILED else "PARSE_PARTIAL"
             reasons = "; ".join(
@@ -1163,16 +1314,41 @@ class RuntimePoller:
 
     def _persist_incidents(self, transitions: list[Any], *, engine: Any | None = None) -> None:
         self._pending_persistence_transitions.extend(transitions)
+        if len(self._pending_persistence_transitions) > MAX_PENDING_DOMAIN_TRANSITIONS:
+            overflow = len(self._pending_persistence_transitions) - MAX_PENDING_DOMAIN_TRANSITIONS
+            del self._pending_persistence_transitions[:overflow]
+            retained_incident_ids = {
+                str(getattr(getattr(item, "incident", None), "incident_id", ""))
+                for item in self._pending_persistence_transitions
+            }
+            # Active incidents remain authoritative and are always included in
+            # ``events()`` below. Only closed lifecycle objects whose retry
+            # journal entry was evicted can be released. This bounds memory
+            # during a days-long SQLite outage without inventing a recovery or
+            # changing the current dashboard result.
+            self.incident_manager.compact_inactive(
+                retain_incident_ids=(
+                    retained_incident_ids | self._durable_incident_ids
+                ),
+            )
+            LOGGER.error(
+                "Domain persistence remained unavailable; compacted %d oldest retry transitions",
+                overflow,
+            )
         started = time.perf_counter()
         try:
+            incident_events = self.incident_manager.events()
             self.baseline_store.flush(
                 (engine or self.engine).pending_connection_changes(),
                 self._pending_connection_acknowledgements,
-                self.incident_manager.events(),
+                incident_events,
                 self._pending_persistence_transitions,
             )
             self._pending_persistence_transitions.clear()
             self._pending_connection_acknowledgements.clear()
+            self._durable_incident_ids = {
+                incident.incident_id for incident in incident_events if incident.active
+            }
             compacted = self.incident_manager.compact_inactive()
             self.logging_context.performance_logger.info(
                 "persist_domain duration_ms=%d active=%d transitions=%d compacted=%d",
@@ -1342,6 +1518,104 @@ def _run_qt_ui_smoke(output_path: Path | None) -> int:
     return exit_code if completed and workers_stopped else 2
 
 
+def _try_close_runtime_resources(
+    developer_inspector: Any,
+    coordinator: PollCoordinator,
+    credentials: CredentialService,
+    storage: SQLiteStorage,
+    logging_context: LoggingContext,
+    instance_lock: QLockFile,
+    *,
+    timeout_ms: int,
+) -> bool:
+    """Close shared runtime state only after every application worker stops."""
+
+    developer_inspector.close()
+    if not coordinator.shutdown(timeout_ms):
+        return False
+    credentials.close()
+    storage.close()
+    logging_context.close()
+    # Keep the single-instance guard until every shared file-backed resource
+    # is closed, so a replacement process cannot race the old log handlers.
+    instance_lock.unlock()
+    return True
+
+
+def _runtime_storage_error_message(error: StorageError) -> str:
+    """Return an actionable startup message without exception/path details."""
+
+    if isinstance(error, StorageBusyError):
+        return "로컬 상태 저장소가 사용 중입니다. 잠시 후 다시 실행하세요."
+    if isinstance(error, StorageCorruptError):
+        return (
+            "로컬 상태 저장소의 저장된 상태가 손상되었거나 지원되지 않습니다. "
+            "원본 파일을 보존한 채 확인하세요."
+        )
+    return (
+        "로컬 상태 저장소의 기존 운영 상태를 읽지 못했습니다. "
+        "원본 파일을 보존한 채 확인하세요."
+    )
+
+
+def _create_runtime_with_storage_fallback(
+    settings: AppSettings,
+    paths: AppPaths,
+    credentials: CredentialService,
+    storage: SQLiteStorage,
+    logging_context: LoggingContext,
+    storage_error: str = "",
+) -> tuple[RuntimePoller, SQLiteStorage, str]:
+    """Create a runtime without ever treating unreadable durable state as empty.
+
+    A file-backed restore failure is isolated from subsequent writes: close the
+    original database, disable automatic polling, and use a fresh in-memory
+    runtime for this process. The warning shown by ``main`` tells the operator
+    that the durable file needs attention.
+    """
+
+    try:
+        runtime = RuntimePoller(
+            settings,
+            paths,
+            credentials,
+            storage,
+            logging_context,
+        )
+        return runtime, storage, storage_error
+    except StorageError as exc:
+        message = _runtime_storage_error_message(exc)
+        LOGGER.warning(
+            "Runtime state restore failed (%s); using isolated memory storage",
+            type(exc).__name__,
+        )
+        try:
+            storage.close()
+        except Exception as close_error:
+            raise StorageError(
+                "로컬 상태 저장소를 안전하게 닫지 못했습니다. "
+                "다른 프로그램에서 파일을 사용 중인지 확인한 뒤 다시 실행하세요."
+            ) from close_error
+
+        settings.polling.automatic_enabled = False
+        fallback_storage = SQLiteStorage(":memory:")
+        try:
+            runtime = RuntimePoller(
+                settings,
+                paths,
+                credentials,
+                fallback_storage,
+                logging_context,
+            )
+        except BaseException:
+            fallback_storage.close()
+            raise
+        combined_error = "\n\n".join(
+            item for item in (storage_error, message) if item
+        )
+        return runtime, fallback_storage, combined_error
+
+
 def main(argv: list[str] | None = None) -> int:
     startup_started = time.perf_counter()
     args = build_parser().parse_args(argv)
@@ -1420,7 +1694,32 @@ def main(argv: list[str] | None = None) -> int:
         if args.demo
         else CredentialService()
     )
-    runtime = RuntimePoller(settings, paths, credentials, storage, logging_context)
+    try:
+        runtime, storage, storage_error = _create_runtime_with_storage_fallback(
+            settings,
+            paths,
+            credentials,
+            storage,
+            logging_context,
+            storage_error,
+        )
+    except StorageError as exc:
+        # If even isolation cannot be established, do not open a dashboard
+        # whose persistence authority is unknown.
+        try:
+            credentials.close()
+        finally:
+            try:
+                storage.close()
+            finally:
+                logging_context.close()
+                instance_lock.unlock()
+        _report_early_startup_issue(
+            "로컬 상태 저장소 확인 필요",
+            _runtime_storage_error_message(exc),
+            critical=True,
+        )
+        return 2
     if logging_context.performance_logging_enabled:
         logging_context.performance_logger.info(
             "startup_runtime_ready duration_ms=%d metrics=%s",
@@ -1445,6 +1744,7 @@ def main(argv: list[str] | None = None) -> int:
         connection_tester=runtime.test_connection,
         host_key_approver=runtime.approve_host_key,
         start_guard=None if args.demo else runtime.can_auto_start,
+        cancel_active_work=runtime.cancel_active_connections,
     )
     notifications = NotificationService(
         sound_enabled=settings.notifications.sound_enabled,
@@ -1479,20 +1779,25 @@ def main(argv: list[str] | None = None) -> int:
 
     closed = False
 
-    def cleanup() -> None:
+    def cleanup(timeout_ms: int = 0) -> bool:
         nonlocal closed
         if closed:
-            return
-        closed = True
-        developer_inspector.close()
-        if not coordinator.shutdown(0):
+            return True
+        if not _try_close_runtime_resources(
+            developer_inspector,
+            coordinator,
+            credentials,
+            storage,
+            logging_context,
+            instance_lock,
+            timeout_ms=timeout_ms,
+        ):
             # Keep storage/credentials alive until the still-running worker is
             # torn down by process shutdown; closing them here creates a race.
             LOGGER.warning("Background worker still active during external application shutdown")
-            return
-        credentials.close()
-        storage.close()
-        instance_lock.unlock()
+            return False
+        closed = True
+        return True
 
     app.aboutToQuit.connect(cleanup)
     window.show()
@@ -1523,7 +1828,12 @@ def main(argv: list[str] | None = None) -> int:
             window.statusBar().showMessage("자동 점검 일시정지: " + reason, 15000)
 
     exit_code = app.exec()
-    cleanup()
+    # aboutToQuit can be emitted by Windows/session shutdown while a worker is
+    # still winding down.  Its non-blocking cleanup attempt must remain
+    # retryable after the event loop exits; otherwise resources are left open
+    # solely because the first wait used a zero timeout.
+    if not cleanup(5000):
+        LOGGER.error("Background worker did not stop within the final shutdown grace period")
     return int(exit_code)
 
 

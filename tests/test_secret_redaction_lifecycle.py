@@ -13,6 +13,7 @@ from aruba_mini_dashboard.credentials import (
 )
 from aruba_mini_dashboard.logging_setup import SecretRedactor, setup_logging
 from aruba_mini_dashboard.main import RuntimePoller
+from aruba_mini_dashboard.errors import app_error
 from aruba_mini_dashboard.storage import SQLiteStorage
 from aruba_mini_dashboard.ui.settings_dialog import ConnectionTestRequest
 
@@ -62,6 +63,16 @@ def test_transient_scope_is_released_after_failure() -> None:
 
     assert redactor.tracked_value_count == 0
     assert redactor.redact("temporary-password") == "temporary-password"
+
+
+def test_app_error_repr_does_not_incidentally_expose_technical_detail() -> None:
+    sentinel = "technical-secret-must-not-be-shown"
+    error = app_error("AUTH_FAILED", sentinel)
+
+    assert sentinel not in str(error)
+    assert sentinel not in repr(error)
+    assert sentinel not in repr(error.args)
+    assert error.technical_message == sentinel
 
 
 def test_connection_test_secret_is_scoped_to_the_active_authentication(

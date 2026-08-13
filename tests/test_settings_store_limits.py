@@ -13,6 +13,7 @@ from aruba_mini_dashboard.config import (
     MAX_SETTINGS_UPDATE_MARKER_BYTES,
     AppSettings,
     SettingsCorruptError,
+    SettingsError,
     SettingsStore,
     SettingsValidationError,
 )
@@ -85,6 +86,39 @@ def test_default_settings_still_fit_all_new_limits(tmp_path: Path) -> None:
     assert path.stat().st_size < MAX_SETTINGS_FILE_BYTES
     assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 1
     assert store.load() == AppSettings.default()
+
+
+@pytest.mark.parametrize("invalid_fragment", ("NaN", "Infinity", "-Infinity", "1e999"))
+def test_settings_reject_non_finite_json_and_preserve_original_file(
+    tmp_path: Path,
+    invalid_fragment: str,
+) -> None:
+    path = tmp_path / "settings.json"
+    payload = json.dumps(AppSettings.default().to_dict(), separators=(",", ":"))
+    encoded = payload[:-1] + f',"diagnostic":{invalid_fragment}' + "}"
+    path.write_text(encoded, encoding="utf-8")
+
+    with pytest.raises(SettingsCorruptError):
+        SettingsStore(path).load()
+
+    assert path.read_text(encoding="utf-8") == encoded
+
+
+def test_settings_reject_duplicate_key_without_last_value_wins_and_preserve_file(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "settings.json"
+    encoded = json.dumps(AppSettings.default().to_dict(), separators=(",", ":"))
+    original = '"ssh_debug_logging":false'
+    duplicate = '"ssh_debug_logging":false,"ssh_debug_logging":true'
+    assert original in encoded
+    encoded = encoded.replace(original, duplicate, 1)
+    path.write_text(encoded, encoding="utf-8")
+
+    with pytest.raises(SettingsCorruptError):
+        SettingsStore(path).load()
+
+    assert path.read_text(encoding="utf-8") == encoded
 
 
 def test_interrupted_settings_update_recovers_exact_previous_json_on_next_load(
@@ -203,3 +237,73 @@ def test_non_object_or_wrong_type_pending_marker_is_reported_as_corrupt(
         store.load()
 
     assert marker.read_text(encoding="ascii") == marker_payload
+
+
+@pytest.mark.parametrize(
+    "marker_payload",
+    (
+        '{"version":1,"original_exists":true,"original_exists":false}',
+        '{"version":1,"original_exists":false,"original_exists":true}',
+        '{"version":1,"original_exists":true,"diagnostic":NaN}',
+    ),
+)
+def test_unsafe_pending_marker_is_rejected_without_recovery_side_effects(
+    tmp_path: Path,
+    marker_payload: str,
+) -> None:
+    path = tmp_path / "settings.json"
+    store = SettingsStore(path)
+    current = AppSettings.default()
+    current.polling.interval_seconds = 30
+    store.save(current)
+    current_bytes = path.read_bytes()
+    rollback = path.with_name(f".{path.name}.rollback")
+    rollback_bytes = b'{"authoritative":"rollback-must-be-preserved"}'
+    rollback.write_bytes(rollback_bytes)
+    marker = path.with_name(f".{path.name}.update-pending")
+    marker.write_text(marker_payload, encoding="ascii")
+
+    with pytest.raises(SettingsCorruptError):
+        store.load()
+
+    assert path.read_bytes() == current_bytes
+    assert rollback.read_bytes() == rollback_bytes
+    assert marker.read_text(encoding="ascii") == marker_payload
+
+
+def test_atomic_write_cleanup_failure_does_not_mask_primary_write_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    private_component = "operator-name-must-not-be-shown"
+    path = tmp_path / private_component / "settings.json"
+    original_unlink = Path.unlink
+
+    def fail_replace(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("synthetic destination lock")
+
+    def fail_temporary_cleanup(self: Path, *args: object, **kwargs: object) -> None:
+        if self.suffix == ".tmp":
+            raise PermissionError("synthetic cleanup lock")
+        original_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(config_module.os, "replace", fail_replace)
+    monkeypatch.setattr(Path, "unlink", fail_temporary_cleanup)
+
+    with pytest.raises(SettingsError) as raised:
+        SettingsStore(path).save(AppSettings.default())
+
+    assert type(raised.value) is SettingsError
+    assert private_component not in str(raised.value)
+
+
+def test_corrupt_settings_error_does_not_expose_operator_path(tmp_path: Path) -> None:
+    private_component = "private operator profile"
+    path = tmp_path / private_component / "한글 설정.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{", encoding="utf-8")
+
+    with pytest.raises(SettingsCorruptError) as raised:
+        SettingsStore(path).load()
+
+    assert private_component not in str(raised.value)

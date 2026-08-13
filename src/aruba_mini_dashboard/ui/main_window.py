@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 import time
+import weakref
 from dataclasses import replace
 from datetime import datetime
 from typing import Any, Callable
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QCloseEvent, QIcon, QKeySequence, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -40,7 +41,11 @@ from .detail_dialog import DetailDialog
 from .resources import status_icon
 from .settings_dialog import SettingsDialog
 from .view_models import DashboardView, DeviceView, display, sequence, severity_key, value
-from .widgets import NoWheelSlider, SubtleSelectionTableWidget
+from .widgets import (
+    NoWheelSlider,
+    SubtleSelectionTableWidget,
+    fit_window_to_available_screen,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -836,8 +841,19 @@ class MainWindow(QMainWindow):
         self.always_on_top_action.setChecked(ui.always_on_top)
         self.always_on_top_action.blockSignals(False)
         self.set_always_on_top(ui.always_on_top, persist=False)
-        if ui.window_x is not None and ui.window_y is not None:
-            self.move(self._visible_position(QPoint(ui.window_x, ui.window_y), self.size()))
+        restored_position = (
+            QPoint(ui.window_x, ui.window_y)
+            if ui.window_x is not None and ui.window_y is not None
+            else None
+        )
+        fit_window_to_available_screen(
+            self,
+            QSize(ui.window_width, ui.window_height),
+            preferred_position=restored_position,
+            minimum_size=QSize(360, 260),
+            margin=8,
+            center_on_parent=restored_position is None,
+        )
         if ui.window_maximized:
             self.setWindowState(self.windowState() | Qt.WindowMaximized)
         self.start_button.setEnabled(not self.coordinator.automatic and not self.coordinator.busy)
@@ -1529,6 +1545,11 @@ class MainWindow(QMainWindow):
         self._update_monitoring_action_availability()
         if not automatic:
             self.next_check_label.setText("다음 점검: 일시정지")
+        if self._quitting or bool(getattr(self.coordinator, "shutting_down", False)):
+            # Explicit quit and QApplication/aboutToQuit paths both pause the
+            # coordinator internally.  Do not turn that transient shutdown
+            # pause into a different next-launch preference.
+            return
         self.settings.polling.automatic_enabled = automatic
         self._persist_preference("polling.automatic_enabled", automatic)
 
@@ -1809,12 +1830,18 @@ class MainWindow(QMainWindow):
                 QMessageBox.No,
             )
             if answer != QMessageBox.Yes:
+                discard = getattr(self.coordinator, "discard_connection_test", None)
+                if callable(discard):
+                    discard(role)
                 self.statusBar().showMessage("SSH 호스트 키 승인을 취소했습니다.", 5000)
                 return
             try:
                 self.coordinator.approve_host_key(value(result, "scanned"))
                 self.coordinator.retry_connection_test(role)
             except Exception as exc:
+                discard = getattr(self.coordinator, "discard_connection_test", None)
+                if callable(discard):
+                    discard(role)
                 QMessageBox.critical(self, "SSH 호스트 키 저장 실패", str(exc))
             return
         if status == "mismatch":
@@ -1874,7 +1901,13 @@ class MainWindow(QMainWindow):
             detail_options["developer_inspector"] = self.developer_inspector
         dialog = DetailDialog(source, self, **detail_options)
         self._detail_windows[ip] = dialog
-        dialog.destroyed.connect(lambda: self._detail_windows.pop(ip, None))
+        dialog_ref = weakref.ref(dialog)
+
+        def forget_destroyed_dialog(*_args: object) -> None:
+            if self._detail_windows.get(ip) is dialog_ref():
+                self._detail_windows.pop(ip, None)
+
+        dialog.destroyed.connect(forget_destroyed_dialog)
         dialog.show()
 
     def _refresh_open_detail(self) -> None:
@@ -2190,15 +2223,3 @@ class MainWindow(QMainWindow):
             )
         values["_base_config_fingerprint"] = self._base_settings_fingerprint
         return values
-
-    @staticmethod
-    def _visible_position(position: QPoint, size: QSize) -> QPoint:
-        rect = QRect(position, size)
-        screens = QApplication.screens()
-        if any(screen.availableGeometry().intersects(rect) for screen in screens):
-            return position
-        primary = QApplication.primaryScreen()
-        if primary is None:
-            return QPoint(50, 50)
-        available = primary.availableGeometry()
-        return QPoint(available.left() + 30, available.top() + 30)

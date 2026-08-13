@@ -27,6 +27,9 @@ Aruba Mobility Master(MM)와 Aruba 7240XM 클러스터를 읽기 전용 SSH로
 - 저사양 모드의 완화된 자동 점검 주기·적응형 원본 보관·전체 표 페이지와 선택적 성능 로그
 - 수정 키 없는 직접 `F12`로만 활성화하는 비영구 개발자 UI 식별 모드
 - 숨은 표 갱신 보류, 설정 저장 묶음 처리와 종료 이력 보관 한도
+- 취소 가능한 TCP 연결과 활성 SSH 전송 정리로 점검 중에도 안전한 종료
+- SQLite schema·JSON 입력 검증과 자격 증명·Authorization 로그 마스킹
+- 고배율·다중 모니터의 사용 가능한 화면 영역에 맞춘 창·대화상자 배치
 - 실제 SSH를 사용하지 않는 비식별 fixture Demo 모드
 - PyInstaller onedir 운영 빌드와 선택적 Console 빌드
 
@@ -115,7 +118,7 @@ Tab 및 좌우 방향키를 이용한 기존 키보드 이동과 포커스 표�
 복사 결과는 다음과 같은 정적 형식입니다.
 
 ```text
-프로그램 버전: v0.3.6
+프로그램 버전: v0.3.7
 화면 위치: 메인 화면 > 전체 보기
 요소 이름: 전체 보기 장비표
 UI 식별자: MAIN-FULL-DEVICE-TABLE
@@ -238,18 +241,44 @@ MM에서 과거에 발견한 미등록 장비의 snapshot도 같은 180일·10,0
 대기 중인 Connection-Type 변화는 이 정리에서 항상 보호됩니다.
 SQLite가 다른 작업에 잠긴 경우 UI 경로의 대기 시간은 짧게 제한하고, 저장하지
 못한 운영 상태는 메모리에 유지한 뒤 다음 점검에서 다시 저장합니다.
+프로그램 시작 중 기존 기준값, 탐지 상태, 확인 대기 변화 또는 활성 장애를
+완전하게 복원하지 못하면 빈 상태로 점검을 계속하지 않습니다. 원본 SQLite를
+변경 없이 닫고 자동 점검을 중지한 격리 메모리 저장소로 전환하며, 화면에서
+원본 파일 확인이 필요함을 안내합니다. 시작 inventory 정리와 검증은 같은
+transaction에서 처리해 검증 실패 시 정리도 rollback합니다. 활성 장애는 최대
+10,000건까지 완전하게 복원하며 이를 초과하면 일부만 잘라 쓰지 않고 실패
+안전하게 안내합니다. 동일 논리 장애의 중복 활성 행도 임의로 하나만 선택하지
+않고 원본 DB를 보존한 채 확인이 필요한 상태로 처리합니다.
+
+시작 시 SQLite의 필수 테이블·열뿐 아니라 기본 키, `NOT NULL`, `CHECK`, 인덱스
+열·정렬 순서와 partial index 조건을 확인합니다. 저장 JSON은 항목당 256KiB,
+깊이 32, 전체 노드 20,000개 한도를 적용하며 중복 키, 비유한 수, 잘못된 시간·
+자료형과 비밀 필드 이름을 손상된 로컬 상태로 처리합니다. 설정과 저장 payload의
+비밀 필드는 구분자와 camelCase 단위로 인식합니다. 정상적인 `event_token`과
+`durable_event_token`은 상태 식별자이므로 예외로 허용하지만, password·secret·
+authorization·credential blob·private key·API key 의미의 필드는 저장하지 않습니다.
 
 최근 원본 명령 출력은 세부 정보 화면에 메모리상 표시되며 일반적인 인증
 프롬프트를 마스킹합니다. SQLite에는 원본 명령 출력을 저장하지 않습니다.
 원문에는 사내 IP, Hostname 등 운영 정보가 남을 수 있으므로 외부 공유 전
 반드시 비식별화하십시오.
 
+로그 마스커는 등록된 자격 증명뿐 아니라 `Authorization: Bearer ...`와
+`Authorization: Basic ...`의 scheme을 포함한 전체 값을 제거합니다. 로그 파일을
+쓸 수 없는 경우에도 마스킹 전 record 본문을 표준 오류로 다시 출력하지 않습니다.
+
+종료 요청은 새 수동·자동 점검과 연결 테스트를 차단하고, 재시도 대기를 즉시
+깨운 뒤 앱이 소유한 연결 중인 TCP socket과 활성 SSH 전송을 닫습니다. 종료
+작업은 GUI 스레드 밖에서 실행되며 worker thread 강제 종료나 프로세스 강제
+종료를 사용하지 않습니다.
+
 ## 개발 실행
 
-CPython 3.11.9와 repository-local 가상환경을 사용합니다.
+CPython 3.13.15 x64 표준 GIL 빌드와 repository-local 가상환경을 사용합니다.
+실험적 free-threaded(`3.13t`) 런타임은 빌드 대상으로 지원하지 않습니다.
 
 ```powershell
-py -3.11 -m venv .venv
+py -3.13 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --require-hashes -r .\requirements-lock.txt
 .\.venv\Scripts\python.exe -m pip install --no-deps -e .
 .\.venv\Scripts\python.exe -m aruba_mini_dashboard.main
@@ -315,7 +344,7 @@ one-file 빌드는 지원하지 않습니다. LGPL 런타임을 사용자가 교
 
 빌드 스크립트는 다음 순서로 동작합니다.
 
-1. CPython 3.11.9 가상환경 확인 또는 생성
+1. CPython 3.13.15 x64 표준 GIL 가상환경 확인 또는 생성
 2. 해시 고정 의존성 설치
 3. 전체 자동화 테스트 실행, 실패 시 중단
 4. PyInstaller 실행
@@ -336,7 +365,7 @@ Python 설치가 필요하지 않도록 구성되어 있습니다.
 생성합니다.
 
 ```powershell
-.\scripts\package_release.ps1 -Version 0.3.6
+.\scripts\package_release.ps1 -Version 0.3.7
 ```
 
 기존 태그나 Release 자산을 덮어쓰지 않는 상세 절차는
@@ -379,9 +408,11 @@ Windows GUI 실행도 개발 PC 범위에서 확인할 수 있습니다.
 
 - 실제 ArubaMM-HW-10K 및 7240XM ArubaOS 버전별 세 명령 원본 형식
 - 실제 프롬프트, `enable`, `no paging` 지원 여부와 페이징 동작
+- Paramiko 5에서 실제 구형 ArubaOS의 KEX·호스트 키·서명 알고리즘 호환성
 - Primary 장애 시 실제 Fallback 수집 및 지문 승인 운영 절차
 - Python이 설치되지 않은 깨끗한 Windows 11 일반 사용자 PC/VM
-- 실제 100%, 125%, 150% 화면 배율과 Windows 알림 센터·트레이 정책
+- 실제 100%, 125%, 150% 화면 배율, 고대비·다중 모니터의 창 경계와 Windows
+  알림 센터·트레이 정책
 - 실제 물리 F12/Fn 키 매핑과 창 포커스, 개발자 요소 선택 차단, 트레이 항목
   카탈로그, 클립보드 정책, 고대비 테마와 다중 모니터
 - 사내 보안 정책에 따른 Credential Manager 사용 허용 여부

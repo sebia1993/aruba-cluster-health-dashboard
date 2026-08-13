@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QSizePolicy,
     QSlider,
@@ -23,6 +24,114 @@ from PySide6.QtWidgets import (
 CLICK_TO_ENABLE_WHEEL_TOOLTIP = (
     "항목을 클릭한 후에만 마우스 휠로 변경할 수 있습니다."
 )
+
+
+def bounded_window_geometry(
+    preferred: QRect,
+    available: QRect,
+    *,
+    minimum_size: QSize = QSize(320, 240),
+    margin: int = 16,
+) -> QRect:
+    """Return a usable logical-pixel window rectangle within one screen.
+
+    Windows can restore a geometry saved on a larger or disconnected monitor.
+    Qt also keeps an explicitly requested dialog size even when DPI scaling
+    makes it larger than the current screen.  Keep both size and position
+    inside the screen's *available* geometry so the title bar and action
+    buttons remain reachable without relying on a particular monitor layout.
+    """
+
+    if available.isEmpty():
+        return QRect(preferred)
+    safe_margin = max(0, int(margin))
+    horizontal_margin = min(safe_margin, max(0, (available.width() - 1) // 2))
+    vertical_margin = min(safe_margin, max(0, (available.height() - 1) // 2))
+    usable = available.adjusted(
+        horizontal_margin,
+        vertical_margin,
+        -horizontal_margin,
+        -vertical_margin,
+    )
+    if usable.isEmpty():
+        usable = QRect(available)
+
+    minimum_width = min(max(1, minimum_size.width()), usable.width())
+    minimum_height = min(max(1, minimum_size.height()), usable.height())
+    width = min(max(preferred.width(), minimum_width), usable.width())
+    height = min(max(preferred.height(), minimum_height), usable.height())
+    maximum_x = usable.left() + usable.width() - width
+    maximum_y = usable.top() + usable.height() - height
+    x = min(max(preferred.x(), usable.left()), maximum_x)
+    y = min(max(preferred.y(), usable.top()), maximum_y)
+    return QRect(QPoint(x, y), QSize(width, height))
+
+
+def available_screen_geometry(
+    widget: QWidget,
+    preferred: QRect | None = None,
+) -> QRect:
+    """Choose the best available monitor for a window or restored rectangle."""
+
+    screens = QApplication.screens()
+    if preferred is not None and not preferred.isEmpty() and screens:
+        intersections = []
+        for screen in screens:
+            intersection = screen.availableGeometry().intersected(preferred)
+            area = (
+                0
+                if intersection.isEmpty()
+                else intersection.width() * intersection.height()
+            )
+            intersections.append((area, screen))
+        area, screen = max(intersections, key=lambda item: item[0])
+        if area > 0:
+            return screen.availableGeometry()
+
+    parent = widget.parentWidget()
+    if parent is not None:
+        parent_screen = parent.screen()
+        if parent_screen is not None:
+            return parent_screen.availableGeometry()
+    screen = widget.screen() or QApplication.primaryScreen()
+    return screen.availableGeometry() if screen is not None else QRect(0, 0, 800, 600)
+
+
+def fit_window_to_available_screen(
+    widget: QWidget,
+    preferred_size: QSize,
+    *,
+    preferred_position: QPoint | None = None,
+    minimum_size: QSize = QSize(320, 240),
+    margin: int = 16,
+    center_on_parent: bool = False,
+) -> QRect:
+    """Apply a DPI- and multi-monitor-safe initial/restored window geometry."""
+
+    parent = widget.parentWidget()
+    provisional = QRect(preferred_position or widget.pos(), preferred_size)
+    available = available_screen_geometry(widget, provisional if preferred_position else None)
+    if preferred_position is None and center_on_parent:
+        center = (
+            parent.frameGeometry().center()
+            if parent is not None and parent.isVisible()
+            else available.center()
+        )
+        provisional.moveCenter(center)
+    bounded = bounded_window_geometry(
+        provisional,
+        available,
+        minimum_size=minimum_size,
+        margin=margin,
+    )
+    # An explicit minimum larger than a high-DPI screen prevents resize() from
+    # honoring the bounded rectangle. Cap it to the space actually available.
+    widget.setMinimumSize(
+        min(minimum_size.width(), bounded.width()),
+        min(minimum_size.height(), bounded.height()),
+    )
+    widget.setGeometry(bounded)
+    return bounded
 
 
 def _blend_colors(first: QColor, second: QColor, second_weight: float) -> QColor:

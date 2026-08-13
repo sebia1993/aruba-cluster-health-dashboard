@@ -3,7 +3,7 @@
   "components": [
     {
       "distribution": "paramiko",
-      "version": "4.0.0",
+      "version": "5.0.0",
       "module_names": [
         "paramiko"
       ],
@@ -28,10 +28,8 @@
         "_internal/paramiko/kex_curve25519.py",
         "_internal/paramiko/kex_ecdh_nist.py",
         "_internal/paramiko/kex_gex.py",
-        "_internal/paramiko/kex_group1.py",
         "_internal/paramiko/kex_group14.py",
         "_internal/paramiko/kex_group16.py",
-        "_internal/paramiko/kex_gss.py",
         "_internal/paramiko/message.py",
         "_internal/paramiko/packet.py",
         "_internal/paramiko/pipe.py",
@@ -48,15 +46,14 @@
         "_internal/paramiko/sftp_server.py",
         "_internal/paramiko/sftp_si.py",
         "_internal/paramiko/ssh_exception.py",
-        "_internal/paramiko/ssh_gss.py",
         "_internal/paramiko/transport.py",
         "_internal/paramiko/util.py",
         "_internal/paramiko/win_openssh.py",
         "_internal/paramiko/win_pageant.py"
       ],
       "license_source_kind": "installed-distribution",
-      "license_source": "paramiko-4.0.0.dist-info/licenses/LICENSE",
-      "license_output": "LGPL_RUNTIME_LICENSES/paramiko-4.0.0-LICENSE.txt",
+      "license_source": "paramiko-5.0.0.dist-info/licenses/LICENSE",
+      "license_output": "LGPL_RUNTIME_LICENSES/paramiko-5.0.0-LICENSE.txt",
       "license_sha256": "5fa25bf5f395fd26e701c2e1de4ca7d162816986dc791c22f8f4226857ad1bb2"
     },
     {

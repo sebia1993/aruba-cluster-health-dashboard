@@ -11,7 +11,9 @@ import ipaddress
 import json
 import hashlib
 import logging
+import math
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -27,9 +29,15 @@ MAX_SETTINGS_OBJECT_MEMBERS = 64
 MAX_SETTINGS_ARRAY_ITEMS = 128
 MAX_SETTINGS_TOTAL_NODES = 1_024
 MAX_SETTINGS_UPDATE_MARKER_BYTES = 1_024
+MIN_WINDOW_COORDINATE = -100_000
+MAX_WINDOW_COORDINATE = 100_000
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _BoundedFileError(ValueError):
+    pass
 
 
 class SettingsError(RuntimeError):
@@ -295,6 +303,18 @@ class AppSettings:
         _bounded(errors, "투명도", self.ui.opacity_percent, 40, 100)
         _bounded(errors, "창 너비", self.ui.window_width, 320, 10000)
         _bounded(errors, "창 높이", self.ui.window_height, 240, 10000)
+        for label, coordinate in (
+            ("창 X 좌표", self.ui.window_x),
+            ("창 Y 좌표", self.ui.window_y),
+        ):
+            if coordinate is not None:
+                _bounded(
+                    errors,
+                    label,
+                    coordinate,
+                    MIN_WINDOW_COORDINATE,
+                    MAX_WINDOW_COORDINATE,
+                )
         if self.polling.busy_policy not in {"skip", "queue_one"}:
             errors.append("중복 점검 정책은 skip 또는 queue_one이어야 합니다.")
         if self.detection.comparison_mode not in {"absolute_only", "absolute_and_relative"}:
@@ -387,8 +407,39 @@ def _read_bounded_bytes(path: Path, maximum_bytes: int) -> bytes:
     with path.open("rb") as handle:
         encoded = handle.read(maximum_bytes + 1)
     if len(encoded) > maximum_bytes:
-        raise ValueError("file exceeds the allowed size")
+        raise _BoundedFileError("file exceeds the allowed size")
     return encoded
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("non-finite JSON number")
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _decode_bounded_json(
+    path: Path,
+    maximum_bytes: int,
+    *,
+    encoding: str,
+) -> object:
+    """Decode bounded local JSON with one strict parser contract."""
+
+    encoded = _read_bounded_bytes(path, maximum_bytes)
+    payload = json.loads(
+        encoded.decode(encoding),
+        object_pairs_hook=_unique_json_object,
+        parse_constant=_reject_json_constant,
+    )
+    _validate_settings_payload_shape(payload)
+    return payload
 
 
 class SettingsStore:
@@ -412,28 +463,30 @@ class SettingsStore:
             # Read at most one byte beyond the limit. This remains bounded even
             # if the file changes between an earlier stat and the actual read.
             try:
-                encoded = _read_bounded_bytes(self.path, MAX_SETTINGS_FILE_BYTES)
-            except ValueError:
+                payload = _decode_bounded_json(
+                    self.path,
+                    MAX_SETTINGS_FILE_BYTES,
+                    encoding="utf-8",
+                )
+            except _BoundedFileError:
                 raise SettingsCorruptError(
                     "설정 파일이 허용 크기를 초과했습니다. 원본을 보존한 채 설정을 다시 확인하세요."
                 )
-            raw = encoded.decode("utf-8")
-            payload = json.loads(raw)
             settings = AppSettings.from_dict(payload)
             settings.validate()
             return settings
         except SettingsError:
             raise
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
             raise SettingsCorruptError(
-                f"설정 파일을 읽을 수 없습니다. 원본을 보존한 채 확인하세요: {self.path}"
+                "설정 파일을 읽을 수 없습니다. 원본을 보존한 채 확인하세요."
             ) from exc
         except Exception as exc:
             # JSON values are untrusted input. Unexpected schema failures must
             # not escape startup as AttributeError/TypeError, and the raw value
             # must never be repeated in the operator-facing error.
             raise SettingsCorruptError(
-                f"설정 파일 항목의 형식을 확인할 수 없습니다. 원본은 보존됩니다: {self.path}"
+                "설정 파일 항목의 형식을 확인할 수 없습니다. 원본은 보존됩니다."
             ) from exc
 
     def save(self, settings: AppSettings) -> Path:
@@ -492,11 +545,11 @@ class SettingsStore:
             self._remove_orphan_rollback()
             return
         try:
-            marker_raw = _read_bounded_bytes(
+            marker = _decode_bounded_json(
                 self._update_marker_path,
                 MAX_SETTINGS_UPDATE_MARKER_BYTES,
+                encoding="ascii",
             )
-            marker = json.loads(marker_raw.decode("ascii"))
             if (
                 type(marker) is not dict
                 or type(marker.get("version")) is not int
@@ -514,7 +567,13 @@ class SettingsStore:
                 self.path.unlink(missing_ok=True)
             self._update_marker_path.unlink()
             self._remove_orphan_rollback()
-        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            ValueError,
+            SettingsCorruptError,
+        ) as exc:
             raise SettingsCorruptError(
                 "중단된 설정 변경을 복구하지 못했습니다. 원본과 복구 파일을 보존합니다."
             ) from exc
@@ -527,7 +586,7 @@ class SettingsStore:
         except OSError:
             # It no longer has recovery authority. A later load retries the
             # cleanup without making otherwise valid settings unavailable.
-            LOGGER.warning("Committed settings rollback copy cleanup deferred", exc_info=True)
+            LOGGER.warning("Committed settings rollback copy cleanup deferred")
 
     @staticmethod
     def _atomic_write_bytes(destination: Path, encoded: bytes) -> None:
@@ -544,10 +603,16 @@ class SettingsStore:
                 os.fsync(handle.fileno())
             os.replace(temporary, destination)
         except OSError as exc:
-            raise SettingsError(f"설정 파일을 안전하게 저장하지 못했습니다: {destination}") from exc
+            raise SettingsError("설정 파일을 안전하게 저장하지 못했습니다.") from exc
         finally:
             if temporary is not None and temporary.exists():
-                temporary.unlink(missing_ok=True)
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    # A cleanup failure must never replace the actionable write
+                    # failure above. The uniquely named file has no recovery
+                    # authority and a later save can proceed independently.
+                    LOGGER.warning("Temporary settings file cleanup deferred")
 
 
 class SettingsUpdate:
@@ -607,7 +672,10 @@ def _validate_settings_payload_shape(value: object) -> None:
                 raise SettingsCorruptError("설정 JSON 배열 구조가 허용 범위를 초과했습니다.")
             seen_containers.add(identity)
             stack.extend((nested, depth + 1) for nested in candidate)
-        elif candidate is not None and type(candidate) not in {str, int, float, bool}:
+        elif type(candidate) is float:
+            if not math.isfinite(candidate):
+                raise SettingsCorruptError("설정 JSON 숫자 형식이 올바르지 않습니다.")
+        elif candidate is not None and type(candidate) not in {str, int, bool}:
             raise SettingsCorruptError("설정 JSON 값 형식이 올바르지 않습니다.")
 
 
@@ -759,20 +827,67 @@ def _validate_optional_ips(errors: list[str], label: str, values: list[str]) -> 
             errors.append(f"{label} 형식이 올바르지 않습니다: {candidate}")
 
 
-_FORBIDDEN_SECRET_KEYS = {"password", "passwd", "secret", "enable_secret", "credential_blob", "token"}
+_FORBIDDEN_SECRET_TOKENS = {
+    "authorization",
+    "password",
+    "passwd",
+    "secret",
+    "token",
+}
+_FORBIDDEN_SECRET_COMPACT_TOKENS = {
+    "accesstoken",
+    "apikey",
+    "apitoken",
+    "authtoken",
+    "bearertoken",
+    "clientsecret",
+    "credentialblob",
+    "databasepassword",
+    "dbpassword",
+    "privatekey",
+    "refreshtoken",
+    "sessiontoken",
+    "userpassword",
+}
+_FORBIDDEN_SECRET_TOKEN_PAIRS = {
+    ("api", "key"),
+    ("credential", "blob"),
+    ("private", "key"),
+}
 
 
-def _reject_secret_fields(value: object, path: str = "settings") -> None:
+def _field_name_tokens(key: object) -> tuple[str, ...]:
+    """Split separators and camel-case without treating substrings as secrets."""
+
+    value = str(key)
+    value = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", value)
+    value = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+    return tuple(
+        token.casefold()
+        for token in re.split(r"[^A-Za-z0-9]+", value)
+        if token
+    )
+
+
+def _is_secret_field_name(key: object) -> bool:
+    """Recognize exact secret segments independent of separators or casing."""
+
+    tokens = _field_name_tokens(key)
+    if any(token in _FORBIDDEN_SECRET_TOKENS for token in tokens):
+        return True
+    if any(token in _FORBIDDEN_SECRET_COMPACT_TOKENS for token in tokens):
+        return True
+    return any(pair in _FORBIDDEN_SECRET_TOKEN_PAIRS for pair in zip(tokens, tokens[1:]))
+
+
+def _reject_secret_fields(value: object) -> None:
     if isinstance(value, Mapping):
         for key, nested in value.items():
-            normalized = str(key).casefold().replace("-", "_")
-            if (
-                normalized in _FORBIDDEN_SECRET_KEYS
-                or normalized.endswith("_password")
-                or normalized.endswith("_token")
-            ):
-                raise SettingsValidationError([f"비밀 값은 설정 파일에 저장할 수 없습니다: {path}.{key}"])
-            _reject_secret_fields(nested, f"{path}.{key}")
+            if _is_secret_field_name(key):
+                raise SettingsValidationError(
+                    ["비밀 값은 설정 파일에 저장할 수 없습니다."]
+                )
+            _reject_secret_fields(nested)
     elif isinstance(value, (list, tuple)):
-        for index, nested in enumerate(value):
-            _reject_secret_fields(nested, f"{path}[{index}]")
+        for nested in value:
+            _reject_secret_fields(nested)

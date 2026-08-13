@@ -5,6 +5,7 @@ import logging
 import threading
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from time import monotonic
 from typing import Any
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
@@ -87,6 +88,7 @@ class PollCoordinator(QObject):
         connection_tester: Callable[..., Any] | None = None,
         host_key_approver: Callable[[Any], Any] | None = None,
         start_guard: Callable[[], tuple[bool, str]] | None = None,
+        cancel_active_work: Callable[[], None] | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -96,22 +98,38 @@ class PollCoordinator(QObject):
         self._connection_tester = connection_tester
         self._host_key_approver = host_key_approver
         self._start_guard = start_guard
+        self._cancel_active_work = cancel_active_work
         self._interval_seconds = self._validated_interval(interval_seconds)
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._on_automatic_timeout)
         self._automatic = False
         self._busy = False
+        self._shutdown_requested = False
         self._manual_pending = False
         self._next_check: datetime | None = None
         self._cancel_event = threading.Event()
         self._workers: set[_PollWorker] = set()
         self._connection_workers: dict[_PollWorker, str] = {}
         self._connection_test_settings: dict[str, Any] = {}
+        self._active_cancel_lock = threading.Lock()
+        self._active_cancel_thread: threading.Thread | None = None
 
     @property
     def busy(self) -> bool:
         return self._busy
+
+    @property
+    def shutting_down(self) -> bool:
+        """Whether application shutdown has begun.
+
+        Main-window preference handlers use this read-only state to distinguish
+        the coordinator's internal shutdown pause from an operator-requested
+        automatic-monitoring change.  It intentionally becomes permanent for
+        the lifetime of this coordinator.
+        """
+
+        return self._shutdown_requested
 
     @property
     def automatic(self) -> bool:
@@ -139,6 +157,8 @@ class PollCoordinator(QObject):
 
     @Slot()
     def start_automatic(self) -> None:
+        if self._shutdown_requested:
+            return
         if self._automatic:
             return
         if self._start_guard is not None:
@@ -165,6 +185,8 @@ class PollCoordinator(QObject):
 
     @Slot()
     def check_now(self) -> None:
+        if self._shutdown_requested:
+            return
         if self._busy:
             if not self._manual_pending:
                 self._manual_pending = True
@@ -175,6 +197,8 @@ class PollCoordinator(QObject):
     def test_connection(self, role: str, settings: Any) -> None:
         """Run host-key discovery and authentication without touching baselines."""
 
+        if self._shutdown_requested:
+            return
         if self._connection_tester is None:
             self.connection_test_failed.emit(role, RuntimeError("연결 테스트 기능을 사용할 수 없습니다."))
             return
@@ -203,11 +227,19 @@ class PollCoordinator(QObject):
         return self._host_key_approver(scanned)
 
     def retry_connection_test(self, role: str) -> None:
-        settings = self._connection_test_settings.get(role)
+        # Treat the approval payload as a one-shot capability.  It may contain
+        # a transient in-memory credential, so a failed/busy retry must not
+        # leave that secret reachable for the rest of the process lifetime.
+        settings = self._connection_test_settings.pop(role, None)
         if settings is None:
             self.connection_test_failed.emit(role, RuntimeError("다시 시도할 연결 설정이 없습니다."))
             return
         self.test_connection(role, settings)
+
+    def discard_connection_test(self, role: str) -> None:
+        """Forget an approval-pending request and any transient credential."""
+
+        self._connection_test_settings.pop(role, None)
 
     @Slot()
     def _on_automatic_timeout(self) -> None:
@@ -223,6 +255,8 @@ class PollCoordinator(QObject):
         self._start_cycle("automatic")
 
     def _start_cycle(self, trigger: str) -> None:
+        if self._shutdown_requested:
+            return
         self._busy = True
         self.busy_changed.emit(True)
         started_at = self._clock()
@@ -248,6 +282,9 @@ class PollCoordinator(QObject):
         self._workers.discard(worker)
         self._busy = False
         self.busy_changed.emit(False)
+        if self._shutdown_requested:
+            self._connection_test_settings.pop(role, None)
+            return
         if getattr(result, "status", "") != "approval_required":
             self._connection_test_settings.pop(role, None)
         self.connection_test_finished.emit(role, result)
@@ -261,6 +298,8 @@ class PollCoordinator(QObject):
         self._busy = False
         self.busy_changed.emit(False)
         self._connection_test_settings.pop(role, None)
+        if self._shutdown_requested:
+            return
         self.connection_test_failed.emit(role, error)
         if self._automatic and not self._timer.isActive():
             self._schedule_next()
@@ -275,6 +314,9 @@ class PollCoordinator(QObject):
         self._workers.discard(worker)
         self._busy = False
         self.busy_changed.emit(False)
+        if self._shutdown_requested:
+            self._manual_pending = False
+            return
         if error is None:
             self.cycle_finished.emit(result)
         else:
@@ -291,7 +333,7 @@ class PollCoordinator(QObject):
             self._schedule_next()
 
     def _schedule_next(self) -> None:
-        if not self._automatic:
+        if not self._automatic or self._shutdown_requested:
             return
         self._timer.start(self._interval_seconds * 1000)
         self._set_next_check(self._clock() + timedelta(seconds=self._interval_seconds))
@@ -303,12 +345,47 @@ class PollCoordinator(QObject):
     def shutdown(self, timeout_ms: int = 3000) -> bool:
         """Stop new work, request cancellation, and wait briefly for workers."""
 
+        timeout_ms = max(0, int(timeout_ms))
+        deadline = monotonic() + (timeout_ms / 1000.0)
         self.request_shutdown()
-        return self._thread_pool.waitForDone(max(0, int(timeout_ms)))
+        workers_stopped = self._thread_pool.waitForDone(timeout_ms)
+        cancel_thread = self._active_cancel_thread
+        if cancel_thread is not None and cancel_thread.is_alive():
+            remaining = max(0.0, deadline - monotonic())
+            cancel_thread.join(remaining)
+        return workers_stopped and not (
+            cancel_thread is not None and cancel_thread.is_alive()
+        )
 
     def request_shutdown(self) -> None:
         """Cancel future/current work without blocking the GUI thread."""
 
+        self._shutdown_requested = True
         self.pause_automatic()
         self._manual_pending = False
         self._cancel_event.set()
+        # Completed approval-required probes are not represented by an active
+        # worker.  Explicitly release their possibly secret request payloads.
+        self._connection_test_settings.clear()
+        self._start_active_cancel()
+
+    def _start_active_cancel(self) -> None:
+        callback = self._cancel_active_work
+        if callback is None:
+            return
+        with self._active_cancel_lock:
+            if self._active_cancel_thread is not None:
+                return
+
+            def cancel_active() -> None:
+                try:
+                    callback()
+                except Exception:
+                    LOGGER.exception("Active worker cancellation callback failed")
+
+            self._active_cancel_thread = threading.Thread(
+                target=cancel_active,
+                name="aruba-active-ssh-cancel",
+                daemon=True,
+            )
+            self._active_cancel_thread.start()

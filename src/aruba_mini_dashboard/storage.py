@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -20,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
-from .config import AppPaths, default_app_paths
+from .config import AppPaths, _field_name_tokens, _is_secret_field_name, default_app_paths
 
 
 LOGGER = logging.getLogger(__name__)
@@ -29,8 +31,219 @@ HISTORY_RETENTION_DAYS = 180
 HISTORY_RETENTION_MAX_ROWS = 10_000
 HISTORY_MAINTENANCE_INTERVAL = timedelta(days=1)
 DEVICE_INVENTORY_RETENTION_MARKER = "_device_inventory_retention_last_run"
+MAX_STORAGE_JSON_BYTES = 256 * 1024
+MAX_STORAGE_JSON_DEPTH = 32
+MAX_STORAGE_JSON_NODES = 20_000
 _T = TypeVar("_T")
-_SECRET_KEYS = {"password", "passwd", "secret", "enable_secret", "credential_blob", "token"}
+_NON_SECRET_TOKEN_KEYS = {("durable", "event", "token"), ("event", "token")}
+_REQUIRED_SCHEMA_COLUMNS = {
+    "preferences": {"key", "value_json", "updated_at"},
+    "connection_baselines": {
+        "source_controller_ip",
+        "member_ip",
+        "connection_type",
+        "normalized_connection_type",
+        "observed_at",
+    },
+    "detector_streaks": {
+        "detector",
+        "ip",
+        "anomaly_count",
+        "recovery_count",
+        "active",
+        "updated_at",
+    },
+    "device_states": {"ip", "payload_json", "observed_at", "is_normal"},
+    "device_normal_states": {"ip", "payload_json", "observed_at"},
+    "mm_discovered_devices": {
+        "ip",
+        "alias",
+        "hostname",
+        "last_seen_at",
+        "missing_streak",
+        "recovery_streak",
+    },
+    "incidents": {
+        "incident_id",
+        "ip",
+        "incident_type",
+        "reason_key",
+        "first_detected_at",
+        "last_seen_at",
+        "resolved_at",
+        "active",
+        "acknowledged",
+        "payload_json",
+    },
+    "events": {"id", "event_type", "ip", "incident_id", "occurred_at", "payload_json"},
+    "failover_collections": {
+        "id",
+        "primary_controller_ip",
+        "actual_controller_ip",
+        "primary_error_code",
+        "collected_at",
+    },
+    "connection_changes": {
+        "event_token",
+        "collector_ip",
+        "member_ip",
+        "previous_value",
+        "current_value",
+        "first_detected_at",
+        "last_confirmed_at",
+        "acknowledged",
+    },
+}
+_REQUIRED_SCHEMA_PRIMARY_KEYS = {
+    "preferences": ("key",),
+    "connection_baselines": ("member_ip",),
+    "detector_streaks": ("detector", "ip"),
+    "device_states": ("ip",),
+    "device_normal_states": ("ip",),
+    "mm_discovered_devices": ("ip",),
+    "incidents": ("incident_id",),
+    "events": ("id",),
+    "failover_collections": ("id",),
+    "connection_changes": ("event_token",),
+}
+_REQUIRED_SCHEMA_NOT_NULL = {
+    "preferences": {"value_json", "updated_at"},
+    "connection_baselines": {
+        "source_controller_ip",
+        "member_ip",
+        "connection_type",
+        "normalized_connection_type",
+        "observed_at",
+    },
+    "detector_streaks": {
+        "detector",
+        "ip",
+        "anomaly_count",
+        "recovery_count",
+        "active",
+        "updated_at",
+    },
+    "device_states": {"payload_json", "observed_at", "is_normal"},
+    "device_normal_states": {"payload_json", "observed_at"},
+    "mm_discovered_devices": {
+        "alias",
+        "hostname",
+        "last_seen_at",
+        "missing_streak",
+        "recovery_streak",
+    },
+    "incidents": {
+        "ip",
+        "incident_type",
+        "reason_key",
+        "first_detected_at",
+        "last_seen_at",
+        "active",
+        "acknowledged",
+        "payload_json",
+    },
+    "events": {"event_type", "ip", "occurred_at", "payload_json"},
+    "failover_collections": {
+        "primary_controller_ip",
+        "actual_controller_ip",
+        "primary_error_code",
+        "collected_at",
+    },
+    "connection_changes": {
+        "collector_ip",
+        "member_ip",
+        "previous_value",
+        "current_value",
+        "first_detected_at",
+        "last_confirmed_at",
+        "acknowledged",
+    },
+}
+_REQUIRED_SCHEMA_INDEXES = {
+    "connection_baselines": {
+        "idx_connection_baselines_collector": (
+            False,
+            (("source_controller_ip", False),),
+            None,
+        )
+    },
+    "connection_changes": {
+        "idx_connection_changes_pending": (
+            False,
+            (
+                ("acknowledged", False),
+                ("member_ip", False),
+                ("first_detected_at", False),
+            ),
+            None,
+        ),
+        "idx_connection_changes_one_pending_member": (
+            True,
+            (("member_ip", False),),
+            "acknowledged=0",
+        ),
+    },
+    "events": {
+        "idx_events_occurred_at": (
+            False,
+            (("occurred_at", True),),
+            None,
+        )
+    },
+    "incidents": {
+        "idx_incidents_active_ip": (
+            False,
+            (("active", False), ("ip", False), ("first_detected_at", False)),
+            None,
+        ),
+        "idx_incidents_active_reason": (
+            True,
+            (("ip", False), ("incident_type", False), ("reason_key", False)),
+            "active=1",
+        ),
+    },
+}
+_REQUIRED_SCHEMA_CHECKS = {
+    "detector_streaks": (
+        "check(anomaly_count>=0)",
+        "check(recovery_count>=0)",
+        "check(activein(0,1))",
+    ),
+    "device_states": ("check(is_normalin(0,1))",),
+    "incidents": (
+        "check(activein(0,1))",
+        "check(acknowledgedin(0,1))",
+    ),
+    "connection_changes": ("check(acknowledgedin(0,1))",),
+}
+_LEGACY_BASE_TABLES = (
+    "preferences",
+    "connection_baselines",
+    "detector_streaks",
+    "device_states",
+    "mm_discovered_devices",
+    "incidents",
+    "events",
+    "failover_collections",
+)
+_SQLITE_MAX_INTEGER = (1 << 63) - 1
+_REQUIRED_INTEGER_RANGES = {
+    "detector_streaks": {
+        "anomaly_count": (0, _SQLITE_MAX_INTEGER),
+        "recovery_count": (0, _SQLITE_MAX_INTEGER),
+        "active": (0, 1),
+    },
+    "device_states": {"is_normal": (0, 1)},
+    # These counters predate the v4 CHECK contract. Keep existing databases
+    # compatible while enforcing their declared type and values at every
+    # startup and read boundary.
+    "mm_discovered_devices": {
+        "missing_streak": (0, _SQLITE_MAX_INTEGER),
+        "recovery_streak": (0, _SQLITE_MAX_INTEGER),
+    },
+    "incidents": {"active": (0, 1), "acknowledged": (0, 1)},
+    "connection_changes": {"acknowledged": (0, 1)},
+}
 
 
 class StorageError(RuntimeError):
@@ -124,6 +337,7 @@ class SQLiteStorage:
                 # read-preserving startup error and must not be switched from
                 # DELETE to WAL merely by probing it with an older build.
                 self._migrate()
+                self._validate_schema()
                 connection.execute("PRAGMA journal_mode=WAL")
                 connection.execute("PRAGMA synchronous=NORMAL")
                 # Force SQLite to inspect pages now so a corrupt file is not
@@ -146,8 +360,12 @@ class SQLiteStorage:
                 ) from exc
             except sqlite3.DatabaseError as exc:
                 self._discard_initializing_connection(connection)
+                if _is_locked(exc):
+                    raise StorageBusyError(
+                        "로컬 상태 저장소가 사용 중입니다. 잠시 후 다시 시도하세요."
+                    ) from exc
                 raise StorageCorruptError(
-                    f"로컬 상태 저장소를 열 수 없습니다. 원본을 보존한 채 확인하세요: {self.path}"
+                    "로컬 상태 저장소를 열 수 없습니다. 원본을 보존한 채 확인하세요."
                 ) from exc
 
     def _discard_initializing_connection(
@@ -174,6 +392,22 @@ class SQLiteStorage:
                 "현재 프로그램보다 새로운 데이터베이스 버전입니다: "
                 f"{version}. 더 최신 버전의 프로그램으로 실행하세요."
             )
+        if version == 0:
+            # A genuine first run has no user-defined SQLite objects. Never
+            # run committed migration scripts over a partially initialized,
+            # damaged, or unrelated unversioned database.
+            existing_object = connection.execute(
+                """SELECT 1 FROM sqlite_schema
+                   WHERE name NOT GLOB 'sqlite_*'
+                   LIMIT 1"""
+            ).fetchone()
+            if existing_object is not None:
+                raise sqlite3.DatabaseError("unversioned local database is not empty")
+        if 0 < version < SCHEMA_VERSION:
+            # Migration scripts commit by design. Validate the legacy schema
+            # first so malformed data is never partly transformed before the
+            # final current-schema validation rejects it.
+            self._validate_legacy_schema(version)
         if version < 1:
             script = """
                 BEGIN IMMEDIATE;
@@ -340,6 +574,47 @@ class SQLiteStorage:
                 """
             )
 
+    def _validate_legacy_schema(self, version: int) -> None:
+        """Fail before a committed migration can mutate malformed legacy data."""
+
+        connection = self._require_connection()
+        tables = list(_LEGACY_BASE_TABLES)
+        if version >= 2:
+            tables.append("connection_changes")
+        if version >= 3:
+            tables.append("device_normal_states")
+        for table in tables:
+            primary_key = (
+                ("source_controller_ip", "member_ip")
+                if table == "connection_baselines"
+                else _REQUIRED_SCHEMA_PRIMARY_KEYS[table]
+            )
+            _validate_table_contract(connection, table, primary_key)
+
+        legacy_indexes = {
+            "events": _REQUIRED_SCHEMA_INDEXES["events"],
+            "incidents": _REQUIRED_SCHEMA_INDEXES["incidents"],
+        }
+        if version >= 2:
+            legacy_indexes["connection_changes"] = {
+                "idx_connection_changes_pending": _REQUIRED_SCHEMA_INDEXES[
+                    "connection_changes"
+                ]["idx_connection_changes_pending"]
+            }
+        _validate_index_contracts(connection, legacy_indexes)
+
+    def _validate_schema(self) -> None:
+        """Reject an incomplete or weakened v4 schema before runtime reads."""
+
+        connection = self._require_connection()
+        for table in _REQUIRED_SCHEMA_COLUMNS:
+            _validate_table_contract(
+                connection,
+                table,
+                _REQUIRED_SCHEMA_PRIMARY_KEYS[table],
+            )
+        _validate_index_contracts(connection, _REQUIRED_SCHEMA_INDEXES)
+
     def close(self) -> None:
         with self._lock:
             if self._connection is not None:
@@ -379,6 +654,7 @@ class SQLiteStorage:
         return int(self._read(lambda db: db.execute("PRAGMA user_version").fetchone()[0]))
 
     def set_preference(self, key: str, value: object, *, updated_at: datetime | str | None = None) -> None:
+        _reject_secret_preference_key(key)
         payload = _json_dump(value)
         timestamp = _timestamp(updated_at)
         self._write(
@@ -397,7 +673,10 @@ class SQLiteStorage:
     ) -> None:
         """Persist a complete preference mirror in one bounded transaction."""
 
-        encoded = {str(key): _json_dump(value) for key, value in values.items()}
+        encoded: dict[str, str] = {}
+        for key, value in values.items():
+            _reject_secret_preference_key(key)
+            encoded[str(key)] = _json_dump(value)
         timestamp = _timestamp(updated_at)
 
         def operation(db: sqlite3.Connection) -> None:
@@ -413,7 +692,7 @@ class SQLiteStorage:
 
     def get_preference(self, key: str, default: _T | None = None) -> Any | _T | None:
         row = self._read(lambda db: db.execute("SELECT value_json FROM preferences WHERE key=?", (str(key),)).fetchone())
-        return default if row is None else json.loads(row[0])
+        return default if row is None else _json_load(row[0])
 
     def get_preferences(self, keys: Iterable[str] | None = None) -> dict[str, Any]:
         """Load a preference set with one SQLite read instead of N key reads."""
@@ -432,7 +711,7 @@ class SQLiteStorage:
             ).fetchall()
 
         rows = self._read(operation)
-        return {str(row["key"]): json.loads(row["value_json"]) for row in rows}
+        return {str(row["key"]): _json_load(row["value_json"]) for row in rows}
 
     # Compatibility aliases for UI/runtime consumers.
     set_setting = set_preference
@@ -493,7 +772,7 @@ class SQLiteStorage:
                 member_ip=stored.member_ip,
                 display_value=stored.connection_type,
                 normalized_value=stored.normalized_connection_type,
-                observed_at=_parse_timestamp(stored.observed_at),
+                observed_at=_parse_stored_timestamp(stored.observed_at),
             )
             for stored in self.load_connection_baselines()
         ]
@@ -511,7 +790,7 @@ class SQLiteStorage:
             member_ip=stored.member_ip,
             display_value=stored.connection_type,
             normalized_value=stored.normalized_connection_type,
-            observed_at=_parse_timestamp(stored.observed_at),
+            observed_at=_parse_stored_timestamp(stored.observed_at),
         )
 
     def set(self, baseline: object) -> None:
@@ -857,12 +1136,14 @@ class SQLiteStorage:
     def load_pending_connection_changes(self):
         from .models import ConnectionChange
 
-        rows = self._read(
-            lambda db: db.execute(
+        def operation(db: sqlite3.Connection) -> list[sqlite3.Row]:
+            _raise_if_invalid_integer_rows(db, "connection_changes")
+            return db.execute(
                 "SELECT * FROM connection_changes WHERE acknowledged=0 "
                 "ORDER BY member_ip, first_detected_at DESC, last_confirmed_at DESC, rowid DESC"
             ).fetchall()
-        )
+
+        rows = self._read(operation)
         newest_by_member: dict[str, sqlite3.Row] = {}
         for row in rows:
             newest_by_member.setdefault(str(row["member_ip"]), row)
@@ -876,8 +1157,8 @@ class SQLiteStorage:
                 member_ip=row["member_ip"],
                 previous_value=row["previous_value"],
                 current_value=row["current_value"],
-                first_detected_at=_parse_timestamp(row["first_detected_at"]),
-                last_confirmed_at=_parse_timestamp(row["last_confirmed_at"]),
+                first_detected_at=_parse_stored_timestamp(row["first_detected_at"]),
+                last_confirmed_at=_parse_stored_timestamp(row["last_confirmed_at"]),
                 durable_event_token=row["event_token"],
             )
             for row in newest_rows
@@ -893,8 +1174,10 @@ class SQLiteStorage:
         *,
         updated_at: datetime | str | None = None,
     ) -> None:
-        if anomaly_count < 0 or recovery_count < 0:
-            raise ValueError("streak counts cannot be negative")
+        anomaly_count = _input_nonnegative_integer(anomaly_count)
+        recovery_count = _input_nonnegative_integer(recovery_count)
+        if type(active) is not bool:
+            raise ValueError("active must be a boolean")
         self._write(
             lambda db: db.execute(
                 """INSERT INTO detector_streaks
@@ -918,6 +1201,7 @@ class SQLiteStorage:
         if row is None:
             return None
         data = dict(row)
+        _validate_stored_integer_record(data, "detector_streaks")
         data["active"] = bool(data["active"])
         return DetectorStreak(**data)
 
@@ -931,6 +1215,7 @@ class SQLiteStorage:
         result: list[DetectorStreak] = []
         for row in rows:
             data = dict(row)
+            _validate_stored_integer_record(data, "detector_streaks")
             data["active"] = bool(data["active"])
             result.append(DetectorStreak(**data))
         return result
@@ -972,14 +1257,71 @@ class SQLiteStorage:
             else "SELECT * FROM device_states"
         )
         rows = self._read(lambda db: db.execute(query).fetchall())
-        return {
-            row["ip"]: {
-                "payload": json.loads(row["payload_json"]),
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if not normal_only:
+                _validate_stored_integer_record(row, "device_states")
+            result[row["ip"]] = {
+                "payload": _json_load(row["payload_json"], require_mapping=True),
                 "observed_at": row["observed_at"],
                 "is_normal": bool(row["is_normal"]),
             }
-            for row in rows
-        }
+        return result
+
+    def load_runtime_inventory(
+        self,
+        protected_ips: Iterable[str] | None,
+    ) -> tuple[set[str], dict[str, dict[str, Any]], list[dict[str, Any]]]:
+        """Atomically bound and load startup device/MM inventory.
+
+        ``None`` means settings are incomplete, so cleanup is skipped and the
+        recoverable inventory is only read. With an authoritative configured
+        scope, stale rows are selected and removed before either bulk result is
+        materialized. JSON/integer validation remains inside the same write
+        transaction, so any failure rolls the cleanup and retention marker back.
+        """
+
+        normalized = (
+            None
+            if protected_ips is None
+            else tuple(
+                dict.fromkeys(
+                    str(ip).strip() for ip in protected_ips if str(ip).strip()
+                )
+            )
+        )
+
+        def operation(
+            db: sqlite3.Connection,
+        ) -> tuple[set[str], dict[str, dict[str, Any]], list[dict[str, Any]]]:
+            removed = (
+                set()
+                if normalized is None
+                else self._cleanup_device_inventory_if_due(
+                    db,
+                    protected_ips=normalized,
+                )
+            )
+
+            device_rows = db.execute("SELECT * FROM device_states").fetchall()
+            devices: dict[str, dict[str, Any]] = {}
+            for row in device_rows:
+                _validate_stored_integer_record(row, "device_states")
+                devices[str(row["ip"])] = {
+                    "payload": _json_load(row["payload_json"], require_mapping=True),
+                    "observed_at": row["observed_at"],
+                    "is_normal": bool(row["is_normal"]),
+                }
+
+            mm_rows = db.execute(
+                "SELECT * FROM mm_discovered_devices ORDER BY ip"
+            ).fetchall()
+            discovered = [dict(row) for row in mm_rows]
+            for row in discovered:
+                _validate_stored_integer_record(row, "mm_discovered_devices")
+            return removed, devices, discovered
+
+        return self._write(operation)
 
     def save_mm_discovered_device(
         self,
@@ -991,6 +1333,8 @@ class SQLiteStorage:
         missing_streak: int = 0,
         recovery_streak: int = 0,
     ) -> None:
+        missing_streak = _input_nonnegative_integer(missing_streak)
+        recovery_streak = _input_nonnegative_integer(recovery_streak)
         self._write(
             lambda db: db.execute(
                 """INSERT INTO mm_discovered_devices
@@ -1005,7 +1349,10 @@ class SQLiteStorage:
 
     def load_mm_discovered_devices(self) -> list[dict[str, Any]]:
         rows = self._read(lambda db: db.execute("SELECT * FROM mm_discovered_devices ORDER BY ip").fetchall())
-        return [dict(row) for row in rows]
+        result = [dict(row) for row in rows]
+        for row in result:
+            _validate_stored_integer_record(row, "mm_discovered_devices")
+        return result
 
     def save_poll_runtime_state(
         self,
@@ -1029,10 +1376,8 @@ class SQLiteStorage:
             detector, separator, member_ip = str(key).partition("|")
             if not separator:
                 continue
-            anomaly_count = int(counter["anomaly_streak"])
-            recovery_count = int(counter["recovery_streak"])
-            if anomaly_count < 0 or recovery_count < 0:
-                raise ValueError("streak counts cannot be negative")
+            anomaly_count = _input_nonnegative_integer(counter["anomaly_streak"])
+            recovery_count = _input_nonnegative_integer(counter["recovery_streak"])
             streak_rows.append(
                 (
                     detector,
@@ -1178,11 +1523,13 @@ class SQLiteStorage:
         ).fetchone()
         if row is not None and not force:
             try:
-                last_run = _parse_timestamp(str(json.loads(row["value_json"])))
-            except (json.JSONDecodeError, TypeError, ValueError):
+                last_run = _parse_timestamp(str(_json_load(row["value_json"])))
+            except (StorageCorruptError, TypeError, ValueError):
                 last_run = None
-            if last_run is not None and maintenance_at - last_run < HISTORY_MAINTENANCE_INTERVAL:
-                return set()
+            if last_run is not None:
+                elapsed = maintenance_at - last_run
+                if timedelta(0) <= elapsed < HISTORY_MAINTENANCE_INTERVAL:
+                    return set()
 
         db.execute(
             "CREATE TEMP TABLE IF NOT EXISTS inventory_retention_protected "
@@ -1318,19 +1665,46 @@ class SQLiteStorage:
         return bool(cursor.rowcount)
 
     def list_incidents(self, *, active_only: bool = False, limit: int = 500) -> list[StoredIncident]:
+        return self._list_incidents(
+            active_only=active_only,
+            limit=limit,
+            enforce_active_restore_cap=False,
+        )
+
+    def _list_incidents(
+        self,
+        *,
+        active_only: bool,
+        limit: int,
+        enforce_active_restore_cap: bool,
+    ) -> list[StoredIncident]:
         bounded_limit = max(1, min(int(limit), 10_000))
         condition = "WHERE active=1" if active_only else ""
-        rows = self._read(
-            lambda db: db.execute(
+        def operation(db: sqlite3.Connection) -> list[sqlite3.Row]:
+            _raise_if_invalid_integer_rows(db, "incidents")
+            if enforce_active_restore_cap:
+                active_count = int(
+                    db.execute(
+                        "SELECT COUNT(*) FROM incidents WHERE active=1"
+                    ).fetchone()[0]
+                )
+                if active_count > HISTORY_RETENTION_MAX_ROWS:
+                    raise StorageCorruptError(
+                        "활성 장애 상태가 안전한 복원 한도를 초과했습니다. "
+                        "원본 데이터베이스를 보존한 채 확인하세요."
+                    )
+            return db.execute(
                 f"SELECT * FROM incidents {condition} ORDER BY first_detected_at DESC LIMIT ?", (bounded_limit,)
             ).fetchall()
-        )
+
+        rows = self._read(operation)
         result: list[StoredIncident] = []
         for row in rows:
             data = dict(row)
+            _validate_stored_integer_record(data, "incidents")
             data["active"] = bool(data["active"])
             data["acknowledged"] = bool(data["acknowledged"])
-            data["payload"] = json.loads(data.pop("payload_json"))
+            data["payload"] = _json_load(data.pop("payload_json"), require_mapping=True)
             result.append(StoredIncident(**data))
         return result
 
@@ -1368,26 +1742,43 @@ class SQLiteStorage:
         from .models import Incident, IncidentType, Severity
 
         result = []
-        for stored in self.list_incidents(active_only=active_only, limit=limit):
+        for stored in self._list_incidents(
+            active_only=active_only,
+            limit=limit,
+            enforce_active_restore_cap=active_only,
+        ):
             payload = stored.payload
-            result.append(
-                Incident(
-                    incident_id=stored.incident_id,
-                    incident_type=IncidentType(stored.incident_type),
-                    severity=Severity(str(payload.get("severity", "unknown"))),
-                    reason=str(payload.get("reason", stored.reason_key)),
-                    first_detected_at=_parse_timestamp(stored.first_detected_at),
-                    last_seen_at=_parse_timestamp(stored.last_seen_at),
-                    ip=stored.ip or None,
-                    alias=payload.get("alias"),
-                    active=stored.active,
-                    acknowledged_at=_optional_parse_timestamp(payload.get("acknowledged_at")),
-                    recovered_at=_optional_parse_timestamp(payload.get("recovered_at") or stored.resolved_at),
-                    last_notified_at=_optional_parse_timestamp(payload.get("last_notified_at")),
-                    event_token=str(payload.get("event_token", "")),
-                    details=dict(payload.get("details", {})),
+            try:
+                result.append(
+                    Incident(
+                        incident_id=stored.incident_id,
+                        incident_type=IncidentType(stored.incident_type),
+                        severity=Severity(str(payload.get("severity", "unknown"))),
+                        reason=str(payload.get("reason", stored.reason_key)),
+                        first_detected_at=_parse_stored_timestamp(stored.first_detected_at),
+                        last_seen_at=_parse_stored_timestamp(stored.last_seen_at),
+                        ip=stored.ip or None,
+                        alias=payload.get("alias"),
+                        active=stored.active,
+                        acknowledged_at=_optional_parse_stored_timestamp(
+                            payload.get("acknowledged_at")
+                        ),
+                        recovered_at=_optional_parse_stored_timestamp(
+                            payload.get("recovered_at") or stored.resolved_at
+                        ),
+                        last_notified_at=_optional_parse_stored_timestamp(
+                            payload.get("last_notified_at")
+                        ),
+                        event_token=str(payload.get("event_token", "")),
+                        details=dict(payload.get("details", {})),
+                    )
                 )
-            )
+            except StorageCorruptError:
+                raise
+            except (KeyError, TypeError, ValueError):
+                raise StorageCorruptError(
+                    "저장된 장애 이력 형식이 손상되었습니다."
+                ) from None
         return result
 
     def append_event(
@@ -1415,7 +1806,7 @@ class SQLiteStorage:
         result: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)
-            item["payload"] = json.loads(item.pop("payload_json"))
+            item["payload"] = _json_load(item.pop("payload_json"), require_mapping=True)
             result.append(item)
         return result
 
@@ -1474,16 +1865,18 @@ class SQLiteStorage:
         ).fetchone()
         if row is not None and not force:
             try:
-                last_run = _parse_timestamp(str(json.loads(row["value_json"])))
-            except (json.JSONDecodeError, TypeError, ValueError):
+                last_run = _parse_timestamp(str(_json_load(row["value_json"])))
+            except (StorageCorruptError, TypeError, ValueError):
                 last_run = None
-            if last_run is not None and maintenance_at - last_run < HISTORY_MAINTENANCE_INTERVAL:
-                return {
-                    "incidents": 0,
-                    "events": 0,
-                    "failovers": 0,
-                    "connection_changes": 0,
-                }
+            if last_run is not None:
+                elapsed = maintenance_at - last_run
+                if timedelta(0) <= elapsed < HISTORY_MAINTENANCE_INTERVAL:
+                    return {
+                        "incidents": 0,
+                        "events": 0,
+                        "failovers": 0,
+                        "connection_changes": 0,
+                    }
 
         cutoff = maintenance_at - timedelta(days=max_age_days)
         cutoff_text = _timestamp(cutoff)
@@ -1626,7 +2019,14 @@ def _timestamp(value: datetime | str | None) -> str:
     candidate = str(value).strip()
     if not candidate:
         raise ValueError("timestamp cannot be empty")
-    return candidate
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        raise ValueError("timestamp must use ISO 8601 format") from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    parsed = parsed.astimezone(timezone.utc)
+    return parsed.isoformat(timespec="microseconds" if parsed.microsecond else "seconds")
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -1636,22 +2036,116 @@ def _parse_timestamp(value: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _parse_stored_timestamp(value: object) -> datetime:
+    try:
+        if type(value) is not str:
+            raise TypeError("stored timestamp must be text")
+        return _parse_timestamp(value)
+    except (TypeError, ValueError):
+        raise StorageCorruptError("저장된 시간 정보 형식이 손상되었습니다.") from None
+
+
 def _optional_timestamp(value: datetime | str | None) -> str | None:
     return None if value is None else _timestamp(value)
 
 
-def _optional_parse_timestamp(value: object) -> datetime | None:
-    return None if value in (None, "") else _parse_timestamp(str(value))
+def _optional_parse_stored_timestamp(value: object) -> datetime | None:
+    return None if value in (None, "") else _parse_stored_timestamp(value)
 
 
 def _normalize_type(value: str) -> str:
     return " ".join(str(value).strip().casefold().replace("-", " ").split())
 
 
+def _validate_json_shape(value: object) -> None:
+    stack: list[tuple[object, int]] = [(value, 0)]
+    nodes = 0
+    while stack:
+        candidate, depth = stack.pop()
+        nodes += 1
+        if nodes > MAX_STORAGE_JSON_NODES or depth > MAX_STORAGE_JSON_DEPTH:
+            raise ValueError("JSON structure exceeds the safe limit")
+        if isinstance(candidate, Mapping):
+            if len(candidate) > MAX_STORAGE_JSON_NODES:
+                raise ValueError("JSON object exceeds the safe limit")
+            for key, nested in candidate.items():
+                if type(key) is not str:
+                    raise ValueError("JSON object keys must be text")
+                stack.append((nested, depth + 1))
+        elif isinstance(candidate, list):
+            if len(candidate) > MAX_STORAGE_JSON_NODES:
+                raise ValueError("JSON array exceeds the safe limit")
+            stack.extend((nested, depth + 1) for nested in candidate)
+        elif type(candidate) is float:
+            if not math.isfinite(candidate):
+                raise ValueError("JSON number must be finite")
+        elif candidate is None or type(candidate) in {bool, int}:
+            continue
+        elif type(candidate) is str:
+            if len(candidate) > MAX_STORAGE_JSON_BYTES:
+                raise ValueError("JSON text exceeds the safe limit")
+        else:
+            raise ValueError("unsupported JSON value")
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("non-finite JSON number")
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _json_load(value: object, *, require_mapping: bool = False) -> Any:
+    try:
+        if type(value) is str:
+            if len(value) > MAX_STORAGE_JSON_BYTES:
+                raise ValueError("stored JSON exceeds the safe limit")
+            encoded = value.encode("utf-8")
+        elif isinstance(value, (bytes, bytearray, memoryview)):
+            encoded = bytes(value)
+        else:
+            raise TypeError("stored JSON must be text or bytes")
+        if len(encoded) > MAX_STORAGE_JSON_BYTES:
+            raise ValueError("stored JSON exceeds the safe limit")
+        payload = json.loads(
+            encoded.decode("utf-8"),
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+        _validate_json_shape(payload)
+        if require_mapping and type(payload) is not dict:
+            raise TypeError("stored JSON payload must be an object")
+        return payload
+    except (TypeError, ValueError, UnicodeError, json.JSONDecodeError, RecursionError):
+        raise StorageCorruptError("저장된 로컬 상태 형식이 손상되었습니다.") from None
+
+
 def _json_dump(value: object) -> str:
-    safe = _json_safe(value)
+    try:
+        safe = _json_safe(value)
+        _validate_json_shape(safe)
+    except (RecursionError, ValueError):
+        raise ValueError("payload structure exceeds the safe persistence limit") from None
     _reject_secret_payload(safe)
-    return json.dumps(safe, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    try:
+        encoded = json.dumps(
+            safe,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, RecursionError):
+        raise ValueError("payload cannot be encoded safely") from None
+    if len(encoded) > MAX_STORAGE_JSON_BYTES or len(encoded.encode("utf-8")) > MAX_STORAGE_JSON_BYTES:
+        raise ValueError("payload exceeds the safe persistence size limit")
+    return encoded
 
 
 def _json_safe(value: object) -> object:
@@ -1663,23 +2157,236 @@ def _json_safe(value: object) -> object:
         return [_json_safe(nested) for nested in value]
     if isinstance(value, datetime):
         return _timestamp(value)
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or type(value) in {str, int, float, bool}:
         return value
     if hasattr(value, "value"):
         return _json_safe(getattr(value, "value"))
     return str(value)
 
 
-def _reject_secret_payload(value: object, path: str = "payload") -> None:
+def _reject_secret_payload(value: object) -> None:
     if isinstance(value, Mapping):
         for key, nested in value.items():
-            normalized = str(key).casefold().replace("-", "_")
-            if normalized in _SECRET_KEYS or normalized.endswith("_password"):
-                raise ValueError(f"secret-bearing field cannot be persisted: {path}.{key}")
-            _reject_secret_payload(nested, f"{path}.{key}")
+            tokens = _field_name_tokens(key)
+            if tokens not in _NON_SECRET_TOKEN_KEYS and _is_secret_field_name(key):
+                raise ValueError("secret-bearing field cannot be persisted")
+            _reject_secret_payload(nested)
     elif isinstance(value, (list, tuple)):
-        for index, nested in enumerate(value):
-            _reject_secret_payload(nested, f"{path}[{index}]")
+        for nested in value:
+            _reject_secret_payload(nested)
+
+
+def _reject_secret_preference_key(key: object) -> None:
+    tokens = _field_name_tokens(key)
+    if tokens not in _NON_SECRET_TOKEN_KEYS and _is_secret_field_name(key):
+        raise ValueError("secret-bearing preference key cannot be persisted")
+
+
+def _input_nonnegative_integer(value: object) -> int:
+    if type(value) is not int or not 0 <= value <= _SQLITE_MAX_INTEGER:
+        raise ValueError("counter must be a non-negative integer")
+    return value
+
+
+def _invalid_integer_where_clause(table: str) -> tuple[str, tuple[int, ...]]:
+    clauses: list[str] = []
+    parameters: list[int] = []
+    for column, (minimum, maximum) in _REQUIRED_INTEGER_RANGES[table].items():
+        clauses.append(
+            f'(typeof("{column}")<>\'integer\' OR "{column}"<? OR "{column}">?)'
+        )
+        parameters.extend((minimum, maximum))
+    return " OR ".join(clauses), tuple(parameters)
+
+
+def _has_invalid_integer_rows(connection: sqlite3.Connection, table: str) -> bool:
+    if table not in _REQUIRED_INTEGER_RANGES:
+        return False
+    clause, parameters = _invalid_integer_where_clause(table)
+    return (
+        connection.execute(
+            f'SELECT 1 FROM "{table}" WHERE {clause} LIMIT 1',
+            parameters,
+        ).fetchone()
+        is not None
+    )
+
+
+def _raise_if_invalid_integer_rows(connection: sqlite3.Connection, table: str) -> None:
+    if _has_invalid_integer_rows(connection, table):
+        raise StorageCorruptError("stored integer state is invalid")
+
+
+def _validate_stored_integer_record(record: object, table: str) -> None:
+    for column, (minimum, maximum) in _REQUIRED_INTEGER_RANGES[table].items():
+        try:
+            value = record[column]  # type: ignore[index]
+        except (IndexError, KeyError, TypeError):
+            raise StorageCorruptError("stored integer state is invalid") from None
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise StorageCorruptError("stored integer state is invalid")
+
+
+def _validate_table_contract(
+    connection: sqlite3.Connection,
+    table: str,
+    expected_primary_key: tuple[str, ...],
+) -> None:
+    object_row = connection.execute(
+        "SELECT type, sql FROM sqlite_schema WHERE name=?",
+        (table,),
+    ).fetchone()
+    if object_row is None or str(object_row["type"]).casefold() != "table":
+        raise sqlite3.DatabaseError("required local table is unavailable")
+    rows = connection.execute(f'PRAGMA table_info("{table}")').fetchall()
+    columns_by_name = {str(row["name"]): row for row in rows}
+    if set(columns_by_name) != _REQUIRED_SCHEMA_COLUMNS[table]:
+        raise sqlite3.DatabaseError("required local schema is unavailable")
+    actual_primary_key = tuple(
+        str(row["name"])
+        for row in sorted(rows, key=lambda candidate: int(candidate["pk"]))
+        if int(row["pk"]) > 0
+    )
+    if actual_primary_key != expected_primary_key:
+        raise sqlite3.DatabaseError("required local primary key is unavailable")
+    if any(
+        not bool(columns_by_name[column]["notnull"])
+        for column in _REQUIRED_SCHEMA_NOT_NULL[table]
+    ):
+        raise sqlite3.DatabaseError("required local null constraint is unavailable")
+    if any(
+        str(columns_by_name[column]["type"]).strip().casefold() != "integer"
+        for column in _REQUIRED_INTEGER_RANGES.get(table, {})
+    ):
+        raise sqlite3.DatabaseError("required local integer type is unavailable")
+    normalized_sql = _normalized_schema_sql(object_row["sql"])
+    if any(
+        required_check not in normalized_sql
+        for required_check in _REQUIRED_SCHEMA_CHECKS.get(table, ())
+    ):
+        raise sqlite3.DatabaseError("required local check constraint is unavailable")
+    if expected_primary_key:
+        null_clause = " OR ".join(f'"{column}" IS NULL' for column in expected_primary_key)
+        if connection.execute(
+            f'SELECT 1 FROM "{table}" WHERE {null_clause} LIMIT 1'
+        ).fetchone() is not None:
+            raise sqlite3.DatabaseError("stored primary key is invalid")
+    if _has_invalid_integer_rows(connection, table):
+        raise sqlite3.DatabaseError("stored integer value violates the local schema")
+
+
+def _validate_index_contracts(
+    connection: sqlite3.Connection,
+    contracts: Mapping[
+        str,
+        Mapping[str, tuple[bool, tuple[tuple[str, bool], ...], str | None]],
+    ],
+) -> None:
+    for table, required_indexes in contracts.items():
+        indexes_by_name = {
+            str(row["name"]): row
+            for row in connection.execute(f'PRAGMA index_list("{table}")').fetchall()
+        }
+        for index_name, (expected_unique, expected_columns, expected_predicate) in (
+            required_indexes.items()
+        ):
+            index_row = indexes_by_name.get(index_name)
+            expected_partial = expected_predicate is not None
+            if (
+                index_row is None
+                or str(index_row["origin"]).casefold() != "c"
+                or bool(index_row["unique"]) is not expected_unique
+                or bool(index_row["partial"]) is not expected_partial
+            ):
+                raise sqlite3.DatabaseError("required local index is unavailable")
+            actual_columns = tuple(
+                (str(row["name"]), bool(row["desc"]))
+                for row in connection.execute(f'PRAGMA index_xinfo("{index_name}")').fetchall()
+                if bool(row["key"])
+            )
+            if actual_columns != expected_columns:
+                raise sqlite3.DatabaseError("required local index columns are unavailable")
+            sql_row = connection.execute(
+                "SELECT sql FROM sqlite_schema WHERE type='index' AND name=? AND tbl_name=?",
+                (index_name, table),
+            ).fetchone()
+            actual_predicate = _normalized_index_predicate(
+                None if sql_row is None else sql_row["sql"]
+            )
+            if actual_predicate != expected_predicate:
+                raise sqlite3.DatabaseError("required local index predicate is unavailable")
+
+
+def _normalized_index_predicate(sql: object) -> str | None:
+    """Return a strict canonical WHERE clause for a named application index."""
+
+    if type(sql) is not str:
+        return None
+    match = re.search(r"\bwhere\b(?P<predicate>.+?)\s*;?\s*$", sql, re.IGNORECASE | re.DOTALL)
+    if match is None:
+        return None
+    predicate = re.sub(r"\s+", "", match.group("predicate").casefold())
+    predicate = predicate.translate(str.maketrans("", "", '"`[]'))
+    while _has_outer_parentheses(predicate):
+        predicate = predicate[1:-1]
+    return predicate
+
+
+def _normalized_schema_sql(sql: object) -> str:
+    if type(sql) is not str:
+        return ""
+    return re.sub(r"\s+", "", _strip_sql_comments_and_strings(sql).casefold()).translate(
+        str.maketrans("", "", '"`[]')
+    )
+
+
+def _strip_sql_comments_and_strings(sql: str) -> str:
+    """Remove places where CHECK-shaped text has no executable meaning."""
+
+    result: list[str] = []
+    index = 0
+    while index < len(sql):
+        if sql.startswith("--", index):
+            newline = sql.find("\n", index + 2)
+            index = len(sql) if newline < 0 else newline + 1
+            result.append(" ")
+            continue
+        if sql.startswith("/*", index):
+            end = sql.find("*/", index + 2)
+            index = len(sql) if end < 0 else end + 2
+            result.append(" ")
+            continue
+        if sql[index] == "'":
+            index += 1
+            while index < len(sql):
+                if sql[index] == "'":
+                    if index + 1 < len(sql) and sql[index + 1] == "'":
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+            result.append("''")
+            continue
+        result.append(sql[index])
+        index += 1
+    return "".join(result)
+
+
+def _has_outer_parentheses(value: str) -> bool:
+    if len(value) < 2 or not value.startswith("(") or not value.endswith(")"):
+        return False
+    depth = 0
+    for index, character in enumerate(value):
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0 and index != len(value) - 1:
+                return False
+            if depth < 0:
+                return False
+    return depth == 0
 
 
 def _is_locked(exc: BaseException) -> bool:

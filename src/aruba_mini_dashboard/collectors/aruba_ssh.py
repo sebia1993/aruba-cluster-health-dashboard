@@ -11,6 +11,12 @@ from time import monotonic, sleep
 from typing import Callable
 
 from ..credentials import DeviceCredential
+from ..errors import ERROR_MESSAGES
+from .cancellable_socket import (
+    SocketConnectCancelledError,
+    close_socket_quietly,
+    open_cancellable_ipv4_socket,
+)
 from .base import (
     NO_PAGING,
     PAGER_CONTINUE,
@@ -29,8 +35,10 @@ RETRY_BACKOFF_MAX_SECONDS = 2.0
 PAGING_MARKERS = ("--more--", "-- more --", "press any key", "press <space>", "<--- more --->")
 COMMAND_REJECTION_MARKERS = (
     "unknown command",
+    "invalid command",
     "invalid input",
     "incomplete command",
+    "ambiguous command",
     "permission denied",
     "not authorized",
     "authorization failed",
@@ -112,19 +120,25 @@ class ArubaSshAdapter:
         connection_factory: Callable[..., object] | None = None,
         cancel_event: threading.Event | None = None,
         logger: logging.Logger | None = None,
+        on_close: Callable[["ArubaSshAdapter"], None] | None = None,
     ) -> None:
         self.options = options
         self._credential = credential
         self._connection_factory = connection_factory
         self._cancel_event = cancel_event
         self._logger = logger or logging.getLogger(__name__)
+        self._on_close = on_close
+        self._state_lock = threading.RLock()
         self._connection: object | None = None
+        self._raw_socket: socket.socket | None = None
+        self._aborted = False
         self._paging_disabled = False
 
     def connect(self) -> None:
         self._check_cancelled()
-        if self._connection is not None:
-            return
+        with self._state_lock:
+            if self._connection is not None:
+                return
         if self.options.enable_required and not self._credential.enable_secret:
             raise SshOperationError(
                 "ENABLE_SECRET_MISSING",
@@ -137,7 +151,10 @@ class ArubaSshAdapter:
             known_hosts.parent.mkdir(parents=True, exist_ok=True)
             # Netmiko/Paramiko requires a real path for alt_host_keys. Empty
             # means no host is trusted and ssh_strict fails before login.
-            known_hosts.touch(exist_ok=True)
+            if not known_hosts.exists():
+                known_hosts.touch(exist_ok=True)
+            if not known_hosts.is_file():
+                raise OSError("known_hosts is not a regular file")
         except OSError as exc:
             raise SshOperationError(
                 "SSH_KNOWN_HOSTS_UNAVAILABLE",
@@ -166,6 +183,10 @@ class ArubaSshAdapter:
             "conn_timeout": self.options.connect_timeout_seconds,
             "auth_timeout": self.options.connect_timeout_seconds,
             "banner_timeout": self.options.connect_timeout_seconds,
+            # Paramiko Channel.recv/sendall use Netmiko's blocking timeout,
+            # independently from read_timeout_override.  Keep a single channel
+            # operation from outliving the operator's command timeout.
+            "blocking_timeout": self.options.command_timeout_seconds,
             "read_timeout_override": self.options.command_timeout_seconds,
             "fast_cli": False,
             "ssh_strict": True,
@@ -182,18 +203,51 @@ class ArubaSshAdapter:
             # sent.  Netmiko explicitly supports auto_connect=False.
             params["auto_connect"] = False
         try:
-            self._connection = factory(**params)
             if deferred_netmiko_session:
-                self._open_netmiko_session(self._connection)
+                params["sock"] = open_cancellable_ipv4_socket(
+                    self.options.host,
+                    self.options.port,
+                    self.options.connect_timeout_seconds,
+                    self._cancel_event,
+                    register_socket=self._register_raw_socket,
+                )
+            connection = factory(**params)
+            with self._state_lock:
+                self._connection = connection
+            if deferred_netmiko_session:
+                self._open_netmiko_session(connection)
             self._check_cancelled()
             if self.options.enable_required and not deferred_netmiko_session:
-                self._connection.enable()
+                connection.enable()
             self._disable_paging()
-        except SshOperationError:
+            self._check_cancelled()
+        except SshOperationError as exc:
             self.close()
+            if self._is_cancelled() and exc.code != "CANCELLED":
+                raise SshOperationError(
+                    "CANCELLED",
+                    "점검이 취소되었습니다.",
+                    retryable=False,
+                    operation="cancel",
+                ) from None
             raise
+        except SocketConnectCancelledError:
+            self.close()
+            raise SshOperationError(
+                "CANCELLED",
+                "점검이 취소되었습니다.",
+                retryable=False,
+                operation="cancel",
+            ) from None
         except Exception as exc:
             self.close()
+            if self._is_cancelled():
+                raise SshOperationError(
+                    "CANCELLED",
+                    "점검이 취소되었습니다.",
+                    retryable=False,
+                    operation="cancel",
+                ) from None
             raise classify_ssh_exception(exc, operation="connect") from exc
 
     def _open_netmiko_session(self, connection: object) -> None:
@@ -274,7 +328,23 @@ class ArubaSshAdapter:
                 )
             self._paging_disabled = True
         except SshOperationError as exc:
-            if exc.code == "CANCELLED":
+            if self._is_cancelled():
+                if exc.code == "CANCELLED":
+                    raise
+                raise SshOperationError(
+                    "CANCELLED",
+                    "점검이 취소되었습니다.",
+                    retryable=False,
+                    operation="cancel",
+                ) from None
+            if (
+                _is_netmiko_connection(connection)
+                and _stored_attribute(connection, "remote_conn_pre") is None
+            ):
+                # The bounded Netmiko path aborts the raw transport before
+                # raising on timeouts, size limits, and incompatible runtime
+                # APIs.  Pager fallback is valid only while that authenticated
+                # transport is still alive.
                 raise
             # Older Aruba releases and restricted read-only roles may reject
             # ``no paging``. Continue with the bounded marker/Space loop.
@@ -284,6 +354,7 @@ class ArubaSshAdapter:
                 type(exc).__name__,
             )
         except Exception as exc:
+            self._check_cancelled()
             # Older Aruba releases and restricted read-only roles may reject
             # ``no paging``.  Continue with an explicitly bounded marker/Space
             # loop; never treat the failure as device health evidence.
@@ -311,6 +382,13 @@ class ArubaSshAdapter:
                 output = self._run_bounded_pager_command(connection, command)
             self._check_cancelled()
             validate_bounded_output(output)
+            if command_was_rejected(output):
+                raise SshOperationError(
+                    "COMMAND_REJECTED",
+                    "장비가 명령 실행을 거부했습니다. 장비 권한과 지원 명령을 확인하세요.",
+                    retryable=False,
+                    operation="command",
+                )
             if contains_paging_marker(output):
                 raise SshOperationError(
                     "PAGING_INCOMPLETE",
@@ -320,9 +398,23 @@ class ArubaSshAdapter:
                 )
             self._logger.debug("Read-only SSH command completed in %.3fs", monotonic() - started)
             return output
-        except SshOperationError:
+        except SshOperationError as exc:
+            if self._is_cancelled() and exc.code != "CANCELLED":
+                raise SshOperationError(
+                    "CANCELLED",
+                    "점검이 취소되었습니다.",
+                    retryable=False,
+                    operation="cancel",
+                ) from None
             raise
         except Exception as exc:
+            if self._is_cancelled():
+                raise SshOperationError(
+                    "CANCELLED",
+                    "점검이 취소되었습니다.",
+                    retryable=False,
+                    operation="cancel",
+                ) from None
             raise classify_ssh_exception(exc, operation="command") from exc
 
     def _run_bounded_netmiko_prompt(self, connection: object, command: str) -> str:
@@ -497,47 +589,106 @@ class ArubaSshAdapter:
         return validate_bounded_output(output, allow_empty=(command == PAGER_CONTINUE))
 
     def close(self) -> None:
-        connection, self._connection = self._connection, None
-        self._paging_disabled = False
-        if connection is not None:
-            try:
-                if _is_netmiko_connection(connection):
-                    # Netmiko's generic disconnect path writes ``exit``.  The
-                    # application command boundary intentionally permits only
-                    # the three show commands plus session ``no paging`` and
-                    # pager Space, so close the authenticated transport without
-                    # sending another CLI command.
-                    transport_client = getattr(connection, "remote_conn_pre", None)
-                    if transport_client is None or not callable(getattr(transport_client, "close", None)):
-                        raise RuntimeError("Netmiko raw transport close is unavailable")
-                    transport_client.close()
-                else:
-                    connection.disconnect()
-            except Exception:
-                self._logger.debug("SSH disconnect failed", exc_info=True)
+        with self._state_lock:
+            connection, self._connection = self._connection, None
+            raw_socket, self._raw_socket = self._raw_socket, None
+            self._paging_disabled = False
+            callback, self._on_close = self._on_close, None
+        try:
+            if connection is not None:
+                try:
+                    if _is_netmiko_connection(connection):
+                        # Netmiko's generic disconnect path writes ``exit``.  The
+                        # application command boundary intentionally permits only
+                        # the three show commands plus session ``no paging`` and
+                        # pager Space, so close the authenticated transport without
+                        # sending another CLI command.
+                        if not self._close_netmiko_transport(connection):
+                            raise RuntimeError("Netmiko raw transport close is unavailable")
+                    else:
+                        connection.disconnect()
+                except Exception:
+                    self._logger.debug("SSH disconnect failed", exc_info=True)
+        finally:
+            close_socket_quietly(raw_socket)
+            if callback is not None:
+                try:
+                    callback(self)
+                except Exception:
+                    self._logger.debug("SSH adapter close callback failed", exc_info=True)
+
+    def abort(self) -> None:
+        """Interrupt an active transport without sending another CLI command.
+
+        This method is intentionally safe to call from a shutdown helper thread
+        while ``connect`` or ``run_read_only`` is blocked.  The worker retains
+        ownership of the adapter and performs the final ``close``/unregister in
+        its existing ``finally`` block.
+        """
+
+        with self._state_lock:
+            self._aborted = True
+            raw_socket, self._raw_socket = self._raw_socket, None
+        close_socket_quietly(raw_socket)
+
+    def _register_raw_socket(self, raw_socket: socket.socket) -> None:
+        with self._state_lock:
+            if self._aborted or (
+                self._cancel_event is not None and self._cancel_event.is_set()
+            ):
+                raise SocketConnectCancelledError("TCP connection was cancelled")
+            self._raw_socket = raw_socket
 
     def _abort_netmiko_transport(self, connection: object) -> None:
+        self._close_netmiko_transport(connection)
+
+    def _close_netmiko_transport(self, connection: object) -> bool:
         attributes = _stored_attributes(connection)
-        transport_client = None if attributes is None else attributes.get("remote_conn_pre")
-        if transport_client is not None and callable(getattr(transport_client, "close", None)):
+        if attributes is None:
+            return False
+        closed = False
+        # SSHClient.close normally tears down its Channel as well.  If a
+        # partially initialized or failing client cannot close, fall back to
+        # the raw channel without invoking Netmiko.disconnect() (which sends
+        # an out-of-allowlist ``exit`` command).
+        for attribute_name in ("remote_conn_pre", "remote_conn"):
+            transport = attributes.get(attribute_name)
+            closer = getattr(transport, "close", None)
+            if not callable(closer):
+                continue
             try:
-                transport_client.close()
+                closer()
+                closed = True
+                break
             except Exception:
-                self._logger.debug("SSH transport abort failed", exc_info=True)
-        if attributes is not None:
-            attributes["remote_conn"] = None
-            attributes["remote_conn_pre"] = None
+                self._logger.debug(
+                    "SSH transport close failed for %s",
+                    attribute_name,
+                    exc_info=True,
+                )
+        attributes["remote_conn"] = None
+        attributes["remote_conn_pre"] = None
+        return closed
 
     def _require_connection(self):
-        if self._connection is None:
+        with self._state_lock:
+            connection = self._connection
+        if connection is None:
             raise SshOperationError(
                 "SSH_NOT_CONNECTED", "SSH 연결이 설정되지 않았습니다.", retryable=True, operation="command"
             )
-        return self._connection
+        return connection
 
     def _check_cancelled(self) -> None:
-        if self._cancel_event is not None and self._cancel_event.is_set():
+        if self._is_cancelled():
             raise SshOperationError("CANCELLED", "점검이 취소되었습니다.", retryable=False, operation="cancel")
+
+    def _is_cancelled(self) -> bool:
+        with self._state_lock:
+            aborted = self._aborted
+        return aborted or (
+            self._cancel_event is not None and self._cancel_event.is_set()
+        )
 
     def __enter__(self) -> "ArubaSshAdapter":
         self.connect()
@@ -685,6 +836,28 @@ def classify_ssh_exception(exc: BaseException, *, operation: str) -> SshOperatio
     if "not found in known_hosts" in message or "known_hosts" in message and "not found" in message:
         return SshOperationError(
             "SSH_HOST_KEY_UNKNOWN", "승인되지 않은 SSH 서버 키입니다. 설정에서 지문을 확인하세요.", retryable=False, operation=operation
+        )
+    if (
+        "incompatiblepeer" in class_name
+        or "incompatible ssh peer" in message
+        or "no acceptable" in message and "algorithm" in message
+    ):
+        return SshOperationError(
+            "SSH_ALGORITHM_INCOMPATIBLE",
+            ERROR_MESSAGES["SSH_ALGORITHM_INCOMPATIBLE"],
+            retryable=False,
+            operation=operation,
+        )
+    if operation == "connect" and (
+        "ssh protocol banner" in message
+        or "error reading ssh banner" in message
+        or "banner exchange" in message
+    ):
+        return SshOperationError(
+            "SSH_BANNER_MISSING",
+            ERROR_MESSAGES["SSH_BANNER_MISSING"],
+            retryable=True,
+            operation=operation,
         )
     if isinstance(exc, (TimeoutError, socket.timeout)) or "timeout" in class_name or "timed out" in message:
         code = "COMMAND_TIMEOUT" if operation == "command" else "TCP_TIMEOUT"

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import os
 import gc
+import json
+import os
 import weakref
 from datetime import datetime, timezone
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt, Signal
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QWidget
 
 from aruba_mini_dashboard.config import AppSettings, ClusterMemberSettings
@@ -379,6 +380,24 @@ def test_detail_tabs_are_lazy_singletons_and_release_large_references() -> None:
     assert dialog._parsed_results is None
 
 
+def test_detail_fallback_keeps_device_history_and_previous_snapshot_separate() -> None:
+    _app()
+    dialog = DetailDialog(
+        {
+            "ip": "192.0.2.11",
+            "previous_values": {"connection_type": "standby"},
+        },
+        previous_device={"ip": "192.0.2.11", "connection_type": "standby"},
+    )
+
+    dialog.tabs.setCurrentIndex(1)
+    rendered = json.loads(dialog._parsed_editor.toPlainText())
+
+    assert rendered["previous_values"] == {"connection_type": "standby"}
+    assert rendered["previous_device"]["connection_type"] == "standby"
+    dialog.close()
+
+
 def test_main_window_reuses_one_detail_window_per_ip() -> None:
     app = _app()
     window = MainWindow(Coordinator(), AppSettings.default())
@@ -392,6 +411,68 @@ def test_main_window_reuses_one_detail_window_per_ip() -> None:
     assert window._detail_windows["192.0.2.11"] is first
     assert len(window._detail_windows) == 1
     first.close()
+    app.processEvents()
+    window._quitting = True
+    window.close()
+
+
+def test_stale_detail_destroy_callback_cannot_untrack_reopened_device() -> None:
+    app = _app()
+    settings = AppSettings.default()
+    settings.cluster.members = [
+        ClusterMemberSettings("192.0.2.11", "WLC-01"),
+        ClusterMemberSettings("192.0.2.12", "WLC-02"),
+    ]
+    now = datetime.now(timezone.utc)
+    snapshot = OverallHealth(
+        checked_at=now,
+        severity=Severity.NORMAL,
+        devices=[
+            DeviceHealth(ip="192.0.2.11", severity=Severity.NORMAL, last_seen=now),
+            DeviceHealth(ip="192.0.2.12", severity=Severity.NORMAL, last_seen=now),
+        ],
+    )
+    window = MainWindow(Coordinator(), settings)
+    window.show()
+    app.processEvents()
+    window.update_snapshot(snapshot)
+
+    def item_for(ip: str):
+        for row in range(window.compact_table.rowCount()):
+            item = window.compact_table.item(row, 0)
+            if item.data(Qt.UserRole) == ip:
+                return item
+        raise AssertionError(f"missing compact row: {ip}")
+
+    window._open_detail_for_item(item_for("192.0.2.11"))
+    first = window._detail_windows["192.0.2.11"]
+    window._open_detail_for_item(item_for("192.0.2.12"))
+    window._open_detail_for_item(item_for("192.0.2.11"))
+    reopened = window._detail_windows["192.0.2.11"]
+    assert reopened is not first
+
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
+    assert window._detail_windows["192.0.2.11"] is reopened
+    updated = OverallHealth(
+        checked_at=now,
+        severity=Severity.NORMAL,
+        devices=[
+            DeviceHealth(
+                ip="192.0.2.11",
+                active_clients=77,
+                severity=Severity.NORMAL,
+                last_seen=now,
+            ),
+            DeviceHealth(ip="192.0.2.12", severity=Severity.NORMAL, last_seen=now),
+        ],
+    )
+    window.update_snapshot(updated)
+    summary = "\n".join(
+        label.text() for label in reopened.tabs.widget(0).findChildren(QLabel)
+    )
+    assert "77" in summary
+    reopened.close()
     app.processEvents()
     window._quitting = True
     window.close()

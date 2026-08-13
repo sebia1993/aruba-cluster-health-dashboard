@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtTest import QSignalSpy
-from PySide6.QtWidgets import QApplication, QDialog, QLabel
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QMessageBox
 
 from aruba_mini_dashboard.config import (
     AppSettings,
@@ -57,6 +57,10 @@ class FakeCoordinator(QObject):
         self.automatic = False
         self.interval = 60
         self.shutdown_requested = False
+
+    @property
+    def shutting_down(self) -> bool:
+        return self.shutdown_requested
 
     def check_now(self) -> None:
         pass
@@ -115,6 +119,63 @@ def _health() -> OverallHealth:
             ),
         ],
     )
+
+
+def test_shutdown_pause_does_not_overwrite_next_launch_automatic_preference() -> None:
+    _app()
+    settings = AppSettings.default()
+    settings.polling.automatic_enabled = True
+    coordinator = FakeCoordinator()
+    coordinator.automatic = True
+    window = MainWindow(coordinator, settings)
+
+    window._quitting = True
+    window._automatic_changed(False)
+
+    assert window.settings.polling.automatic_enabled is True
+    window.tray_icon.hide()
+    window.deleteLater()
+
+
+def test_external_shutdown_pause_does_not_overwrite_automatic_preference() -> None:
+    _app()
+    settings = AppSettings.default()
+    settings.polling.automatic_enabled = True
+    coordinator = FakeCoordinator()
+    coordinator.automatic = True
+    coordinator.shutdown_requested = True
+    window = MainWindow(coordinator, settings)
+
+    window._automatic_changed(False)
+
+    assert window._quitting is False
+    assert window.settings.polling.automatic_enabled is True
+    window.tray_icon.hide()
+    window.deleteLater()
+
+
+def test_declining_host_key_approval_discards_transient_connection_request(monkeypatch) -> None:
+    _app()
+    coordinator = FakeCoordinator()
+    discarded: list[str] = []
+    coordinator.discard_connection_test = discarded.append
+    window = MainWindow(coordinator, AppSettings.default())
+    monkeypatch.setattr(QMessageBox, "question", lambda *_args, **_kwargs: QMessageBox.No)
+
+    window._connection_test_finished(
+        "mm",
+        {
+            "status": "approval_required",
+            "host": "192.0.2.1",
+            "port": 22,
+            "fingerprint": "SHA256:fixture",
+            "algorithm": "ssh-ed25519",
+        },
+    )
+
+    assert discarded == ["mm"]
+    window.tray_icon.hide()
+    window.deleteLater()
 
 
 def test_dashboard_renders_summary_and_device_rows() -> None:

@@ -4,8 +4,10 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import platform
 import ssl
+import struct
 import subprocess
 import sys
+import sysconfig
 
 import pytest
 
@@ -84,7 +86,7 @@ def test_notice_contains_required_frozen_runtime_evidence_and_no_project_license
         "PySide6_Essentials==6.11.0",
         "shiboken6==6.11.0",
         "netmiko==4.6.0",
-        "paramiko==4.0.0",
+        "paramiko==5.0.0",
         "pywin32==311",
         "LICENSE TEXTS",
     ):
@@ -96,6 +98,20 @@ def test_notice_contains_required_frozen_runtime_evidence_and_no_project_license
 
 
 def test_committed_notice_matches_deterministic_generator() -> None:
+    exact_notice_runtime = (
+        sys.implementation.name == "cpython"
+        and sys.version_info[:3] == (3, 13, 15)
+        and struct.calcsize("P") * 8 == 64
+        and platform.machine() == "AMD64"
+        and not sysconfig.get_config_var("Py_GIL_DISABLED")
+        and sys._is_gil_enabled()
+    )
+    if not exact_notice_runtime:
+        pytest.skip(
+            "committed CPython/OpenSSL notices require exact CPython 3.13.15 "
+            "Windows x64 standard GIL runtime"
+        )
+
     completed = subprocess.run(
         [sys.executable, str(SCRIPT), "--project-root", str(ROOT), "--check"],
         cwd=ROOT,

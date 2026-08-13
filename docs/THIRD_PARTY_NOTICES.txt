@@ -11,7 +11,7 @@ The project's own license must be decided separately by its copyright holder.
 Third-party terms remain the terms of their respective copyright holders.
 This inventory is compliance evidence, not legal advice.
 
-Target runtime: Windows x64, CPython 3.11
+Target runtime: Windows x64, CPython 3.13.15 (standard GIL build)
 Dependency authority: pyproject.toml + requirements-lock.txt
 
 RUNTIME COMPONENT INVENTORY
@@ -65,7 +65,7 @@ ntc_templates==9.2.0
   Project URL: https://github.com/networktocode/ntc-templates
   License evidence SHA-256: 5247d627c7cebca8061461fbc00104e27f1fbbd356cfec260147a6dac88a7dd4
 
-paramiko==4.0.0
+paramiko==5.0.0
   Relationship: direct project dependency
   Declared license: LGPL-2.1
   Project URL: https://github.com/paramiko/paramiko
@@ -146,13 +146,13 @@ textfsm==2.1.0
 PACKAGED LANGUAGE, CRYPTOGRAPHY, AND BOOTLOADER RUNTIMES
 ========================================================
 
-CPython==3.11.9
+CPython==3.13.15
   Relationship: Python interpreter and standard library embedded by PyInstaller
   Declared license: Python Software Foundation License Version 2 and the
   additional third-party terms reproduced in the installed CPython LICENSE.txt
-  License evidence SHA-256: e502c6b880ff58d614901495a9009c136539cd0b1e2a2abb8fc00b934c203419
+  License evidence SHA-256: 62bec384df47b0328307db41455ff6ea2559e5546b394ac69148561b21703120
 
-OpenSSL used by the embedded CPython ssl runtime==3.0.13
+OpenSSL used by the embedded CPython ssl runtime==3.0.21
   Relationship: cryptographic runtime redistributed in the frozen build
   Declared license: Apache License 2.0 (OpenSSL 3.0 and later)
   License text: cryptography LICENSE.APACHE reproduced below
@@ -1158,7 +1158,7 @@ limitations under the License.
 
 ------------------------------------------------------------------------------
 paramiko: LICENSE
-Source: installed distribution file: paramiko-4.0.0.dist-info/licenses/LICENSE
+Source: installed distribution file: paramiko-5.0.0.dist-info/licenses/LICENSE
 SHA-256: 5fa25bf5f395fd26e701c2e1de4ca7d162816986dc791c22f8f4226857ad1bb2
 ------------------------------------------------------------------------------
 		  GNU LESSER GENERAL PUBLIC LICENSE
@@ -4283,9 +4283,9 @@ SHA-256: c95bae1d1ce0235ecccd3560b772ec1efb97f348a79f0fbe0a634f0c2ccefe2c
    limitations under the License.
 
 ------------------------------------------------------------------------------
-CPython 3.11.9 LICENSE.txt
+CPython 3.13.15 LICENSE.txt
 Source: installed CPython runtime file: LICENSE.txt
-SHA-256: e502c6b880ff58d614901495a9009c136539cd0b1e2a2abb8fc00b934c203419
+SHA-256: 62bec384df47b0328307db41455ff6ea2559e5546b394ac69148561b21703120
 ------------------------------------------------------------------------------
 A. HISTORY OF THE SOFTWARE
 ==========================
@@ -4372,10 +4372,8 @@ grants Licensee a nonexclusive, royalty-free, world-wide license to reproduce,
 analyze, test, perform and/or display publicly, prepare derivative works,
 distribute, and otherwise use Python alone or in any derivative version,
 provided, however, that PSF's License Agreement and PSF's notice of copyright,
-i.e., "Copyright (c) 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010,
-2011, 2012, 2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023 Python Software Foundation;
-All Rights Reserved" are retained in Python alone or in any derivative version
-prepared by Licensee.
+i.e., "Copyright (c) 2001-2024 Python Software Foundation; All Rights Reserved"
+are retained in Python alone or in any derivative version prepared by Licensee.
 
 3. In the event Licensee prepares a derivative work that is based on
 or incorporates Python or any part thereof, and wants to make
@@ -4933,61 +4931,6 @@ Government shall have only "Restricted Rights" as defined in Clause
 authors grant the U.S. Government and others acting in its behalf
 permission to use and distribute the software in accordance with the
 terms specified in this license.
-
-Copyright (c) 1993-1999 Ioi Kim Lam.
-Copyright (c) 2000-2001 Tix Project Group.
-Copyright (c) 2004 ActiveState
-
-This software is copyrighted by the above entities
-and other parties.  The following terms apply to all files associated
-with the software unless explicitly disclaimed in individual files.
-
-The authors hereby grant permission to use, copy, modify, distribute,
-and license this software and its documentation for any purpose, provided
-that existing copyright notices are retained in all copies and that this
-notice is included verbatim in any distributions. No written agreement,
-license, or royalty fee is required for any of the authorized uses.
-Modifications to this software may be copyrighted by their authors
-and need not follow the licensing terms described here, provided that
-the new terms are clearly indicated on the first page of each file where
-they apply.
-
-IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY
-FOR DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES
-ARISING OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY
-DERIVATIVES THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
-INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE
-IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE
-NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR
-MODIFICATIONS.
-
-GOVERNMENT USE: If you are acquiring this software on behalf of the
-U.S. government, the Government shall have only "Restricted Rights"
-in the software and related documentation as defined in the Federal 
-Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you
-are acquiring the software on behalf of the Department of Defense, the
-software shall be classified as "Commercial Computer Software" and the
-Government shall have only "Restricted Rights" as defined in Clause
-252.227-7013 (c) (1) of DFARs.  Notwithstanding the foregoing, the
-authors grant the U.S. Government and others acting in its behalf
-permission to use and distribute the software in accordance with the
-terms specified in this license. 
-
-----------------------------------------------------------------------
-
-Parts of this software are based on the Tcl/Tk software copyrighted by
-the Regents of the University of California, Sun Microsystems, Inc.,
-and other parties. The original license terms of the Tcl/Tk software
-distribution is included in the file docs/license.tcltk.
-
-Parts of this software are based on the HTML Library software
-copyrighted by Sun Microsystems, Inc. The original license terms of
-the HTML Library software distribution is included in the file
-docs/license.html_lib.
 
 ------------------------------------------------------------------------------
 pyinstaller: COPYING.txt

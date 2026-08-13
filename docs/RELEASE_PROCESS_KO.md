@@ -55,28 +55,33 @@ Actions에서 재현 가능하게 빌드하고, 검증된 자산만 GitHub Prere
   켜거나 끄는 개발자 UI 식별 모드를 추가한 patch Prerelease입니다. 선택 중
   원래 동작 차단, 정적 요소 카탈로그와 비식별 작업 요청 복사를 포함하며,
   명령줄·환경 변수·설정·일반 메뉴·트레이 활성화와 상태 저장은 지원하지 않습니다.
+- `v0.3.7`: 취소 가능한 TCP·활성 SSH 종료, Paramiko 5.0.0의 비식별 구형
+  알고리즘 오류, SQLite schema·JSON·비밀 필드·로그 마스킹 강화, 고배율·다중
+  모니터 화면 경계 보정과 정확한 CPython 3.13.15 x64 표준 GIL 패키징 계약을
+  추가한 patch Prerelease입니다. 실제 구형 Aruba와 물리 모니터 검증은 별도입니다.
 
 ## 로컬 검증
 
-CPython 3.11.9 x64와 Windows PowerShell 5.1 환경에서 실행합니다.
+CPython 3.13.15 x64 표준 GIL 빌드와 Windows PowerShell 5.1 환경에서 실행합니다.
+실험적 free-threaded(`3.13t`) 빌드는 릴리스 환경으로 허용하지 않습니다.
 
 ```powershell
 .\scripts\run_tests.ps1
-.\scripts\package_release.ps1 -Version 0.3.6
+.\scripts\package_release.ps1 -Version 0.3.7
 ```
 
 성공하면 `dist\release`에는 다음 두 파일만 생성됩니다.
 
 ```text
-ArubaMiniDashboard-v0.3.6-windows-x64.zip
-ArubaMiniDashboard-v0.3.6-windows-x64.zip.sha256
+ArubaMiniDashboard-v0.3.7-windows-x64.zip
+ArubaMiniDashboard-v0.3.7-windows-x64.zip.sha256
 ```
 
 다른 위치로 전달된 자산은 다시 빌드하지 않고 다음과 같이 검증할 수 있습니다.
 
 ```powershell
 .\scripts\package_release.ps1 `
-  -Version 0.3.6 `
+  -Version 0.3.7 `
   -OutputDirectory artifacts\release `
   -VerifyOnly
 ```
@@ -96,8 +101,8 @@ Qt exact inventory와 한국어 번역 2개, PySide6/shiboken6/Paramiko/scp 외�
 ```powershell
 git switch main
 git pull --ff-only
-git tag -a v0.3.6 -m "Aruba Mini Dashboard v0.3.6"
-git push origin v0.3.6
+git tag -a v0.3.7 -m "Aruba Mini Dashboard v0.3.7"
+git push origin v0.3.7
 ```
 
 태그가 잘못된 커밋을 가리키면 Release workflow를 실행하지 않습니다. 게시된
@@ -113,7 +118,7 @@ Workflow가 사용하는 공식 Actions는 Node.js 24 기반 버전의 검토된
 사용하려면 runner `2.327.1` 이상이 필요합니다. 구형 Node 런타임을 강제로 허용하는
 환경 변수로 우회하지 않습니다.
 
-- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.3.6`
+- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.3.7`
 - `release_mode`:
   - `build-only`: 빌드·검증 후 Actions artifact만 생성
   - `draft-prerelease`: 검증된 두 자산을 새 Prerelease Draft에 업로드하고 정지
@@ -134,7 +139,7 @@ workflow는 다음 순서를 바꿀 수 없도록 구성되어 있습니다.
 3. 버전 형식과 소스 버전 일치 확인
 4. origin의 annotated tag object, tag commit, workflow SHA, `origin/main` HEAD 일치 확인
 5. 태그별 GraphQL 조회로 같은 태그의 기존 Release 또는 Draft가 없는지 확인
-6. CPython 3.11.9 환경에서 테스트·onedir 빌드·ZIP·checksum 생성 및 검증
+6. CPython 3.13.15 x64 표준 GIL 환경에서 테스트·onedir 빌드·ZIP·checksum 생성 및 검증
 7. Actions artifact로 전달한 두 파일을 다른 job에서 다시 다운로드하여 검증
 8. Draft 생성 직전 같은 태그·main SHA를 다시 확인
 9. 새 Draft의 태그별 GraphQL numeric ID와 URL을 확인하고 REST numeric-ID 조회로
@@ -167,6 +172,14 @@ workflow는 다음 순서를 바꿀 수 없도록 구성되어 있습니다.
 - 개발자 UI 식별 모드는 모든 새 실행에서 기본 비활성화되고 수정 키 없는 직접
   `F12`로만 켜거나 끈다는 활성화 경계, `Esc`의 선택 전용 취소, 선택 클릭의
   원래 동작 차단, 트레이 항목의 정적 카탈로그 확인과 비식별 복사 범위
+- 종료 요청이 새 작업을 차단하고 취소 가능한 TCP와 활성 SSH 전송을 닫되
+  worker thread·프로세스를 강제로 종료하지 않는다는 경계
+- Paramiko 5.0.0의 `SSH_ALGORITHM_INCOMPATIBLE` 안내와 약한 legacy 알고리즘을
+  자동 활성화하지 않는 정책, 실제 구형 ArubaOS 호환성의 현장 검증 경계
+- SQLite schema·JSON 한도·비밀 필드 거부, 전체 Authorization 값 마스킹과
+  로그 기록 실패 시 원문 record 재출력 방지
+- 설정·상세·개발자 대화상자와 복원된 메인 창의 사용 가능한 화면 영역 보정,
+  실제 DPI·고대비·다중 모니터의 별도 시각 검수
 - v0.3.0 성능 수치는 실제로 측정한 값만 기재하고, 미측정 항목은 측정 불가로
   표시했다는 설명
 
@@ -179,6 +192,8 @@ workflow는 다음 순서를 바꿀 수 없도록 구성되어 있습니다.
 - [ ] `Source code (zip/tar.gz)`가 Windows 실행 패키지가 아님을 notes에 명시함
 - [ ] MIT License 링크와 제3자 고지 위치가 notes에 명시됨
 - [ ] 실제 장비·클린 Windows·DPI·알림·코드 서명 미검증 경계를 명시함
+- [ ] 구형 Aruba의 Paramiko 5 알고리즘 호환성과 실제 SSH 종료 지연의 미검증
+      경계를 명시함
 - [ ] 저사양 PC/HDD/느린 네트워크/장시간 운전의 실제 검증 여부를 명시함
 - [ ] 실제 F12/Fn 키 매핑·창 포커스·트레이 카탈로그·클립보드·고대비·다중
       모니터의 개발자 모드 현장 검증 여부를 명시함

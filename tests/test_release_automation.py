@@ -52,12 +52,16 @@ def test_release_workflow_uses_pinned_actions_and_minimal_permissions() -> None:
 
 def test_release_workflow_pins_python_and_precreates_venv_before_build() -> None:
     text = _read(RELEASE_WORKFLOW)
-    setup_index = text.index('python-version: "3.11.9"')
+    setup_index = text.index('python-version: "3.13.15"')
     venv_index = text.index("python -m venv .venv")
     package_index = text.index(".\\scripts\\package_release.ps1 -Version")
 
     assert setup_index < venv_index < package_index
-    assert "sys.version_info[:3] == (3, 11, 9)" in text
+    assert text.count('python-version: "3.13.15"') == 3
+    assert text.count("sys.version_info[:3] == (3, 13, 15)") == 6
+    assert text.count("platform.machine() == 'AMD64'") == 6
+    assert text.count("not sysconfig.get_config_var('Py_GIL_DISABLED')") == 6
+    assert text.count("sys._is_gil_enabled()") == 6
     assert "requirements-lock.txt" in text
 
 
@@ -296,6 +300,12 @@ def test_release_process_documents_mit_publication_and_field_boundaries() -> Non
     assert "코드 서명" in text
 
 
+def test_release_notes_name_the_embedded_python_runtime_verification() -> None:
+    workflow = _read(RELEASE_WORKFLOW)
+
+    assert "내장 Python DLL 집합·AMD64·3.13.15 메타데이터" in workflow
+
+
 def test_developer_inspector_release_contract_is_documented() -> None:
     repository_readme = _read(REPOSITORY_README)
     packaged_readme = _read(PACKAGED_README)
@@ -315,7 +325,7 @@ def test_developer_inspector_release_contract_is_documented() -> None:
     assert "환경 변수, 설정 파일, 일반 메뉴와 트레이" in packaged_readme
     assert "Esc는 요소 선택만 취소" in packaged_readme
 
-    assert "`v0.3.6`" in release_process
+    assert "`v0.3.7`" in release_process
     assert "트레이 항목의 정적 카탈로그 확인과 비식별 복사 범위" in release_process
 
     assert "모든 새 실행은 일반 사용자 모드로 시작" in workflow
@@ -349,6 +359,10 @@ def test_package_script_builds_versioned_onedir_zip_and_reverifies_extraction() 
 
     assert '"build.ps1"' in text
     assert "& $buildScript -CleanReleaseEnvironment -PythonLauncher $bootstrapPython" in text
+    assert "Test-ExactBuildPython -Candidate $venvPython" in text
+    assert 'Get-Command "py"' in text
+    assert 'Test-ExactBuildPython -Candidate $pythonLauncher.Source -InterpreterArguments @("-3.13")' in text
+    assert "cpython|3.13.15|64|AMD64|0|1" in text
     assert "[AllowEmptyCollection()][string[]]$Arguments" in text
     assert "ForEach-Object { Write-Host $_ }" in text
     assert '"verify_release_package.py"' in text

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 import threading
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
@@ -12,7 +13,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Iterable, Iterator
 
-from .config import AppPaths, default_app_paths
+from .config import AppPaths, _is_secret_field_name, default_app_paths
 
 
 MAX_LOG_BYTES = 5 * 1024 * 1024
@@ -21,6 +22,61 @@ LOW_SPEC_MAX_LOG_BYTES = 2 * 1024 * 1024
 LOW_SPEC_LOG_BACKUP_COUNT = 2
 PERFORMANCE_MAX_LOG_BYTES = 1 * 1024 * 1024
 PERFORMANCE_LOG_BACKUP_COUNT = 2
+_LOGGING_CONTEXT_LOCK = threading.RLock()
+_ACTIVE_LOGGING_GENERATION: object | None = None
+_AUTHORIZATION_KEY_VALUE_PATTERN = re.compile(
+    r"""
+    (?P<prefix>["']?\bauthorization\b["']?\s*[:=]\s*)
+    (?:
+        "(?:\\.|[^"\\])*"
+        |'(?:\\.|[^'\\])*'
+        |(?:bearer|basic)\s+[^\s,;]+
+        |[^\r\n,;]+
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_CANDIDATE_KEY_VALUE_PATTERN = re.compile(
+    r"""
+    (?P<prefix>
+        (?:
+            "(?P<double_key>(?:\\.|[^"\\]){1,128})"
+            |'(?P<single_key>(?:\\.|[^'\\]){1,128})'
+            |(?<![a-z0-9_.-])
+             (?P<bare_key>
+                [a-z0-9_][a-z0-9_./\[\]-]{0,63}
+                (?:[ \t]+[a-z0-9_][a-z0-9_./\[\]-]{0,63}){0,3}
+             )
+             (?![a-z0-9_./\[\]-])
+        )
+        \s*[:=]\s*
+    )
+    (?:
+        "(?:\\.|[^"\\])*"
+        |'(?:\\.|[^'\\])*'
+        |(?:bearer|basic)\s+[^\s,;]+
+        |[^\s,;{}\[\]]+
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _redact_candidate_key_value(match: re.Match[str]) -> str:
+    """Redact only candidates whose field-name tokens denote a secret."""
+
+    key = next(
+        candidate
+        for candidate in (
+            match.group("double_key"),
+            match.group("single_key"),
+            match.group("bare_key"),
+        )
+        if candidate is not None
+    )
+    if not _is_secret_field_name(key):
+        return match.group(0)
+    return f'{match.group("prefix")}[REDACTED]'
 
 
 class SecretRedactor:
@@ -102,16 +158,11 @@ class SecretRedactor:
         # Defense in depth for accidental key/value logging.  Runtime code
         # must still register actual secrets because free-form exception text
         # cannot be recognized reliably from field names alone.
-        result = re.sub(
-            r"(?i)(password|passwd|enable[_ -]?secret|credentialblob|token)(\s*[:=]\s*)([^\s,;]+)",
-            r"\1\2[REDACTED]",
+        result = _AUTHORIZATION_KEY_VALUE_PATTERN.sub(
+            r"\g<prefix>[REDACTED]",
             result,
         )
-        result = re.sub(
-            r'(?i)([\"\'](?:password|passwd|enable_secret|token)[\"\']\s*:\s*)[\"\'][^\"\']*[\"\']',
-            r'\1"[REDACTED]"',
-            result,
-        )
+        result = _CANDIDATE_KEY_VALUE_PATTERN.sub(_redact_candidate_key_value, result)
         return result
 
 
@@ -122,6 +173,23 @@ class RedactingFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         return self.redactor.redact(super().format(record))
+
+
+class _SafeRotatingFileHandler(RotatingFileHandler):
+    """Never let logging's diagnostic fallback echo an unredacted record."""
+
+    def handleError(self, _record: logging.LogRecord) -> None:  # noqa: N802 - logging API
+        # ``logging.Handler.handleError`` prints ``record.msg`` and ``args`` to
+        # stderr when development diagnostics are enabled. That bypasses the
+        # formatter/redactor precisely when a file is locked or unwritable.
+        # Keep a generic signal for console development without retaining or
+        # repeating the failed (potentially secret-bearing) record.
+        if not logging.raiseExceptions or sys.stderr is None:
+            return
+        try:
+            sys.stderr.write("Logging output could not be written; record details suppressed.\n")
+        except Exception:
+            return
 
 
 @dataclass(slots=True)
@@ -137,6 +205,8 @@ class LoggingContext:
     _ssh_debug_enabled: bool
     _performance_logging_enabled: bool
     _low_spec_mode: bool
+    _generation: object
+    _closed: bool = False
 
     def register_secret(self, value: str) -> None:
         self.redactor.add(value)
@@ -158,21 +228,24 @@ class LoggingContext:
         future writes. Every handler continues to use the shared redactor.
         """
 
-        self._ssh_debug_enabled = bool(enabled)
-        self.ssh_logger.setLevel(logging.DEBUG if enabled else logging.CRITICAL + 1)
-        handlers = (
-            [
-                _rotating_handler(
-                    self.ssh_debug_log,
-                    self._formatter,
-                    max_bytes=self._log_size,
-                    backup_count=self._backup_count,
-                )
-            ]
-            if enabled
-            else []
-        )
-        _replace_handlers(self.ssh_logger, handlers)
+        with _LOGGING_CONTEXT_LOCK:
+            if not self._owns_active_loggers_locked():
+                return
+            self._ssh_debug_enabled = bool(enabled)
+            self.ssh_logger.setLevel(logging.DEBUG if enabled else logging.CRITICAL + 1)
+            handlers = (
+                [
+                    _rotating_handler(
+                        self.ssh_debug_log,
+                        self._formatter,
+                        max_bytes=self._log_size,
+                        backup_count=self._backup_count,
+                    )
+                ]
+                if enabled
+                else []
+            )
+            _replace_handlers(self.ssh_logger, handlers)
 
     @property
     def _log_size(self) -> int:
@@ -191,41 +264,71 @@ class LoggingContext:
     def set_performance_logging_enabled(self, enabled: bool) -> None:
         """Toggle the sanitized aggregate performance log without a restart."""
 
-        self._performance_logging_enabled = bool(enabled)
-        self.performance_logger.setLevel(logging.INFO if enabled else logging.CRITICAL + 1)
-        handlers = (
-            [
-                _rotating_handler(
-                    self.performance_log,
-                    self._formatter,
-                    max_bytes=PERFORMANCE_MAX_LOG_BYTES,
-                    backup_count=PERFORMANCE_LOG_BACKUP_COUNT,
-                )
-            ]
-            if enabled
-            else []
-        )
-        _replace_handlers(self.performance_logger, handlers)
+        with _LOGGING_CONTEXT_LOCK:
+            if not self._owns_active_loggers_locked():
+                return
+            self._performance_logging_enabled = bool(enabled)
+            self.performance_logger.setLevel(
+                logging.INFO if enabled else logging.CRITICAL + 1
+            )
+            handlers = (
+                [
+                    _rotating_handler(
+                        self.performance_log,
+                        self._formatter,
+                        max_bytes=PERFORMANCE_MAX_LOG_BYTES,
+                        backup_count=PERFORMANCE_LOG_BACKUP_COUNT,
+                    )
+                ]
+                if enabled
+                else []
+            )
+            _replace_handlers(self.performance_logger, handlers)
 
     def set_low_spec_mode(self, enabled: bool) -> None:
         """Apply bounded log limits selected for the current resource mode."""
 
-        enabled = bool(enabled)
-        if enabled == self._low_spec_mode:
-            return
-        self._low_spec_mode = enabled
-        _replace_handlers(
-            self.logger,
-            [
-                _rotating_handler(
-                    self.app_log,
-                    self._formatter,
-                    max_bytes=self._log_size,
-                    backup_count=self._backup_count,
-                )
-            ],
+        with _LOGGING_CONTEXT_LOCK:
+            if not self._owns_active_loggers_locked():
+                return
+            enabled = bool(enabled)
+            if enabled == self._low_spec_mode:
+                return
+            self._low_spec_mode = enabled
+            _replace_handlers(
+                self.logger,
+                [
+                    _rotating_handler(
+                        self.app_log,
+                        self._formatter,
+                        max_bytes=self._log_size,
+                        backup_count=self._backup_count,
+                    )
+                ],
+            )
+            self.set_ssh_debug_enabled(self._ssh_debug_enabled)
+
+    def close(self) -> None:
+        """Close every file handler owned by the process-global loggers."""
+
+        global _ACTIVE_LOGGING_GENERATION
+        with _LOGGING_CONTEXT_LOCK:
+            if self._closed:
+                return
+            self._closed = True
+            if _ACTIVE_LOGGING_GENERATION is self._generation:
+                for logger in (self.logger, self.ssh_logger, self.performance_logger):
+                    _replace_handlers(logger, [])
+                    logger.setLevel(logging.CRITICAL + 1)
+                _ACTIVE_LOGGING_GENERATION = None
+            self._ssh_debug_enabled = False
+            self._performance_logging_enabled = False
+
+    def _owns_active_loggers_locked(self) -> bool:
+        return (
+            not self._closed
+            and _ACTIVE_LOGGING_GENERATION is self._generation
         )
-        self.set_ssh_debug_enabled(self._ssh_debug_enabled)
 
 
 def setup_logging(
@@ -236,7 +339,27 @@ def setup_logging(
     performance_logging_enabled: bool = False,
     redaction_values: Iterable[str] = (),
 ) -> LoggingContext:
+    with _LOGGING_CONTEXT_LOCK:
+        return _setup_logging_locked(
+            paths,
+            ssh_debug_enabled=ssh_debug_enabled,
+            low_spec_mode=low_spec_mode,
+            performance_logging_enabled=performance_logging_enabled,
+            redaction_values=redaction_values,
+        )
+
+
+def _setup_logging_locked(
+    paths: AppPaths | None = None,
+    *,
+    ssh_debug_enabled: bool = False,
+    low_spec_mode: bool = False,
+    performance_logging_enabled: bool = False,
+    redaction_values: Iterable[str] = (),
+) -> LoggingContext:
+    global _ACTIVE_LOGGING_GENERATION
     paths = (paths or default_app_paths()).ensure()
+    generation = object()
     redactor = SecretRedactor(redaction_values)
     formatter = RedactingFormatter(
         "%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -297,7 +420,7 @@ def setup_logging(
         else [],
     )
 
-    return LoggingContext(
+    context = LoggingContext(
         logger=logger,
         ssh_logger=ssh_logger,
         performance_logger=performance_logger,
@@ -309,7 +432,10 @@ def setup_logging(
         _ssh_debug_enabled=bool(ssh_debug_enabled),
         _performance_logging_enabled=bool(performance_logging_enabled),
         _low_spec_mode=bool(low_spec_mode),
+        _generation=generation,
     )
+    _ACTIVE_LOGGING_GENERATION = generation
+    return context
 
 
 configure_logging = setup_logging
@@ -323,7 +449,7 @@ def _rotating_handler(
     backup_count: int = LOG_BACKUP_COUNT,
 ) -> RotatingFileHandler:
     path.parent.mkdir(parents=True, exist_ok=True)
-    handler = RotatingFileHandler(
+    handler = _SafeRotatingFileHandler(
         path,
         maxBytes=max(1, int(max_bytes)),
         backupCount=max(0, int(backup_count)),

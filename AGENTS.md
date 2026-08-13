@@ -22,7 +22,7 @@ Mobility Master and Aruba 7240XM cluster state with read-only SSH collection.
 
 ## Development
 
-- Use CPython 3.11 and a repository-local `.venv`.
+- Use CPython 3.13.15 x64 standard GIL build and a repository-local `.venv`.
 - Run `scripts\run_tests.ps1` before packaging.
 - Run `scripts\build.ps1` for the default PyInstaller onedir release.
 - Run `scripts\package_release.ps1 -Version <semver>` for a versioned ZIP and

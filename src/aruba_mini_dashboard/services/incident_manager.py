@@ -42,7 +42,15 @@ class IncidentManager:
         self._confirmed_current_keys: set[tuple[IncidentType, str | None, str]] = set()
         for item in self._incidents.values():
             if item.active:
-                self._active_keys[self._key_for_incident(item)] = item.incident_id
+                key = self._key_for_incident(item)
+                if key in self._active_keys:
+                    # A valid runtime can have only one active lifecycle for a
+                    # logical signal. Silently choosing one leaves the other
+                    # incident permanently active and makes later persistence
+                    # ambiguous, so callers restoring durable state must fail
+                    # closed instead.
+                    raise ValueError("duplicate active incident identity")
+                self._active_keys[key] = item.incident_id
 
     @staticmethod
     def _signal_key(signal: HealthSignal) -> tuple[IncidentType, str | None, str]:
@@ -338,18 +346,25 @@ class IncidentManager:
         values.sort(key=lambda item: (item.severity.value, item.first_detected_at, item.incident_id))
         return values
 
-    def compact_inactive(self) -> int:
+    def compact_inactive(
+        self,
+        *,
+        retain_incident_ids: Iterable[str] = (),
+    ) -> int:
         """Release closed incident objects after their durable save succeeds.
 
         Active incidents remain authoritative in memory. Callers deliberately
         invoke this only after SQLite commits, so a locked database keeps the
-        closed objects available for the next persistence retry.
+        closed objects available for the next persistence retry. During an
+        exceptionally long storage outage, callers may retain only the closed
+        incidents still referenced by their bounded retry journal.
         """
 
+        retained = {str(incident_id) for incident_id in retain_incident_ids}
         inactive_ids = [
             incident_id
             for incident_id, incident in self._incidents.items()
-            if not incident.active
+            if not incident.active and incident_id not in retained
         ]
         for incident_id in inactive_ids:
             self._incidents.pop(incident_id, None)

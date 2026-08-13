@@ -5,7 +5,7 @@ from dataclasses import asdict, is_dataclass
 from enum import Enum
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt, Signal, Slot
+from PySide6.QtCore import QSize, Qt, Signal, Slot
 from PySide6.QtGui import QAction, QCloseEvent, QTextCursor
 from PySide6.QtWidgets import (
     QDialog,
@@ -26,7 +26,7 @@ from .view_models import (
     sequence,
     value,
 )
-from .widgets import SubtleTabWidget
+from .widgets import SubtleTabWidget, fit_window_to_available_screen
 
 
 def _plain(value_: Any) -> Any:
@@ -123,7 +123,6 @@ class DetailDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("장비 상세 정보")
-        self.resize(680, 520)
         self.setAttribute(Qt.WA_DeleteOnClose)
         self._device = device
         self._raw_outputs = raw_outputs
@@ -153,6 +152,12 @@ class DetailDialog(QDialog):
         self.buttons.accepted.connect(self.accept)
         self.root_layout.addWidget(self.buttons)
         self._register_developer_inspector()
+        fit_window_to_available_screen(
+            self,
+            QSize(680, 520),
+            minimum_size=QSize(350, 290),
+            center_on_parent=True,
+        )
 
     @staticmethod
     def _developer_metadata(
@@ -400,7 +405,7 @@ class DetailDialog(QDialog):
                 "previous_values": value(self._device, "previous_values", {}),
                 "signals": sequence(self._device, "signals"),
                 "observations": sequence(self._device, "observations"),
-                "previous_values": _plain(self._previous_device),
+                "previous_device": _plain(self._previous_device),
             }
         editor = QPlainTextEdit(self)
         editor.setReadOnly(True)

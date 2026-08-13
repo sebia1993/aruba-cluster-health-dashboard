@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import threading
+
 from aruba_mini_dashboard.models import MmSwitchRow, ParseIssue, ParseResult
 from aruba_mini_dashboard.parsers.common import (
+    MAX_TABLE_LINE_CHARACTERS,
+    check_parser_cancelled,
     finalize_result,
     find_header_layout,
     find_ipv4,
@@ -19,18 +23,39 @@ HEADER_ALIASES = {
 }
 
 
-def parse_show_switches(output: str | bytes | None) -> ParseResult[MmSwitchRow]:
+def parse_show_switches(
+    output: str | bytes | None,
+    *,
+    cancel_event: threading.Event | None = None,
+) -> ParseResult[MmSwitchRow]:
+    check_parser_cancelled(cancel_event)
     clean = sanitize_output(output)
     lines = clean.splitlines()
     issues: list[ParseIssue] = []
     if not clean.strip():
         issues.append(ParseIssue("EMPTY_OUTPUT", "장비가 빈 명령 결과를 반환했습니다."))
 
-    layout = find_header_layout(lines, HEADER_ALIASES, required=("ip", "status"))
+    layout = find_header_layout(
+        lines,
+        HEADER_ALIASES,
+        required=("ip", "status"),
+        cancel_event=cancel_event,
+    )
     rows: list[MmSwitchRow] = []
     seen: set[str] = set()
     if layout is not None:
         for line_index, line in enumerate(lines[layout.line_index + 1 :], layout.line_index + 2):
+            check_parser_cancelled(cancel_event, line_index)
+            if len(line) > MAX_TABLE_LINE_CHARACTERS:
+                issues.append(
+                    ParseIssue(
+                        "PARSE_ROW_TOO_LONG",
+                        "스위치 표의 행이 안전한 최대 길이를 초과했습니다.",
+                        line_index,
+                        line[:240],
+                    )
+                )
+                continue
             if is_ignorable_table_line(line):
                 continue
             fields = layout.extract(line)
@@ -81,6 +106,7 @@ def parse_show_switches(output: str | bytes | None) -> ParseResult[MmSwitchRow]:
                 )
             )
 
+    check_parser_cancelled(cancel_event)
     return finalize_result(rows=rows, issues=issues, layout=layout, output=clean)
 
 

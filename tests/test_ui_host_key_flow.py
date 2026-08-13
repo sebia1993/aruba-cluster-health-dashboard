@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from aruba_mini_dashboard.collectors.base import SshOperationError
 from aruba_mini_dashboard.collectors.ssh_host_keys import (
     HostKeyCheck,
     ScannedHostKey,
@@ -153,3 +156,105 @@ def test_typed_session_credential_is_used_only_after_pre_auth_key_check(monkeypa
     result = runtime.test_connection("mm", ConnectionTestRequest(settings, credential))
     assert result.status == "success"
     assert events == ["scan", "credential-used", "auth", "close"]
+
+
+def test_cluster_authentication_host_key_change_is_not_hidden_by_fallback(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    settings = AppSettings.default()
+    settings.cluster.primary_controller_ip = "192.0.2.11"
+    settings.cluster.fallback_controller_ips = ["192.0.2.12"]
+    credential = DeviceCredential("typed-user", "typed-password")
+    attempts: list[str] = []
+
+    def scan(host, port, **_kwargs):
+        return ScannedHostKey(
+            host,
+            port,
+            "ssh-ed25519",
+            f"SHA256:{host}",
+            FakeKey(),
+        )
+
+    class Adapter:
+        def __init__(self, options, _credential, **_kwargs) -> None:
+            self.host = options.host
+
+        def connect(self) -> None:
+            attempts.append(self.host)
+            if self.host == "192.0.2.11":
+                raise SshOperationError(
+                    "SSH_HOST_KEY_MISMATCH",
+                    "SSH server key changed after discovery.",
+                    retryable=False,
+                    operation="connect",
+                )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("aruba_mini_dashboard.main.scan_ssh_host_key", scan)
+    monkeypatch.setattr(
+        "aruba_mini_dashboard.main.check_scanned_host_key",
+        lambda scanned, _path: HostKeyCheck("verified", scanned),
+    )
+    monkeypatch.setattr("aruba_mini_dashboard.main.ArubaSshAdapter", Adapter)
+
+    with pytest.raises(SshOperationError) as exc_info:
+        runtime.test_connection(
+            "cluster",
+            ConnectionTestRequest(settings, credential),
+        )
+
+    assert exc_info.value.code == "SSH_HOST_KEY_MISMATCH"
+    assert attempts == ["192.0.2.11"]
+
+
+def test_cluster_connection_success_reports_the_authenticated_fallback_key(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path)
+    settings = AppSettings.default()
+    settings.cluster.primary_controller_ip = "192.0.2.11"
+    settings.cluster.fallback_controller_ips = ["192.0.2.12"]
+    credential = DeviceCredential("typed-user", "typed-password")
+
+    def scan(host, port, **_kwargs):
+        algorithm = "ssh-rsa" if host == "192.0.2.11" else "ssh-ed25519"
+        return ScannedHostKey(host, port, algorithm, f"SHA256:{host}", FakeKey())
+
+    class Adapter:
+        def __init__(self, options, _credential, **_kwargs) -> None:
+            self.host = options.host
+
+        def connect(self) -> None:
+            if self.host == "192.0.2.11":
+                raise SshOperationError(
+                    "AUTH_FAILED",
+                    "Authentication failed.",
+                    retryable=False,
+                    operation="connect",
+                )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("aruba_mini_dashboard.main.scan_ssh_host_key", scan)
+    monkeypatch.setattr(
+        "aruba_mini_dashboard.main.check_scanned_host_key",
+        lambda scanned, _path: HostKeyCheck("verified", scanned),
+    )
+    monkeypatch.setattr("aruba_mini_dashboard.main.ArubaSshAdapter", Adapter)
+
+    result = runtime.test_connection(
+        "cluster",
+        ConnectionTestRequest(settings, credential),
+    )
+
+    assert result.status == "success"
+    assert result.host == "192.0.2.12"
+    assert result.fingerprint == "SHA256:192.0.2.12"
+    assert result.algorithm == "ssh-ed25519"
