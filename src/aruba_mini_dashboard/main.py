@@ -18,6 +18,7 @@ from typing import Any
 from PySide6.QtCore import QLockFile, QThreadPool, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 
+from . import __version__
 from .collectors.base import (
     SHOW_CLIENT_DISTRIBUTION,
     SHOW_GROUP_MEMBERSHIP,
@@ -69,6 +70,7 @@ from .services.anomaly_detector import AnomalyDetector, AnomalySettings
 from .services.notification_service import NotificationService
 from .services.poll_coordinator import PollCoordinator
 from .storage import SQLiteStorage, StorageError
+from .ui.developer_inspector import DeveloperInspectorController
 from .ui.main_window import MainWindow
 
 
@@ -1274,6 +1276,7 @@ def _run_qt_ui_smoke(output_path: Path | None) -> int:
     app = QApplication.instance() or QApplication([sys.argv[0]])
     app.setApplicationName("ArubaMiniDashboardUiSmoke")
     app.setQuitOnLastWindowClosed(False)
+    developer_inspector = DeveloperInspectorController(app, f"v{__version__}", app)
 
     from .demo import DemoPoller
     from .services.correlation_engine import CorrelationEngine
@@ -1287,7 +1290,12 @@ def _run_qt_ui_smoke(output_path: Path | None) -> int:
         settings.effective_poll_interval_seconds,
         thread_pool=worker_pool,
     )
-    window = MainWindow(coordinator, settings, demo_mode=True)
+    window = MainWindow(
+        coordinator,
+        settings,
+        demo_mode=True,
+        developer_inspector=developer_inspector,
+    )
     marker = "WINDOWS_QT_UI_OK\nWINDOWS_LIFECYCLE_OK\n"
     completed = False
     timed_out = False
@@ -1328,6 +1336,7 @@ def _run_qt_ui_smoke(output_path: Path | None) -> int:
     QTimer.singleShot(10_000, timeout)
     exit_code = int(app.exec())
     workers_stopped = coordinator.shutdown(5000)
+    developer_inspector.close()
     window.tray_icon.hide()
     window.close()
     return exit_code if completed and workers_stopped else 2
@@ -1351,7 +1360,6 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName("ArubaMiniDashboard")
     app.setOrganizationName("ArubaMiniDashboard")
     app.setQuitOnLastWindowClosed(False)
-
     try:
         paths = AppPaths.from_environment().ensure()
     except (AppPathError, OSError) as exc:
@@ -1444,6 +1452,10 @@ def main(argv: list[str] | None = None) -> int:
         repeat_minutes=settings.notifications.repeat_interval_minutes,
         recovery_enabled=settings.notifications.recovery_notifications,
     )
+    # The controller is process-local and always starts disabled. Its own
+    # application event filter is the sole F12 activation path; no preference,
+    # command-line option, environment variable, menu, or tray action enables it.
+    developer_inspector = DeveloperInspectorController(app, f"v{__version__}", app)
     window = MainWindow(
         coordinator,
         settings,
@@ -1457,6 +1469,7 @@ def main(argv: list[str] | None = None) -> int:
             None if args.demo else (lambda _settings: runtime.can_auto_start())
         ),
         startup_issue=bool(settings_error or storage_error),
+        developer_inspector=developer_inspector,
     )
     window.acknowledge_requested.connect(runtime.acknowledge_ip)
     window.acknowledge_global_requested.connect(runtime.acknowledge_global)
@@ -1471,6 +1484,7 @@ def main(argv: list[str] | None = None) -> int:
         if closed:
             return
         closed = True
+        developer_inspector.close()
         if not coordinator.shutdown(0):
             # Keep storage/credentials alive until the still-running worker is
             # torn down by process shutdown; closing them here creates a race.

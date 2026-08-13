@@ -51,6 +51,10 @@ Actions에서 재현 가능하게 빌드하고, 검증된 자산만 GitHub Prere
 - `v0.3.5`: 저사양 모드의 MM·클러스터 최대 2개 병렬 수집, 적응형 원본 출력
   압축과 250대 단위 전체 표 페이지를 추가한 patch Prerelease입니다. 세 명령,
   감지 규칙, 문제 IP와 사건 결과는 일반 모드와 동일하게 유지합니다.
+- `v0.3.6`: 모든 실행에서 기본 비활성화되고 수정 키 없는 직접 `F12`로만
+  켜거나 끄는 개발자 UI 식별 모드를 추가한 patch Prerelease입니다. 선택 중
+  원래 동작 차단, 정적 요소 카탈로그와 비식별 작업 요청 복사를 포함하며,
+  명령줄·환경 변수·설정·일반 메뉴·트레이 활성화와 상태 저장은 지원하지 않습니다.
 
 ## 로컬 검증
 
@@ -58,21 +62,21 @@ CPython 3.11.9 x64와 Windows PowerShell 5.1 환경에서 실행합니다.
 
 ```powershell
 .\scripts\run_tests.ps1
-.\scripts\package_release.ps1 -Version 0.3.5
+.\scripts\package_release.ps1 -Version 0.3.6
 ```
 
 성공하면 `dist\release`에는 다음 두 파일만 생성됩니다.
 
 ```text
-ArubaMiniDashboard-v0.3.5-windows-x64.zip
-ArubaMiniDashboard-v0.3.5-windows-x64.zip.sha256
+ArubaMiniDashboard-v0.3.6-windows-x64.zip
+ArubaMiniDashboard-v0.3.6-windows-x64.zip.sha256
 ```
 
 다른 위치로 전달된 자산은 다시 빌드하지 않고 다음과 같이 검증할 수 있습니다.
 
 ```powershell
 .\scripts\package_release.ps1 `
-  -Version 0.3.5 `
+  -Version 0.3.6 `
   -OutputDirectory artifacts\release `
   -VerifyOnly
 ```
@@ -92,8 +96,8 @@ Qt exact inventory와 한국어 번역 2개, PySide6/shiboken6/Paramiko/scp 외�
 ```powershell
 git switch main
 git pull --ff-only
-git tag -a v0.3.5 -m "Aruba Mini Dashboard v0.3.5"
-git push origin v0.3.5
+git tag -a v0.3.6 -m "Aruba Mini Dashboard v0.3.6"
+git push origin v0.3.6
 ```
 
 태그가 잘못된 커밋을 가리키면 Release workflow를 실행하지 않습니다. 게시된
@@ -109,7 +113,7 @@ Workflow가 사용하는 공식 Actions는 Node.js 24 기반 버전의 검토된
 사용하려면 runner `2.327.1` 이상이 필요합니다. 구형 Node 런타임을 강제로 허용하는
 환경 변수로 우회하지 않습니다.
 
-- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.3.5`
+- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.3.6`
 - `release_mode`:
   - `build-only`: 빌드·검증 후 Actions artifact만 생성
   - `draft-prerelease`: 검증된 두 자산을 새 Prerelease Draft에 업로드하고 정지
@@ -160,6 +164,9 @@ workflow는 다음 순서를 바꿀 수 없도록 구성되어 있습니다.
 - 저사양 모드의 자동 간격 최소 120초, MM·클러스터 최대 2개 병렬 수집,
   적응형 원본 출력 보관과 250대 단위 전체 표 페이지, 수동 점검 즉시 실행,
   일반 모드와 동일한 명령·감지 규칙·결과 정확성
+- 개발자 UI 식별 모드는 모든 새 실행에서 기본 비활성화되고 수정 키 없는 직접
+  `F12`로만 켜거나 끈다는 활성화 경계, `Esc`의 선택 전용 취소, 선택 클릭의
+  원래 동작 차단, 트레이 항목의 정적 카탈로그 확인과 비식별 복사 범위
 - v0.3.0 성능 수치는 실제로 측정한 값만 기재하고, 미측정 항목은 측정 불가로
   표시했다는 설명
 
@@ -173,6 +180,8 @@ workflow는 다음 순서를 바꿀 수 없도록 구성되어 있습니다.
 - [ ] MIT License 링크와 제3자 고지 위치가 notes에 명시됨
 - [ ] 실제 장비·클린 Windows·DPI·알림·코드 서명 미검증 경계를 명시함
 - [ ] 저사양 PC/HDD/느린 네트워크/장시간 운전의 실제 검증 여부를 명시함
+- [ ] 실제 F12/Fn 키 매핑·창 포커스·트레이 카탈로그·클립보드·고대비·다중
+      모니터의 개발자 모드 현장 검증 여부를 명시함
 - [ ] ZIP 전체를 해제한 뒤 `ArubaMiniDashboard.exe --demo`가 실행됨
 
 현장 검수에는 `WINDOWS11_QA_CHECKLIST_KO.md`를 사용하고, 검증 자료에는 사내
