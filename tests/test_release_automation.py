@@ -14,6 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_SCRIPT = ROOT / "scripts" / "package_release.ps1"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release-windows.yml"
 RELEASE_PROCESS = ROOT / "docs" / "RELEASE_PROCESS_KO.md"
+REPOSITORY_README = ROOT / "README.md"
+PACKAGED_README = ROOT / "docs" / "README.txt"
+WINDOWS_QA_CHECKLIST = ROOT / "docs" / "WINDOWS11_QA_CHECKLIST_KO.md"
 
 
 def _read(path: Path) -> str:
@@ -291,6 +294,54 @@ def test_release_process_documents_mit_publication_and_field_boundaries() -> Non
     assert "Python 미설치 클린 Windows 11" in text
     assert "실제 DPI" in text
     assert "코드 서명" in text
+
+
+def test_developer_inspector_release_contract_is_documented() -> None:
+    repository_readme = _read(REPOSITORY_README)
+    packaged_readme = _read(PACKAGED_README)
+    release_process = _read(RELEASE_PROCESS)
+    workflow = _read(RELEASE_WORKFLOW)
+    qa_checklist = _read(WINDOWS_QA_CHECKLIST)
+
+    assert "모든 새 실행은 항상 개발자 모드가 꺼진 상태로 시작" in repository_readme
+    assert "수정 키 없는 직접 `F12` 입력" in repository_readme
+    assert "`--ui-inspector` 같은 명령줄 옵션, 환경 변수, 설정 파일" in repository_readme
+    assert "`Esc`는 요소 선택만 취소" in repository_readme
+    assert "원래 버튼·표·탭·메뉴 동작을 실행하지 않고" in repository_readme
+    assert "Windows 네이티브 트레이 메뉴" in repository_readme
+    assert "원본 명령 출력, 로그 내용, 로컬 절대 경로" in repository_readme
+
+    assert "모든 새 실행은 항상 일반 사용자 모드로" in packaged_readme
+    assert "환경 변수, 설정 파일, 일반 메뉴와 트레이" in packaged_readme
+    assert "Esc는 요소 선택만 취소" in packaged_readme
+
+    assert "`v0.3.6`" in release_process
+    assert "트레이 항목의 정적 카탈로그 확인과 비식별 복사 범위" in release_process
+
+    assert "모든 새 실행은 일반 사용자 모드로 시작" in workflow
+    assert "수정 키 없는 직접" in workflow and "F12" in workflow
+    assert "활성화 경로가 없습니다" in workflow
+    assert "요소 선택 중 클릭은 원래 버튼·표·탭·메뉴 동작을 실행하지 않습니다" in workflow
+    assert "시스템 트레이 카탈로그" in workflow
+    assert "조직 클립보드 정책" in workflow
+
+    assert "Ctrl+F12, Shift+F12, Alt+F12" in qa_checklist
+    assert "Esc를 누르면 선택과 테두리만 취소" in qa_checklist
+    assert "설정 입력값, 원본 명령 출력, 로그 내용" in qa_checklist
+    assert "실제 물리 F12/Fn 키 매핑" in qa_checklist
+
+
+def test_developer_inspector_has_no_command_line_or_persisted_activation() -> None:
+    from aruba_mini_dashboard.config import AppSettings
+    from aruba_mini_dashboard.main import build_parser
+
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["--ui-inspector"])
+    assert exc_info.value.code == 2
+
+    serialized = repr(AppSettings.default().to_dict()).lower()
+    assert "inspector" not in serialized
+    assert "developer" not in serialized
 
 
 def test_package_script_builds_versioned_onedir_zip_and_reverifies_extraction() -> None:

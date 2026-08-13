@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt, Signal, Slot
-from PySide6.QtGui import QCloseEvent, QTextCursor
+from PySide6.QtGui import QAction, QCloseEvent, QTextCursor
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .developer_inspector import DeveloperInspectorController, UiElementMetadata
 from .view_models import (
     DeviceView,
     display,
@@ -45,6 +46,69 @@ def _plain(value_: Any) -> Any:
 class DetailDialog(QDialog):
     acknowledge_requested = Signal(str)
 
+    _SUMMARY_DEVELOPER_FIELDS = {
+        "IP": (
+            "장비 IP 행",
+            "DETAIL-SUMMARY-IP",
+            "선택한 장비의 관리 주소 표시 영역입니다.",
+        ),
+        "ALIAS": (
+            "장비명 행",
+            "DETAIL-SUMMARY-ALIAS",
+            "선택한 장비의 별칭 또는 호스트 이름 표시 영역입니다.",
+        ),
+        "STATUS": (
+            "종합 상태 행",
+            "DETAIL-SUMMARY-STATUS",
+            "선택한 장비의 종합 상태 표시 영역입니다.",
+        ),
+        "MM-STATUS": (
+            "MM Status 행",
+            "DETAIL-SUMMARY-MM-STATUS",
+            "Mobility Master가 보고한 장비 상태 표시 영역입니다.",
+        ),
+        "CLIENTS": (
+            "Active 및 Standby 행",
+            "DETAIL-SUMMARY-CLIENTS",
+            "Active와 Standby Client 수 표시 영역입니다.",
+        ),
+        "CONNECTION-TYPE": (
+            "Connection-Type 행",
+            "DETAIL-SUMMARY-CONNECTION-TYPE",
+            "현재와 이전 Connection-Type 표시 영역입니다.",
+        ),
+        "ANOMALY-STREAK": (
+            "연속 이상 감지 행",
+            "DETAIL-SUMMARY-ANOMALY-STREAK",
+            "연속으로 관찰된 이상 횟수 표시 영역입니다.",
+        ),
+        "LAST-CHECK": (
+            "마지막 확인 행",
+            "DETAIL-SUMMARY-LAST-CHECK",
+            "장비 상태를 마지막으로 확인한 시각 표시 영역입니다.",
+        ),
+        "PREVIOUS": (
+            "이전 수집값 행",
+            "DETAIL-SUMMARY-PREVIOUS",
+            "직전 점검에서 수집한 비교값 표시 영역입니다.",
+        ),
+        "CONNECTION-CHANGE-TIME": (
+            "Connection-Type 최초 변화 행",
+            "DETAIL-SUMMARY-CONNECTION-CHANGE-TIME",
+            "Connection-Type 변화가 최초 감지된 시각 표시 영역입니다.",
+        ),
+        "REASONS": (
+            "판단 근거 행",
+            "DETAIL-SUMMARY-REASONS",
+            "장비 상태 판단 근거 표시 영역입니다.",
+        ),
+        "ERRORS": (
+            "최근 수집 오류 행",
+            "DETAIL-SUMMARY-ERRORS",
+            "최근 수집 단계의 오류 표시 영역입니다.",
+        ),
+    }
+
     def __init__(
         self,
         device: Any,
@@ -55,6 +119,7 @@ class DetailDialog(QDialog):
         previous_device: Any | None = None,
         raw_outputs_provider: Callable[[], Any] | None = None,
         parsed_results_provider: Callable[[], Any] | None = None,
+        developer_inspector: DeveloperInspectorController | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("장비 상세 정보")
@@ -66,21 +131,157 @@ class DetailDialog(QDialog):
         self._raw_outputs_provider = raw_outputs_provider
         self._parsed_results_provider = parsed_results_provider
         self._previous_device = previous_device
+        self.developer_inspector = developer_inspector
+        self._developer_catalog_actions: list[QAction] = []
+        self._summary_fields: dict[str, QLabel] = {}
         self._parsed_editor: QPlainTextEdit | None = None
         self._raw_editor: QPlainTextEdit | None = None
 
-        root = QVBoxLayout(self)
+        self.root_layout = QVBoxLayout(self)
         self.tabs = SubtleTabWidget(self)
-        root.addWidget(self.tabs)
+        self.root_layout.addWidget(self.tabs)
         self._build_summary_tab()
-        self.tabs.addTab(QWidget(self.tabs), "파싱 결과")
-        self.tabs.addTab(QWidget(self.tabs), "원본 출력")
+        self._parsed_placeholder = QWidget(self.tabs)
+        self._raw_placeholder = QWidget(self.tabs)
+        self.tabs.addTab(self._parsed_placeholder, "파싱 결과")
+        self.tabs.addTab(self._raw_placeholder, "원본 출력")
         self.tabs.currentChanged.connect(self._materialize_tab)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=self)
-        buttons.rejected.connect(self.reject)
-        buttons.accepted.connect(self.accept)
-        root.addWidget(buttons)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=self)
+        self.close_button = self.buttons.button(QDialogButtonBox.Close)
+        self.buttons.rejected.connect(self.reject)
+        self.buttons.accepted.connect(self.accept)
+        self.root_layout.addWidget(self.buttons)
+        self._register_developer_inspector()
+
+    @staticmethod
+    def _developer_metadata(
+        name: str,
+        stable_id: str,
+        screen_path: str,
+        purpose: str,
+    ) -> UiElementMetadata:
+        return UiElementMetadata(
+            name,
+            stable_id,
+            screen_path,
+            "src/aruba_mini_dashboard/ui/detail_dialog.py",
+            purpose,
+        )
+
+    @classmethod
+    def _summary_metadata(cls, field_id: str) -> UiElementMetadata:
+        name, stable_id, purpose = cls._SUMMARY_DEVELOPER_FIELDS[field_id]
+        return cls._developer_metadata(
+            name,
+            stable_id,
+            "상세 정보 > 요약",
+            purpose,
+        )
+
+    @classmethod
+    def _tab_metadata(cls, index: int) -> UiElementMetadata:
+        definitions = {
+            0: (
+                "요약 탭",
+                "DETAIL-TAB-SUMMARY",
+                "상세 정보 > 요약",
+                "장비의 현재 상태와 판단 근거를 표시합니다.",
+            ),
+            1: (
+                "파싱 결과 탭",
+                "DETAIL-TAB-PARSED",
+                "상세 정보 > 파싱 결과",
+                "수집 결과를 구조화한 진단 정보를 표시합니다.",
+            ),
+            2: (
+                "원본 출력 탭",
+                "DETAIL-TAB-RAW",
+                "상세 정보 > 원본 출력",
+                "현재 실행에 남아 있는 읽기 전용 명령 출력을 표시합니다.",
+            ),
+        }
+        return cls._developer_metadata(*definitions[index])
+
+    @classmethod
+    def _output_metadata(cls, index: int) -> UiElementMetadata:
+        definitions = {
+            1: (
+                "파싱 결과 내용",
+                "DETAIL-PARSED-OUTPUT",
+                "상세 정보 > 파싱 결과",
+                "선택한 장비와 관련된 구조화된 수집 결과 표시 영역입니다.",
+            ),
+            2: (
+                "원본 출력 내용",
+                "DETAIL-RAW-OUTPUT",
+                "상세 정보 > 원본 출력",
+                "현재 실행의 읽기 전용 명령 출력 표시 영역입니다.",
+            ),
+        }
+        return cls._developer_metadata(*definitions[index])
+
+    def _register_developer_inspector(self) -> None:
+        inspector = self.developer_inspector
+        if inspector is None:
+            return
+
+        def register_virtual(metadata: UiElementMetadata) -> None:
+            action = QAction(metadata.name_ko, self)
+            self._developer_catalog_actions.append(action)
+            inspector.register_action(action, metadata)
+
+        inspector.attach_host_layout(self, self.root_layout)
+        inspector.register_widget(
+            self,
+            self._developer_metadata(
+                "장비 상세 정보 창",
+                "DETAIL-DIALOG",
+                "상세 정보",
+                "선택한 장비의 요약, 파싱 결과와 원본 출력을 제공합니다.",
+            ),
+        )
+        inspector.register_widget(
+            self.tabs.tabBar(),
+            self._developer_metadata(
+                "상세 정보 탭",
+                "DETAIL-TABS",
+                "상세 정보",
+                "요약, 파싱 결과와 원본 출력 화면을 전환합니다.",
+            ),
+        )
+        for index in range(3):
+            register_virtual(self._tab_metadata(index))
+        inspector.register_widget(self._parsed_placeholder, self._tab_metadata(1))
+        inspector.register_widget(self._raw_placeholder, self._tab_metadata(2))
+        register_virtual(
+            self._developer_metadata(
+                "장비 요약 정보 영역",
+                "DETAIL-SUMMARY",
+                "상세 정보 > 요약",
+                "장비의 현재 상태, 이전 값, 판단 근거와 오류를 묶어 표시합니다.",
+            )
+        )
+        for field_id in self._SUMMARY_DEVELOPER_FIELDS:
+            register_virtual(self._summary_metadata(field_id))
+        register_virtual(self._output_metadata(1))
+        register_virtual(self._output_metadata(2))
+        inspector.register_widget(
+            self.close_button,
+            self._developer_metadata(
+                "상세 정보 닫기 버튼",
+                "DETAIL-CLOSE",
+                "상세 정보 > 하단 작업",
+                "장비 상세 정보 창을 닫습니다.",
+            ),
+        )
+
+    def _register_summary_widgets(self) -> None:
+        inspector = self.developer_inspector
+        if inspector is None:
+            return
+        for field_id, widget in self._summary_fields.items():
+            inspector.register_widget(widget, self._summary_metadata(field_id))
 
     def update_snapshot(
         self,
@@ -126,15 +327,34 @@ class DetailDialog(QDialog):
         page = QWidget(self)
         form = QFormLayout(page)
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        form.addRow("IP", self._selectable(view.ip))
-        form.addRow("장비명", self._selectable(view.alias or view.hostname or "-"))
-        form.addRow("상태", self._selectable(view.status))
-        form.addRow("MM Status", self._selectable(view.mm_status))
-        form.addRow("Active / Standby", self._selectable(f"{view.active_clients} / {view.standby_clients}"))
+        self._summary_fields = {}
+
+        def add_row(label: str, field_id: str, text: str) -> None:
+            field = self._selectable(text)
+            self._summary_fields[field_id] = field
+            form.addRow(label, field)
+
+        add_row("IP", "IP", view.ip)
+        add_row("장비명", "ALIAS", view.alias or view.hostname or "-")
+        add_row("상태", "STATUS", view.status)
+        add_row("MM Status", "MM-STATUS", view.mm_status)
+        add_row(
+            "Active / Standby",
+            "CLIENTS",
+            f"{view.active_clients} / {view.standby_clients}",
+        )
         previous_connection = display(value(self._device, "previous_connection_type"))
-        form.addRow("Connection-Type", self._selectable(f"{previous_connection} → {view.connection_type}"))
-        form.addRow("연속 이상 감지", self._selectable(display(value(self._device, "load_anomaly_streak"), "0")))
-        form.addRow("마지막 확인", self._selectable(view.last_seen))
+        add_row(
+            "Connection-Type",
+            "CONNECTION-TYPE",
+            f"{previous_connection} → {view.connection_type}",
+        )
+        add_row(
+            "연속 이상 감지",
+            "ANOMALY-STREAK",
+            display(value(self._device, "load_anomaly_streak"), "0"),
+        )
+        add_row("마지막 확인", "LAST-CHECK", view.last_seen)
         if self._previous_device is not None:
             previous = DeviceView.from_source(self._previous_device)
             previous_text = (
@@ -143,14 +363,15 @@ class DetailDialog(QDialog):
             )
             if previous.last_seen and previous.last_seen != "-":
                 previous_text += f"\n수집 시각: {previous.last_seen}"
-            form.addRow("이전 수집값", self._selectable(previous_text))
+            add_row("이전 수집값", "PREVIOUS", previous_text)
         change_time = self._connection_change_time()
         if change_time:
-            form.addRow("Connection-Type 최초 변화", self._selectable(change_time))
+            add_row("Connection-Type 최초 변화", "CONNECTION-CHANGE-TIME", change_time)
         reasons = "\n".join(f"• {item}" for item in view.issue_reasons) or "없음"
-        form.addRow("판단 근거", self._selectable(reasons))
+        add_row("판단 근거", "REASONS", reasons)
         errors = "\n".join(f"• {item}" for item in flatten_errors(self._device)) or "없음"
-        form.addRow("최근 수집 오류", self._selectable(errors))
+        add_row("최근 수집 오류", "ERRORS", errors)
+        self._summary_page = page
         if self.tabs.count() == 0:
             self.tabs.addTab(page, "요약")
         else:
@@ -159,6 +380,9 @@ class DetailDialog(QDialog):
             self.tabs.insertTab(0, page, "요약")
             if previous_page is not None:
                 previous_page.deleteLater()
+        if self.developer_inspector is not None:
+            self.developer_inspector.register_widget(page, self._tab_metadata(0))
+        self._register_summary_widgets()
 
     def _build_parsed_tab(self) -> None:
         if self._parsed_editor is not None:
@@ -222,13 +446,32 @@ class DetailDialog(QDialog):
         self.tabs.removeTab(index)
         self.tabs.insertTab(index, widget, title)
         self.tabs.setCurrentIndex(index)
+        if index == 1:
+            self._parsed_placeholder = None
+        elif index == 2:
+            self._raw_placeholder = None
+        if self.developer_inspector is not None:
+            self.developer_inspector.register_widget(
+                widget,
+                self._output_metadata(index),
+            )
         if placeholder is not None:
             placeholder.deleteLater()
 
     def _reset_lazy_tab(self, index: int, title: str) -> None:
         previous_page = self.tabs.widget(index)
         self.tabs.removeTab(index)
-        self.tabs.insertTab(index, QWidget(self.tabs), title)
+        placeholder = QWidget(self.tabs)
+        self.tabs.insertTab(index, placeholder, title)
+        if index == 1:
+            self._parsed_placeholder = placeholder
+        elif index == 2:
+            self._raw_placeholder = placeholder
+        if self.developer_inspector is not None:
+            self.developer_inspector.register_widget(
+                placeholder,
+                self._tab_metadata(index),
+            )
         if previous_page is not None:
             previous_page.deleteLater()
 

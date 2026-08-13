@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 
 from aruba_mini_dashboard.config import AppSettings, settings_fingerprint
 
+from .developer_inspector import DeveloperInspectorController, UiElementMetadata
 from .detail_dialog import DetailDialog
 from .resources import status_icon
 from .settings_dialog import SettingsDialog
@@ -100,6 +101,7 @@ class MainWindow(QMainWindow):
         demo_mode: bool = False,
         setup_readiness_check: Callable[[AppSettings], Any] | None = None,
         startup_issue: bool = False,
+        developer_inspector: DeveloperInspectorController | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -113,6 +115,8 @@ class MainWindow(QMainWindow):
         self.demo_mode = demo_mode
         self.setup_readiness_check = setup_readiness_check
         self.startup_issue = startup_issue
+        self.developer_inspector = developer_inspector
+        self._developer_catalog_actions: list[QAction] = []
         self._quitting = False
         self._current_view: DashboardView | None = None
         self._current_devices: list[Any] = []
@@ -149,6 +153,7 @@ class MainWindow(QMainWindow):
         self.resize(settings.ui.window_width, settings.ui.window_height)
         self._build_ui()
         self._create_tray()
+        self._register_developer_inspector()
         self._connect_coordinator()
         self._restore_ui_settings()
         self._set_empty_state()
@@ -157,18 +162,18 @@ class MainWindow(QMainWindow):
         self._refresh_setup_state()
 
     def _build_ui(self) -> None:
-        central = QWidget(self)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        self.setCentralWidget(central)
+        self.central_root = QWidget(self)
+        self.central_root_layout = QVBoxLayout(self.central_root)
+        self.central_root_layout.setContentsMargins(0, 0, 0, 0)
+        self.central_root_layout.setSpacing(0)
+        self.setCentralWidget(self.central_root)
 
-        self.dashboard_stack = QStackedWidget(central)
+        self.dashboard_stack = QStackedWidget(self.central_root)
         self.full_page = self._build_full_page()
         self.compact_page = self._build_compact_page()
         self.dashboard_stack.addWidget(self.compact_page)
         self.dashboard_stack.addWidget(self.full_page)
-        root.addWidget(self.dashboard_stack, 1)
+        self.central_root_layout.addWidget(self.dashboard_stack, 1)
 
         self.check_now_button.clicked.connect(self.coordinator.check_now)
         self.start_button.clicked.connect(self.coordinator.start_automatic)
@@ -364,15 +369,15 @@ class MainWindow(QMainWindow):
         table.setVerticalScrollMode(QTableWidget.ScrollPerPixel)
 
     def _build_compact_more_menu(self) -> None:
-        menu = QMenu(self)
-        self.compact_settings_action = menu.addAction("설정", self.open_settings)
-        self.compact_ack_action = menu.addAction("알림 확인", self._acknowledge_selected)
-        menu.addSeparator()
-        screen_menu = menu.addMenu("화면")
+        self.compact_more_menu = QMenu(self)
+        self.compact_settings_action = self.compact_more_menu.addAction("설정", self.open_settings)
+        self.compact_ack_action = self.compact_more_menu.addAction("알림 확인", self._acknowledge_selected)
+        self.compact_more_menu.addSeparator()
+        self.compact_screen_menu = self.compact_more_menu.addMenu("화면")
         self.compact_always_on_top_action = QAction("항상 위에 표시", self, checkable=True)
         self.compact_always_on_top_action.toggled.connect(self.set_always_on_top)
-        screen_menu.addAction(self.compact_always_on_top_action)
-        opacity_container = QWidget(screen_menu)
+        self.compact_screen_menu.addAction(self.compact_always_on_top_action)
+        opacity_container = QWidget(self.compact_screen_menu)
         opacity_layout = QHBoxLayout(opacity_container)
         opacity_layout.setContentsMargins(10, 4, 10, 4)
         opacity_layout.addWidget(QLabel("투명도"))
@@ -382,22 +387,24 @@ class MainWindow(QMainWindow):
         self.compact_opacity_number = QLabel("100%")
         opacity_layout.addWidget(self.compact_opacity_slider, 1)
         opacity_layout.addWidget(self.compact_opacity_number)
-        opacity_action = QWidgetAction(screen_menu)
-        opacity_action.setDefaultWidget(opacity_container)
-        screen_menu.addAction(opacity_action)
-        screen_menu.addAction("화면 설정 기본값 복원", self.reset_window_options)
-        menu.addAction("전체 보기", self.showMaximized)
-        menu.addSeparator()
-        menu.addAction("종료", self.request_quit)
+        self.compact_opacity_action = QWidgetAction(self.compact_screen_menu)
+        self.compact_opacity_action.setDefaultWidget(opacity_container)
+        self.compact_screen_menu.addAction(self.compact_opacity_action)
+        self.compact_reset_action = self.compact_screen_menu.addAction(
+            "화면 설정 기본값 복원", self.reset_window_options
+        )
+        self.compact_full_view_action = self.compact_more_menu.addAction("전체 보기", self.showMaximized)
+        self.compact_more_menu.addSeparator()
+        self.compact_quit_action = self.compact_more_menu.addAction("종료", self.request_quit)
         self.compact_opacity_slider.valueChanged.connect(self.set_opacity_percent)
-        self.compact_more_button.setMenu(menu)
+        self.compact_more_button.setMenu(self.compact_more_menu)
 
     def _build_options_menu(self) -> None:
-        menu = QMenu(self)
+        self.options_menu = QMenu(self)
         self.always_on_top_action = QAction("항상 위에 표시", self, checkable=True)
         self.always_on_top_action.toggled.connect(self.set_always_on_top)
-        menu.addAction(self.always_on_top_action)
-        opacity_container = QWidget(menu)
+        self.options_menu.addAction(self.always_on_top_action)
+        opacity_container = QWidget(self.options_menu)
         opacity_layout = QHBoxLayout(opacity_container)
         opacity_layout.setContentsMargins(10, 4, 10, 4)
         opacity_layout.addWidget(QLabel("투명도"))
@@ -407,14 +414,14 @@ class MainWindow(QMainWindow):
         self.opacity_number = QLabel("100%")
         opacity_layout.addWidget(self.opacity_slider, 1)
         opacity_layout.addWidget(self.opacity_number)
-        action = QWidgetAction(menu)
-        action.setDefaultWidget(opacity_container)
-        menu.addAction(action)
-        reset = QAction("화면 설정 기본값 복원", self)
-        reset.triggered.connect(self.reset_window_options)
-        menu.addAction(reset)
+        self.opacity_action = QWidgetAction(self.options_menu)
+        self.opacity_action.setDefaultWidget(opacity_container)
+        self.options_menu.addAction(self.opacity_action)
+        self.options_reset_action = QAction("화면 설정 기본값 복원", self)
+        self.options_reset_action.triggered.connect(self.reset_window_options)
+        self.options_menu.addAction(self.options_reset_action)
         self.opacity_slider.valueChanged.connect(self.set_opacity_percent)
-        self.options_button.setMenu(menu)
+        self.options_button.setMenu(self.options_menu)
 
     @Slot()
     def _toggle_automatic(self) -> None:
@@ -484,18 +491,18 @@ class MainWindow(QMainWindow):
     def _create_tray(self) -> None:
         self.tray_icon = QSystemTrayIcon(status_icon("unknown"), self)
         self.tray_icon.setToolTip("Aruba 네트워크 상태 미니보드")
-        menu = QMenu()
-        show_action = menu.addAction("대시보드 열기")
-        show_action.triggered.connect(self.show_dashboard)
-        menu.addSeparator()
-        self.tray_check_now_action = menu.addAction("지금 점검", self.coordinator.check_now)
-        self.tray_start_action = menu.addAction("자동 점검 시작", self.coordinator.start_automatic)
-        self.tray_pause_action = menu.addAction("자동 점검 일시정지", self.coordinator.pause_automatic)
-        self.tray_settings_action = menu.addAction("설정", self.open_settings)
-        menu.addSeparator()
-        quit_action = menu.addAction("종료")
-        quit_action.triggered.connect(self.request_quit)
-        self.tray_icon.setContextMenu(menu)
+        self.tray_menu = QMenu()
+        self.tray_open_action = self.tray_menu.addAction("대시보드 열기")
+        self.tray_open_action.triggered.connect(self.show_dashboard)
+        self.tray_menu.addSeparator()
+        self.tray_check_now_action = self.tray_menu.addAction("지금 점검", self.coordinator.check_now)
+        self.tray_start_action = self.tray_menu.addAction("자동 점검 시작", self.coordinator.start_automatic)
+        self.tray_pause_action = self.tray_menu.addAction("자동 점검 일시정지", self.coordinator.pause_automatic)
+        self.tray_settings_action = self.tray_menu.addAction("설정", self.open_settings)
+        self.tray_menu.addSeparator()
+        self.tray_quit_action = self.tray_menu.addAction("종료")
+        self.tray_quit_action.triggered.connect(self.request_quit)
+        self.tray_icon.setContextMenu(self.tray_menu)
         self.tray_icon.activated.connect(self._tray_activated)
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray_icon.show()
@@ -506,6 +513,296 @@ class MainWindow(QMainWindow):
             failed_signal = getattr(self.notification_service, "notification_failed", None)
             if failed_signal is not None:
                 failed_signal.connect(self._notification_failed)
+
+    def _register_developer_inspector(self) -> None:
+        inspector = self.developer_inspector
+        if inspector is None:
+            return
+
+        source = "src/aruba_mini_dashboard/ui/main_window.py"
+
+        def metadata(
+            name: str,
+            stable_id: str,
+            screen_path: str,
+            purpose: str,
+        ) -> UiElementMetadata:
+            return UiElementMetadata(name, stable_id, screen_path, source, purpose)
+
+        def register_widget(
+            widget: QWidget,
+            name: str,
+            stable_id: str,
+            screen_path: str,
+            purpose: str,
+        ) -> None:
+            inspector.register_widget(
+                widget,
+                metadata(name, stable_id, screen_path, purpose),
+            )
+
+        def register_action(
+            action: QAction,
+            name: str,
+            stable_id: str,
+            screen_path: str,
+            purpose: str,
+        ) -> None:
+            inspector.register_action(
+                action,
+                metadata(name, stable_id, screen_path, purpose),
+            )
+
+        def register_menu(
+            menu: QMenu,
+            name: str,
+            stable_id: str,
+            screen_path: str,
+            purpose: str,
+        ) -> None:
+            inspector.register_menu(
+                menu,
+                metadata(name, stable_id, screen_path, purpose),
+            )
+
+        def register_virtual(
+            name: str,
+            stable_id: str,
+            screen_path: str,
+            purpose: str,
+        ) -> None:
+            action = QAction(name, self)
+            self._developer_catalog_actions.append(action)
+            register_action(action, name, stable_id, screen_path, purpose)
+
+        inspector.attach_host_layout(self.central_root, self.central_root_layout)
+        register_widget(
+            self,
+            "메인 창",
+            "MAIN-WINDOW",
+            "메인 화면",
+            "Aruba 장비 상태와 점검 작업을 한 화면에서 제공합니다.",
+        )
+        register_widget(
+            self.statusBar(),
+            "메인 상태 표시줄",
+            "MAIN-STATUS-BAR",
+            "메인 화면 > 상태 표시줄",
+            "최근 작업 결과와 운영 안내를 표시합니다.",
+        )
+
+        full_path = "메인 화면 > 전체 보기"
+        register_widget(
+            self.full_page,
+            "전체 보기",
+            "MAIN-FULL-VIEW",
+            full_path,
+            "상세 상태와 전체 장비 열을 표시하는 넓은 화면입니다.",
+        )
+        full_widgets = (
+            (self.status_card, "전체 상태 카드", "MAIN-FULL-STATUS-CARD", "전체 상태 영역입니다."),
+            (self.status_label, "전체 상태", "MAIN-FULL-STATUS", "현재 종합 상태를 표시합니다."),
+            (self.busy_label, "점검 및 저사양 상태", "MAIN-FULL-POLL-STATE", "점검 진행과 저사양 모드 상태를 표시합니다."),
+            (self.problem_label, "문제 장비 안내", "MAIN-FULL-PROBLEM", "문제가 감지된 장비 범위를 표시합니다."),
+            (self.reason_label, "판단 근거", "MAIN-FULL-REASON", "종합 상태의 고정된 표시 영역입니다."),
+            (self.last_check_label, "마지막 점검 시간", "MAIN-FULL-LAST-CHECK", "마지막 점검 완료 시각을 표시합니다."),
+            (self.next_check_label, "다음 점검 시간", "MAIN-FULL-NEXT-CHECK", "다음 자동 점검 예정 시각을 표시합니다."),
+            (self.check_now_button, "지금 점검 버튼", "MAIN-FULL-CHECK-NOW", "읽기 전용 상태 점검을 즉시 요청합니다."),
+            (self.start_button, "자동 점검 시작 버튼", "MAIN-FULL-AUTO-START", "자동 점검을 시작합니다."),
+            (self.pause_button, "자동 점검 일시정지 버튼", "MAIN-FULL-AUTO-PAUSE", "자동 점검을 일시정지합니다."),
+            (self.ack_button, "알림 확인 버튼", "MAIN-FULL-ACKNOWLEDGE", "선택한 장애 알림을 확인 처리합니다."),
+            (self.settings_button, "설정 버튼", "MAIN-FULL-SETTINGS", "설정 창을 엽니다."),
+            (self.options_button, "화면 옵션 버튼", "MAIN-FULL-OPTIONS-BUTTON", "전체 보기의 화면 옵션 메뉴를 엽니다."),
+        )
+        for widget, name, stable_id, purpose in full_widgets:
+            register_widget(widget, name, stable_id, full_path, purpose)
+
+        options_path = full_path + " > 화면 옵션"
+        register_menu(
+            self.options_menu,
+            "전체 보기 화면 옵션 메뉴",
+            "MAIN-FULL-OPTIONS-MENU",
+            options_path,
+            "창 고정과 투명도 옵션을 제공합니다.",
+        )
+        register_action(
+            self.always_on_top_action,
+            "항상 위에 표시 항목",
+            "MAIN-FULL-OPTIONS-ALWAYS-ON-TOP",
+            options_path,
+            "메인 창을 다른 창 위에 표시할지 전환합니다.",
+        )
+        opacity_metadata = metadata(
+            "투명도 조절 항목",
+            "MAIN-FULL-OPTIONS-OPACITY",
+            options_path,
+            "메인 창의 투명도를 조절합니다.",
+        )
+        inspector.register_action(self.opacity_action, opacity_metadata)
+        inspector.register_widget(self.opacity_slider, opacity_metadata)
+        register_widget(
+            self.opacity_number,
+            "투명도 값",
+            "MAIN-FULL-OPTIONS-OPACITY-VALUE",
+            options_path,
+            "선택한 창 투명도 비율을 표시합니다.",
+        )
+        register_action(
+            self.options_reset_action,
+            "화면 설정 기본값 복원 항목",
+            "MAIN-FULL-OPTIONS-RESET",
+            options_path,
+            "창 고정과 투명도를 기본값으로 복원합니다.",
+        )
+
+        paging_path = full_path + " > 페이지 이동"
+        paging_widgets = (
+            (self.full_page_bar, "장비표 페이지 이동 영역", "MAIN-FULL-PAGING", "대용량 장비표의 페이지를 이동합니다."),
+            (self.full_page_range_label, "현재 장비 범위", "MAIN-FULL-PAGING-RANGE", "현재 페이지에 표시되는 장비 범위를 표시합니다."),
+            (self.full_previous_button, "이전 페이지 버튼", "MAIN-FULL-PAGING-PREVIOUS", "이전 장비 페이지를 표시합니다."),
+            (self.full_page_count_label, "현재 페이지 번호", "MAIN-FULL-PAGING-COUNT", "현재 페이지와 전체 페이지 수를 표시합니다."),
+            (self.full_next_button, "다음 페이지 버튼", "MAIN-FULL-PAGING-NEXT", "다음 장비 페이지를 표시합니다."),
+        )
+        for widget, name, stable_id, purpose in paging_widgets:
+            register_widget(widget, name, stable_id, paging_path, purpose)
+
+        table_path = full_path + " > 장비 상태 표"
+        register_widget(
+            self.table,
+            "전체 보기 장비표",
+            "MAIN-FULL-DEVICE-TABLE",
+            table_path,
+            "등록 장비의 상세 상태 열을 표시합니다.",
+        )
+        register_widget(
+            self.table.viewport(),
+            "전체 보기 장비표 본문",
+            "MAIN-FULL-DEVICE-TABLE-BODY",
+            table_path,
+            "장비별 상태 행이 표시되는 표 본문입니다.",
+        )
+        register_widget(
+            self.table.horizontalHeader(),
+            "전체 보기 장비표 머리글",
+            "MAIN-FULL-DEVICE-TABLE-HEADER",
+            table_path,
+            "장비표 열 이름과 정렬 조작을 제공합니다.",
+        )
+        register_virtual(
+            "전체 보기 장비표의 선택된 행",
+            "MAIN-FULL-DEVICE-TABLE-SELECTION",
+            table_path,
+            "현재 작업 대상으로 선택된 장비 행을 표시합니다.",
+        )
+
+        compact_path = "메인 화면 > 작은 보기"
+        compact_widgets = (
+            (self.compact_page, "작은 보기", "MAIN-COMPACT-VIEW", "핵심 상태와 등록 장비만 간결하게 표시합니다."),
+            (self.compact_status_card, "작은 보기 상태 카드", "MAIN-COMPACT-STATUS-CARD", "작은 보기의 종합 상태 영역입니다."),
+            (self.compact_status_label, "작은 보기 전체 상태", "MAIN-COMPACT-STATUS", "현재 종합 상태를 간단히 표시합니다."),
+            (self.compact_busy_label, "작은 보기 점검 및 저사양 상태", "MAIN-COMPACT-POLL-STATE", "점검 진행과 저사양 모드 상태를 표시합니다."),
+            (self.compact_last_check_label, "작은 보기 마지막 점검 시간", "MAIN-COMPACT-LAST-CHECK", "마지막 점검 시각을 간단히 표시합니다."),
+            (self.compact_check_now_button, "작은 보기 지금 점검 버튼", "MAIN-COMPACT-CHECK-NOW", "읽기 전용 상태 점검을 즉시 요청합니다."),
+            (self.compact_auto_button, "작은 보기 자동 점검 버튼", "MAIN-COMPACT-AUTO", "자동 점검을 시작하거나 일시정지합니다."),
+            (self.compact_more_button, "작은 보기 더보기 버튼", "MAIN-COMPACT-MORE-BUTTON", "추가 작업 메뉴를 엽니다."),
+        )
+        for widget, name, stable_id, purpose in compact_widgets:
+            register_widget(widget, name, stable_id, compact_path, purpose)
+
+        more_path = compact_path + " > 더보기"
+        register_menu(
+            self.compact_more_menu,
+            "작은 보기 더보기 메뉴",
+            "MAIN-COMPACT-MORE-MENU",
+            more_path,
+            "설정, 알림 확인, 화면 옵션과 종료 작업을 제공합니다.",
+        )
+        compact_actions = (
+            (self.compact_settings_action, "설정 항목", "MAIN-COMPACT-MORE-SETTINGS", "설정 창을 엽니다."),
+            (self.compact_ack_action, "알림 확인 항목", "MAIN-COMPACT-MORE-ACKNOWLEDGE", "선택한 장애 알림을 확인 처리합니다."),
+            (self.compact_always_on_top_action, "항상 위에 표시 항목", "MAIN-COMPACT-MORE-ALWAYS-ON-TOP", "메인 창을 다른 창 위에 표시할지 전환합니다."),
+            (self.compact_reset_action, "화면 설정 기본값 복원 항목", "MAIN-COMPACT-MORE-RESET", "창 고정과 투명도를 기본값으로 복원합니다."),
+            (self.compact_full_view_action, "전체 보기 항목", "MAIN-COMPACT-MORE-FULL-VIEW", "메인 창을 전체 보기 크기로 전환합니다."),
+            (self.compact_quit_action, "종료 항목", "MAIN-COMPACT-MORE-QUIT", "프로그램 종료 절차를 시작합니다."),
+        )
+        for action, name, stable_id, purpose in compact_actions:
+            register_action(action, name, stable_id, more_path, purpose)
+        register_menu(
+            self.compact_screen_menu,
+            "작은 보기 화면 하위 메뉴",
+            "MAIN-COMPACT-MORE-SCREEN-MENU",
+            more_path + " > 화면",
+            "창 고정과 투명도 조절 항목을 묶어 제공합니다.",
+        )
+        compact_opacity_metadata = metadata(
+            "작은 보기 투명도 조절 항목",
+            "MAIN-COMPACT-MORE-OPACITY",
+            more_path + " > 화면",
+            "메인 창의 투명도를 조절합니다.",
+        )
+        inspector.register_action(self.compact_opacity_action, compact_opacity_metadata)
+        inspector.register_widget(self.compact_opacity_slider, compact_opacity_metadata)
+        register_widget(
+            self.compact_opacity_number,
+            "작은 보기 투명도 값",
+            "MAIN-COMPACT-MORE-OPACITY-VALUE",
+            more_path + " > 화면",
+            "선택한 창 투명도 비율을 표시합니다.",
+        )
+
+        compact_table_path = compact_path + " > 등록 컨트롤러 상태 표"
+        register_widget(
+            self.compact_table,
+            "등록 컨트롤러 상태 표",
+            "MAIN-COMPACT-DEVICE-TABLE",
+            compact_table_path,
+            "등록한 컨트롤러의 핵심 상태와 분배 상태를 표시합니다.",
+        )
+        register_widget(
+            self.compact_table.viewport(),
+            "등록 컨트롤러 상태 표 본문",
+            "MAIN-COMPACT-DEVICE-TABLE-BODY",
+            compact_table_path,
+            "컨트롤러별 상태 행이 표시되는 표 본문입니다.",
+        )
+        register_widget(
+            self.compact_table.horizontalHeader(),
+            "등록 컨트롤러 상태 표 머리글",
+            "MAIN-COMPACT-DEVICE-TABLE-HEADER",
+            compact_table_path,
+            "작은 보기 장비표의 열 이름을 표시합니다.",
+        )
+        register_virtual(
+            "등록 컨트롤러 상태 표의 선택된 행",
+            "MAIN-COMPACT-DEVICE-TABLE-SELECTION",
+            compact_table_path,
+            "현재 작업 대상으로 선택된 컨트롤러 행을 표시합니다.",
+        )
+
+        tray_path = "Windows 알림 영역 > Aruba 미니 대시보드"
+        register_virtual(
+            "알림 영역 아이콘",
+            "TRAY-ICON",
+            tray_path,
+            "대시보드 상태를 표시하고 알림 영역 메뉴를 엽니다.",
+        )
+        register_menu(
+            self.tray_menu,
+            "알림 영역 메뉴",
+            "TRAY-MENU",
+            tray_path,
+            "창 열기, 점검, 설정과 종료 작업을 제공합니다.",
+        )
+        tray_actions = (
+            (self.tray_open_action, "대시보드 열기 항목", "TRAY-OPEN", "숨겨진 대시보드 창을 표시합니다."),
+            (self.tray_check_now_action, "지금 점검 항목", "TRAY-CHECK-NOW", "읽기 전용 상태 점검을 즉시 요청합니다."),
+            (self.tray_start_action, "자동 점검 시작 항목", "TRAY-AUTO-START", "자동 점검을 시작합니다."),
+            (self.tray_pause_action, "자동 점검 일시정지 항목", "TRAY-AUTO-PAUSE", "자동 점검을 일시정지합니다."),
+            (self.tray_settings_action, "설정 항목", "TRAY-SETTINGS", "설정 창을 엽니다."),
+            (self.tray_quit_action, "종료 항목", "TRAY-QUIT", "프로그램 종료 절차를 시작합니다."),
+        )
+        for action, name, stable_id, purpose in tray_actions:
+            register_action(action, name, stable_id, tray_path, purpose)
 
     def _connect_coordinator(self) -> None:
         self.coordinator.cycle_started.connect(self._cycle_started)
@@ -1243,15 +1540,26 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def open_settings(self, *, initial_setup: bool = False) -> None:
+        inspector_options = (
+            {"developer_inspector": self.developer_inspector}
+            if self.developer_inspector is not None
+            else {}
+        )
         if initial_setup:
             dialog = SettingsDialog(
                 self.settings,
                 self.credential_service,
                 self,
                 initial_setup=True,
+                **inspector_options,
             )
         else:
-            dialog = SettingsDialog(self.settings, self.credential_service, self)
+            dialog = SettingsDialog(
+                self.settings,
+                self.credential_service,
+                self,
+                **inspector_options,
+            )
         dialog.connection_test_requested.connect(self._connection_test_requested)
         if self.notification_service is not None:
             dialog.sound_test_requested.connect(self.notification_service.test_sound)
@@ -1261,14 +1569,22 @@ class MainWindow(QMainWindow):
         # is temporarily rejected, instead of closing it and discarding the
         # form.  Staged credentials are committed only after every settings
         # layer accepted the candidate, or rolled back when the operator exits.
-        while True:
-            if dialog.exec() != QDialog.Accepted:
-                dialog.rollback_staged_credentials()
-                return
-            if self.apply_settings(dialog.settings):
-                dialog.commit_staged_credentials()
-                self._refresh_setup_state()
-                return
+        try:
+            while True:
+                if dialog.exec() != QDialog.Accepted:
+                    dialog.rollback_staged_credentials()
+                    return
+                if self.apply_settings(dialog.settings):
+                    dialog.commit_staged_credentials()
+                    self._refresh_setup_state()
+                    return
+        finally:
+            # QDialog.close()/exec() only hides a parent-owned dialog. Delete it
+            # after credential commit/rollback so repeated Settings use cannot
+            # retain whole forms and inspector registrations for the process.
+            delete_later = getattr(dialog, "deleteLater", None)
+            if callable(delete_later):
+                delete_later()
 
     @Slot(object)
     def apply_settings(self, settings: AppSettings) -> bool:
@@ -1549,13 +1865,14 @@ class MainWindow(QMainWindow):
         for previous_ip, previous_dialog in list(self._detail_windows.items()):
             self._detail_windows.pop(previous_ip, None)
             previous_dialog.close()
-        dialog = DetailDialog(
-            source,
-            self,
-            previous_device=self._previous_devices.get(ip),
-            raw_outputs=self._raw_outputs,
-            parsed_results=self._parse_results,
-        )
+        detail_options: dict[str, Any] = {
+            "previous_device": self._previous_devices.get(ip),
+            "raw_outputs": self._raw_outputs,
+            "parsed_results": self._parse_results,
+        }
+        if self.developer_inspector is not None:
+            detail_options["developer_inspector"] = self.developer_inspector
+        dialog = DetailDialog(source, self, **detail_options)
         self._detail_windows[ip] = dialog
         dialog.destroyed.connect(lambda: self._detail_windows.pop(ip, None))
         dialog.show()
