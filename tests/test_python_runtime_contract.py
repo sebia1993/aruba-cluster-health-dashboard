@@ -64,7 +64,7 @@ def test_license_collector_and_current_docs_name_the_new_runtime() -> None:
     current_docs = "\n".join(
         _read(path)
         for path in (
-            "AGENTS.md",
+            "DEVELOPMENT.md",
             "README.md",
             "docs/README.txt",
             "docs/RELEASE_PROCESS_KO.md",
