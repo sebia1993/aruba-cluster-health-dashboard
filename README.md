@@ -1,421 +1,253 @@
-# Aruba Mini Dashboard
+# Aruba MM / WLC 상태 모니터링
 
-Aruba Mobility Master(MM)와 Aruba 7240XM 클러스터를 읽기 전용 SSH로
-주기적으로 점검하고, 세 명령 결과를 장비 IP 기준으로 종합하는 Windows 11
-미니 대시보드입니다. 한글 UI, 시스템 트레이, 로컬 상태 저장, 규칙 기반 장애
-판단을 제공하며 외부 서버·클라우드·텔레메트리를 사용하지 않습니다.
+[![Windows CI](https://github.com/sebia1993/aruba-mm-wlc-mini-dashboard/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/sebia1993/aruba-mm-wlc-mini-dashboard/actions/workflows/ci-windows.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-## 구현 범위
+**Aruba Mobility Master(MM)와 7240XM 클러스터의 여러 상태 정보를 읽기 전용 SSH로 수집하고, 장비 IP 기준으로 상관분석해 `정상 / 주의 / 장애 / 확인 불가`를 판단하는 Windows 네트워크 모니터링 도구입니다.**
 
-- MM `show switches`: IP, Hostname, Status 파싱 및 Down 즉시 감지
-- Cluster `show lc-cluster load distribution client`: IP별 Active/Standby,
-  연속 이상·복구·구성원 누락 감지
-- Cluster `show lc-cluster group-membership`: IP별 Connection-Type baseline,
-  변경 사건·확인 상태·재시작 후 비교
-- 같은 IP의 원인을 누적하는 정상·주의·장애·확인 불가 종합 판단
-- Primary Controller 실패 시 설정 순서에 따른 Fallback 수집
-- 점검 중 UI가 멈추지 않는 Worker Thread, 중복 점검 방지, 다음 점검 시각
-- Windows 시스템 트레이 알림, 선택적 알림음, 확인·반복·복구 알림
-- 항상 위, 40~100% 투명도, 창 위치·크기·최대화 상태와 UI 설정 유지
-- 작은 창의 등록 컨트롤러 핵심 상태 보기와 넓은 창의 전체 장비 정보 보기 자동 전환
-- 전체·작은 장비 표의 선택 행을 시스템 팔레트 기반 연한 중립 회색으로 표시하고
-  상태 아이콘과 상태 문구의 가독성 유지
-- 설정 입력을 직접 클릭한 뒤에만 숫자·선택값의 마우스 휠 변경 허용
-- 첫 실행 시 설정창 자동 안내, 설정 완료 전 점검 동작 잠금과 명시적 첫 수동 점검
-- `장비·자격 증명`, `운영`, `알림` 3개 탭과 설정 항목별 마우스 오버 설명
-- 설정·장비 상세 탭의 중립색 선택 배경과 얇은 청회색 하단 표시선, 키보드 탐색 유지
-- 저사양 모드의 완화된 자동 점검 주기·적응형 원본 보관·전체 표 페이지와 선택적 성능 로그
-- 수정 키 없는 직접 `F12`로만 활성화하는 비영구 개발자 UI 식별 모드
-- 숨은 표 갱신 보류, 설정 저장 묶음 처리와 종료 이력 보관 한도
-- 취소 가능한 TCP 연결과 활성 SSH 전송 정리로 점검 중에도 안전한 종료
-- SQLite schema·JSON 입력 검증과 자격 증명·Authorization 로그 마스킹
-- 고배율·다중 모니터의 사용 가능한 화면 영역에 맞춘 창·대화상자 배치
-- 실제 SSH를 사용하지 않는 비식별 fixture Demo 모드
-- PyInstaller onedir 운영 빌드와 선택적 Console 빌드
+단순 Ping 또는 SSH 접속 성공 여부가 아니라 **MM 보고 상태, Active/Standby Client 분배, Cluster Connection-Type을 함께 비교**하고, 일시적인 수집 실패나 순간적인 Client 감소를 실제 WLC 장애로 오인하지 않는 것을 핵심 설계 목표로 삼았습니다.
 
-## 안전 경계
+> 저장소의 화면 예시와 테스트 데이터는 비식별 fixture와 문서용 주소만 사용합니다. 실제 운영망 IP, Hostname, 계정, 원본 명령 출력은 공개하지 않습니다.
 
-- 운영 데이터 명령은 다음 세 개만 허용합니다.
-  - `show switches`
-  - `show lc-cluster load distribution client`
-  - `show lc-cluster group-membership`
-- 접속 세션에서는 선택한 경우 privileged EXEC 진입을 위한 `enable`과 페이징
-  비활성화용 `no paging`만 추가로 사용합니다. 설정 모드에는 진입하지 않습니다.
-- 비밀번호와 Enable Secret은 JSON, SQLite, 일반 로그와 배포물에 저장하지
-  않습니다.
-- SSH 호스트 키는 자격 증명을 보내기 전에 확인하며, 최초 키는 사용자가
-  승인해야 하고 변경된 키는 자동 교체하지 않습니다.
-- 접속 실패, 명령 실패, 빈 출력과 파싱 실패를 특정 WLC Down으로 판단하지
-  않습니다.
+## 한눈에 보기
 
-## 운영 순서
+| 항목 | 내용 |
+|---|---|
+| 대상 | Aruba Mobility Master / Aruba 7240XM Cluster |
+| 수집 방식 | SSH, 읽기 전용 |
+| 핵심 명령 | `show switches`, `show lc-cluster load distribution client`, `show lc-cluster group-membership` |
+| 판단 단위 | 장비 IP 기준 상태 상관분석 |
+| 종합 상태 | 정상 / 주의 / 장애 / 확인 불가 |
+| 오탐 방지 | 연속 이상·복구 확인, 낮은 전체 사용량 구분, 수집 실패와 Down 분리 |
+| 장애 전환 | MM이 명시적으로 Down을 보고한 경우 즉시 반영 |
+| 수집 가용성 | Primary Controller 실패 시 등록된 Fallback 순서로 조회 시도 |
+| 자격 증명 | Windows Credential Manager 또는 세션 메모리 |
+| 로컬 상태 | SQLite + 비밀정보 없는 JSON 설정 |
+| 운영 변경 | **없음 — 설정 모드와 구성 변경 명령을 사용하지 않음** |
+| 실행 환경 | Windows 11 x64, PyInstaller onedir 배포 |
 
-1. 프로그램을 처음 실행하면 설정창이 자동으로 열립니다. `나중에 설정`을
-   선택할 수 있지만, 필수 설정을 마칠 때까지 `지금 점검`과 자동 점검은
-   비활성화됩니다.
-2. `장비·자격 증명` 탭에서 MM 관리 IP와 정확히 4개의 Cluster 구성원
-   IP·별칭을 입력합니다.
-3. 등록한 4대 중 Cluster Primary를 선택합니다. Fallback은 나머지 장비를
-   등록 순서대로 자동 구성합니다. 필요한 경우 `고급 연결 설정`에서 포트,
-   제한시간, 재시도 횟수와 Enable 사용 여부를 조정합니다.
-4. MM/WLC 공통 계정 또는 별도 계정을 선택합니다.
-5. 영구 저장은 Windows Credential Manager를, 종료 후 사라져야 하는 계정은
-   세션 전용 방식을 선택합니다.
-6. 연결 테스트에서 MM과 수집 Controller의 SSH SHA-256 지문을 관리자가
-   보유한 값과 비교한 뒤 승인합니다.
-7. `운영` 탭에서 점검 주기와 필요한 성능 옵션을 확인하고, `알림` 탭에서
-   알림 정책을 선택합니다.
-8. 첫 실행 설정을 저장해도 자동 점검은 암묵적으로 시작되지 않습니다. 메인
-   화면의 `지금 점검`으로 첫 결과를 확인한 다음 `자동 점검 시작`을 누릅니다.
+## 해결하려 한 운영 문제
 
-세션 전용 자격 증명은 프로그램 재시작 후 다시 입력해야 합니다. 설정이나
-자격 증명이 완전하지 않으면 자동 점검은 시작되지 않습니다.
+Aruba 무선 클러스터 상태를 확인할 때 한 명령만 보면 실제 원인을 놓치거나 일시적인 현상을 장애로 오인할 수 있습니다.
 
-설정의 숫자 입력과 감지 모드는 해당 항목을 직접 클릭한 뒤에만 마우스 휠로
-변경됩니다. 커서를 올려두거나 Tab으로 이동한 상태의 휠은 값을 바꾸지 않으며,
-투명도는 실수 방지를 위해 휠 변경을 항상 차단합니다.
+- `show switches`의 Controller 상태와 Cluster Client 분배 결과를 따로 확인해야 함
+- Active Client가 순간적으로 감소한 것과 지속적인 분배 이상을 구분해야 함
+- 전체 사용량 자체가 낮은 시간대에는 절대 Client 수만으로 장애를 판단하면 오탐이 발생할 수 있음
+- Connection-Type 변화는 이전 정상 기준값과 비교하지 않으면 변화 여부를 알기 어려움
+- Primary Controller에 접속하지 못한 상황과 실제 Cluster 장애를 분리해야 함
+- SSH 접속 실패, 빈 출력, Parser 실패를 WLC Down으로 잘못 판단하면 안 됨
+- 여러 명령에서 같은 IP에 문제가 나타나면 운영자가 다시 수작업으로 원인을 합쳐야 함
 
-설정은 `장비·자격 증명`, `운영`, `알림`의 세 탭으로 구성됩니다. 자주 바꾸지
-않는 SSH 연결값, 감지 기준, 반복 알림과 진단값은 접힌 고급 영역에 있습니다.
-설정 이름이나 입력란에 마우스 커서를 올리면 용도, 기본값 또는 보안상 주의점을
-확인할 수 있습니다.
+이 프로젝트는 세 명령을 각각 보여주는 것보다 **서로 다른 관측값을 같은 장비 IP에 연결하고, 관측 신뢰도까지 포함해 최종 상태를 계산하는 것**에 초점을 둡니다.
 
-설정창과 장비 상세창의 탭은 Windows의 넓은 파란색 선택 채움 대신 시스템
-팔레트 기반의 중립색 배경과 얇은 청회색 하단 표시선으로 현재 탭을 구분합니다.
-Tab 및 좌우 방향키를 이용한 기존 키보드 이동과 포커스 표시는 유지됩니다.
+## 핵심 설계 판단
 
-장비 점검 결과의 전체 보기와 작은 보기 표에서 선택한 행은 넓은 Windows 파란색
-채움 대신 시스템 팔레트 기반의 연한 중립 회색으로 표시됩니다. 선택 중에도 상태
-아이콘과 정상·주의·장애 문구의 색상·가독성을 유지하며, 알림 확인과 장비 상세
-보기, 정렬 및 화면 모드 전환 뒤 선택 장비 복원 동작은 기존과 같습니다.
+| 운영 문제 | 설계 판단 |
+|---|---|
+| MM이 실제 Controller `Down`을 보고 | 정상 수집된 `show switches`의 명시적 Down은 즉시 장애 신호로 반영 |
+| 순간적인 Client 감소 | 기본 3회 연속 이상을 확인한 뒤 분배 이상으로 확정 |
+| 복구 직후 상태 흔들림 | 기본 2회 연속 정상 관측 후 복구로 확정 |
+| Cluster 전체 사용량이 낮음 | 전체 Active Client와 Peer 기준을 함께 확인해 저사용량 상태를 장애와 분리 |
+| 구성원 행이 순간적으로 누락 | 기본 3회 연속 누락을 확인해 일시적인 출력 변동을 완화 |
+| Connection-Type 변화 | 최초 정상 값을 baseline으로 저장하고 이후 변화만 사건으로 기록 |
+| Primary 조회 실패 | 등록 순서에 따른 Fallback으로 수집을 계속하되 실제 수집 Controller를 별도로 기록 |
+| 접속·명령·Parser 실패 | **WLC Down으로 추정하지 않고 `확인 불가/부분 수집`으로 분리** |
+| 같은 IP에 여러 문제 발생 | 원인을 IP 기준으로 누적해 하나의 종합 상태와 판단 근거로 표시 |
+| 장애 확인 후 반복 알림 | 장애 상태는 유지하면서 운영자의 확인 상태와 복구 사건을 별도로 관리 |
 
-### 개발자 UI 식별 모드
+상세한 상태 전이와 예외 조건은 [장애 판단 로직](docs/DETECTION_LOGIC_KO.md)에 정리되어 있습니다.
 
-개발자 UI 식별 모드는 화면 요소를 고정된 이름과 식별자로 지목하기 위한 개발
-작업 전용 기능입니다. 일반 사용자가 보는 화면이 기본이며, 일반 실행과 Demo를
-포함한 모든 새 실행은 항상 개발자 모드가 꺼진 상태로 시작합니다.
+## 동작 구조
 
-- 애플리케이션 창이 수정 키 없는 직접 `F12` 입력을 받으면 개발자 모드를
-  켜고, 다시 `F12`를 받으면 선택 상태와 함께 끕니다. `Ctrl`·`Shift`·`Alt`가
-  함께 눌린 F12는 전환하지 않습니다. 표시줄의 `종료`는 켜진 모드를 끄기만
-  하며 활성화할 수 없습니다.
-- `--ui-inspector` 같은 명령줄 옵션, 환경 변수, 설정 파일, 일반 메뉴와 트레이
-  메뉴에는 활성화 경로가 없습니다. 활성 상태는 설정·DB·레지스트리에 저장하지
-  않으므로 프로그램을 다시 실행하면 항상 일반 사용자 모드입니다.
-- `요소 선택` 중에는 대상 위에 식별 테두리를 표시합니다. 대상을 클릭하면
-  원래 버튼·표·탭·메뉴 동작을 실행하지 않고 해당 요소의 정보만 엽니다.
-  `Esc`는 요소 선택만 취소하며 개발자 모드는 계속 켜져 있습니다.
-- 요소 정보에는 정적 카탈로그의 한국어 이름, 고정 UI 식별자, 화면 위치,
-  저장소 상대 소스 위치와 용도만 표시합니다. Windows 네이티브 트레이 메뉴
-  항목은 화면에서 직접 선택하지 않고 `요소 목록`의 카탈로그에서 확인합니다.
-- `작업 요청 복사`는 프로그램 버전, 화면 위치, 요소 이름, UI 식별자,
-  저장소 상대 소스 위치, 고정 용도와 비어 있는 `현재 현상`·`원하는 변경`
-  작성란만 클립보드에 넣습니다. 실행 중인 IP,
-  Hostname·장비 별칭과 행 값, 사용자명·비밀번호·Enable Secret, 설정 입력값,
-  원본 명령 출력, 로그 내용, 로컬 절대 경로를 읽거나 복사하지 않으며 외부로
-  전송하지 않습니다.
+```mermaid
+flowchart LR
+    MM["Mobility Master"] -->|"show switches"| P1["MM Parser"]
+    C["7240XM Cluster"] -->|"load distribution client"| P2["Client 분배 Parser"]
+    C -->|"group-membership"| P3["Membership Parser"]
 
-복사 결과는 다음과 같은 정적 형식입니다.
+    P1 --> CORR["IP 기준 상관분석"]
+    P2 --> CORR
+    P3 --> CORR
+
+    CORR --> DET["이상·복구·변화 판단"]
+    DET --> INC["Incident / 확인 / 복구 상태"]
+    INC --> UI["Windows Dashboard"]
+    INC --> DB["SQLite 상태 저장"]
+    INC --> NOTI["Tray / 알림"]
+```
+
+장비 한 대의 상태는 대략 다음 순서로 결정됩니다.
 
 ```text
-프로그램 버전: v0.3.7
-화면 위치: 메인 화면 > 전체 보기
-요소 이름: 전체 보기 장비표
-UI 식별자: MAIN-FULL-DEVICE-TABLE
-소스 위치: src/aruba_mini_dashboard/ui/main_window.py
-용도: 등록 장비의 상세 상태 행을 표시합니다.
-
-현재 현상:
-원하는 변경:
+SSH 수집 성공 여부
+        ↓
+명령별 Parser 신뢰도
+        ↓
+MM Controller 상태
++ Active / Standby Client
++ Connection-Type
+        ↓
+연속 이상 / 복구 / 누락 / baseline 비교
+        ↓
+IP별 원인 병합
+        ↓
+정상 / 주의 / 장애 / 확인 불가
 ```
 
-### 저사양 모드와 성능 로그
+구성요소별 책임과 데이터 흐름은 [프로그램 구조](docs/ARCHITECTURE_KO.md)를 참고하십시오.
 
-- 저사양 모드는 자동 점검 간격을 설정값과 120초 중 큰 값으로 적용합니다.
-  예를 들어 설정값 60초는 120초로, 300초는 그대로 적용됩니다.
-- 저사양 모드에서도 MM과 클러스터는 최대 두 작업으로 동시에 수집합니다.
-  느린 MM 때문에 더 중요한 컨트롤러 상태와 Client 분배 확인이 늦어지는 것을
-  막으면서, 한 점검 안의 장비 조회 동시 작업 수는 두 개를 넘지 않습니다.
-- `지금 점검`은 저사양 모드에서도 대기 없이 즉시 시작됩니다. 실행 명령,
-  파서, 감지 기준, 사건 처리와 문제 IP 결과는 일반 모드와 같습니다.
-- 256KiB 이상의 원본 출력은 압축 효과를 먼저 확인하고, 효과가 충분한 경우에만
-  작은 단위로 압축합니다. 압축 효과가 낮으면 원문을 그대로 보관하므로 결과를
-  생략하거나 샘플링하지 않습니다.
-- 전체 보기에 장비가 250대를 넘으면 저사양 모드에서 250대 단위 페이지를
-  사용합니다. 전체 장비를 먼저 정렬한 뒤 현재 페이지만 그리며 작은 보기는
-  항상 등록 컨트롤러 4대를 표시합니다.
-- 선택적 성능 로그는 기본적으로 꺼져 있습니다. 켜면 시작·수집·저장·화면
-  처리 시간과 집계 개수만 `logs\performance.log`에 기록합니다. IP, 사용자 ID,
-  자격 증명과 원본 명령 출력은 기록하지 않습니다.
+## 장애와 수집 실패를 구분하는 기준
 
-성능 변경의 측정 범위와 아직 확인하지 못한 현장 항목은
-[성능 검증 보고서](docs/PERFORMANCE_REPORT_KO.md)를 참조하십시오.
+| 상황 | 처리 |
+|---|---|
+| 정상 수집된 `show switches`에서 Controller Down | 장애 |
+| Client 분배가 임계조건을 한 번만 충족 | 관찰 중 |
+| Client 분배가 연속 이상 기준 충족 | 주의/이상 |
+| 전체 Client 사용량 자체가 낮음 | 저사용량으로 분리 |
+| Cluster 구성원 행 일시 누락 | 즉시 장애로 확정하지 않음 |
+| Connection-Type이 baseline과 달라짐 | 변화 사건 생성, 확인 대상 |
+| SSH 연결 실패 | 확인 불가 |
+| 명령 Timeout/실패 | 부분 수집 또는 확인 불가 |
+| Parser가 유효한 상태를 만들지 못함 | 확인 불가 |
+| Primary 실패 후 Fallback 수집 성공 | 수집은 계속하되 실제 수집 경로 기록 |
 
-## 화면 모드와 감시 범위
+이 구분을 통해 **통신 실패를 장비 장애로 확대 해석하지 않는 것**이 중요한 안전 경계입니다.
 
-- 기본 420x320 및 폭 900px 미만에서는 등록된 컨트롤러 4대의 컨트롤러 상태,
-  Client 분배 상태와 마지막 점검 시각만 표시합니다.
-- 일반 창이 1,000px 이상이거나 최대화되면 전체 보기로 전환하여 MM에서 발견한
-  미등록 장비와 Active/Standby, Connection-Type 등 전체 수집값을 표시합니다.
-- 900~999px에서는 현재 모드를 유지하여 크기 조절 중 반복 전환을 방지합니다.
-- 장애 판단, 연속 감지, Connection-Type 사건과 알림의 감시 대상은 항상 현재
-  설정의 Cluster 구성원 4개 IP입니다.
-- 미등록 장비는 전체 보기에서 `미등록·감시 제외` 정보 행으로만 표시됩니다.
-  해당 행의 Down 또는 누락은 전체 상태와 알림을 변경하지 않습니다.
-- 저사양 모드에서 전체 장비가 250대를 넘으면 이전·다음 페이지로 이동할 수
-  있습니다. 정렬은 전체 장비에 먼저 적용되므로 페이지마다 순서가 달라지지 않습니다.
-- SSH·명령·파싱 같은 수집 전체 실패는 감시 장비 상태도 확인할 수 없으므로
-  화면 크기와 관계없이 `확인 불가`로 표시합니다.
+## 실행 화면
 
-## 기본 판단 규칙
+아래 이미지는 문서용 IP와 비식별 가상 장비명으로 프로그램의 실제 `MainWindow`를 렌더링한 예시입니다. 실제 운영 데이터는 포함하지 않습니다.
 
-### MM 상태
+### 정상 상태 예시
 
-- 완전하거나 유효 행을 보존한 `show switches` 결과에서 `Status = Down`이면
-  해당 IP를 즉시 장애로 판단합니다.
-- 다시 확인된 `Status = Up`만 기존 MM Down의 복구 근거로 사용합니다.
-- MM 접속·명령·파싱 실패 또는 행 누락은 Down이 아니라 확인 불가 또는 부분
-  수집으로 표시합니다.
+![Aruba MM WLC 대시보드 정상 상태](docs/images/dashboard-normal.png)
 
-### Client 분배
+### 복수 이상 상태 예시
 
-기본 이상 조건은 다음과 같습니다.
+![Aruba MM WLC 대시보드 이상 상태](docs/images/dashboard-incident.png)
 
-- 해당 IP의 Active와 Standby가 각각 10 이하
-- 전체 Active 합계가 50 이상
-- `절대값과 상대 비교` 모드에서는 다른 구성원의 Active/Standby 중앙값이
-  각각 30 이상이고, 대상 값이 각 중앙값의 25% 이하
-- 위 조건이 3회 연속 유지
-
-한 번의 저하는 streak만 증가시키며 알림을 만들지 않습니다. 모든 장비의
-사용량이 낮은 경우에는 특정 IP 장애를 판단하지 않습니다. 활성 이상은 유효한
-정상 값이 2회 연속 확인되면 복구됩니다. 완전한 출력에서 구성원 행이 3회
-연속 사라지면 별도 누락 주의로 처리하고, 파싱 실패 회차는 누락 streak를
-증가시키지 않습니다.
-
-### Connection-Type
-
-최초 값은 알림 없이 구성원 IP별 baseline으로 저장합니다. 수집 Controller가
-Primary에서 Fallback으로 바뀌어도 같은 구성원 IP의 이전 값과 계속 비교하며,
-실제 수집 Controller IP는 변화 사건의 진단 메타데이터로 별도 보존합니다.
-표시 형식만 다른 동일 값은 변화로 보지 않습니다. 실제 값이 바뀌면 이전 값,
-현재 값, 최초 감지·마지막 확인 시각과 확인 여부를 SQLite에 저장합니다. 같은
-변화는 반복 생성하지 않으며, 다시 이전 값으로 돌아오거나 다른 값으로 바뀌면
-새 사건으로 기록합니다. 행 누락은 Connection-Type 변화와 분리합니다.
-
-### IP 종합 판단
-
-- 장애: MM Down 또는 같은 IP에서 두 종류 이상의 이상 신호 활성
-- 주의: 확정된 Client 분배 이상, Connection-Type 변화, 지속 구성원 누락
-- 확인 불가: 접속·명령·파싱 실패로 필요한 데이터를 신뢰할 수 없음
-- 정상: 수집이 성공했고 활성 이상 신호가 없음
-
-주요 문제 IP는 MM Down, 동일 IP 복합 신호, Client 이상, Connection-Type
-변화, 지속 누락 순으로 선택합니다. 같은 우선순위의 IP가 여러 개면 모두
-표시하며, 수집 데이터가 부족하면 임의의 문제 IP를 만들지 않습니다.
-
-## 로컬 데이터와 로그
-
-기본 경로는 `%LOCALAPPDATA%\ArubaMiniDashboard`입니다.
-
-- `app.db`: 최근 관측·최근 정상 상태, baseline, streak, 사건·복구·확인 상태,
-  UI/알림 설정의 로컬 미러
-- `config\settings.json`: 비밀정보가 없는 장비·점검 설정과 불투명 credential ID
-- `known_hosts`: 사용자가 승인한 앱 전용 SSH 호스트 키
-- `logs\app.log`: 원문 명령 출력을 제외한 회전형 일반 로그
-- `logs\ssh_debug.log`: 사용자가 켠 경우 파싱 실패/부분 결과의 최대 2,048자
-  비밀정보 마스킹 excerpt를 기록하는 진단 로그
-- `logs\performance.log`: 사용자가 켠 경우에만 생성되는 비식별 집계 성능 로그
-
-일반 모드의 `app.log`와 활성화된 `ssh_debug.log`는 파일당 최대 5MB, 백업
-5개로 제한됩니다. 저사양 모드에서는 각각 최대 2MB, 백업 2개로 줄어듭니다.
-`performance.log`는 모드와 관계없이 최대 1MB, 백업 2개이며 옵션을 끄면
-추가 기록을 중지합니다. 이미 생성된 회전 로그는 자동 삭제하지 않습니다.
-
-SQLite의 활성 장애와 확인 대기 중인 상태는 보관 한도 때문에 삭제하지
-않습니다. 종료된 장애, 일반 사건, 확인 완료 Connection-Type 변화와 Failover 이력은 하루에 최대 한 번 정리하며,
-각 테이블에서 최근 180일 이내이면서 최대 10,000건만 유지합니다. SQLite
-`VACUUM`을 자동 실행하지 않아 정리 직후 파일 크기가 바로 줄지 않을 수 있습니다.
-MM에서 과거에 발견한 미등록 장비의 snapshot도 같은 180일·10,000개 한도로
-정리합니다. 현재 등록된 4대, 이번 점검에서 실제 관측된 장비, 활성 사건과 확인
-대기 중인 Connection-Type 변화는 이 정리에서 항상 보호됩니다.
-SQLite가 다른 작업에 잠긴 경우 UI 경로의 대기 시간은 짧게 제한하고, 저장하지
-못한 운영 상태는 메모리에 유지한 뒤 다음 점검에서 다시 저장합니다.
-프로그램 시작 중 기존 기준값, 탐지 상태, 확인 대기 변화 또는 활성 장애를
-완전하게 복원하지 못하면 빈 상태로 점검을 계속하지 않습니다. 원본 SQLite를
-변경 없이 닫고 자동 점검을 중지한 격리 메모리 저장소로 전환하며, 화면에서
-원본 파일 확인이 필요함을 안내합니다. 시작 inventory 정리와 검증은 같은
-transaction에서 처리해 검증 실패 시 정리도 rollback합니다. 활성 장애는 최대
-10,000건까지 완전하게 복원하며 이를 초과하면 일부만 잘라 쓰지 않고 실패
-안전하게 안내합니다. 동일 논리 장애의 중복 활성 행도 임의로 하나만 선택하지
-않고 원본 DB를 보존한 채 확인이 필요한 상태로 처리합니다.
-
-시작 시 SQLite의 필수 테이블·열뿐 아니라 기본 키, `NOT NULL`, `CHECK`, 인덱스
-열·정렬 순서와 partial index 조건을 확인합니다. 저장 JSON은 항목당 256KiB,
-깊이 32, 전체 노드 20,000개 한도를 적용하며 중복 키, 비유한 수, 잘못된 시간·
-자료형과 비밀 필드 이름을 손상된 로컬 상태로 처리합니다. 설정과 저장 payload의
-비밀 필드는 구분자와 camelCase 단위로 인식합니다. 정상적인 `event_token`과
-`durable_event_token`은 상태 식별자이므로 예외로 허용하지만, password·secret·
-authorization·credential blob·private key·API key 의미의 필드는 저장하지 않습니다.
-
-최근 원본 명령 출력은 세부 정보 화면에 메모리상 표시되며 일반적인 인증
-프롬프트를 마스킹합니다. SQLite에는 원본 명령 출력을 저장하지 않습니다.
-원문에는 사내 IP, Hostname 등 운영 정보가 남을 수 있으므로 외부 공유 전
-반드시 비식별화하십시오.
-
-로그 마스커는 등록된 자격 증명뿐 아니라 `Authorization: Bearer ...`와
-`Authorization: Basic ...`의 scheme을 포함한 전체 값을 제거합니다. 로그 파일을
-쓸 수 없는 경우에도 마스킹 전 record 본문을 표준 오류로 다시 출력하지 않습니다.
-
-종료 요청은 새 수동·자동 점검과 연결 테스트를 차단하고, 재시도 대기를 즉시
-깨운 뒤 앱이 소유한 연결 중인 TCP socket과 활성 SSH 전송을 닫습니다. 종료
-작업은 GUI 스레드 밖에서 실행되며 worker thread 강제 종료나 프로세스 강제
-종료를 사용하지 않습니다.
-
-## 개발 실행
-
-CPython 3.13.15 x64 표준 GIL 빌드와 repository-local 가상환경을 사용합니다.
-실험적 free-threaded(`3.13t`) 런타임은 빌드 대상으로 지원하지 않습니다.
-
-```powershell
-py -3.13 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --require-hashes -r .\requirements-lock.txt
-.\.venv\Scripts\python.exe -m pip install --no-deps -e .
-.\.venv\Scripts\python.exe -m aruba_mini_dashboard.main
-```
-
-같은 데이터 경로에서는 대시보드를 한 번만 실행할 수 있습니다. 두 번째 실행은
-운영 SQLite나 장비 점검을 시작하기 전에 안내 후 종료됩니다. 비정상 종료로 남은
-잠금 파일은 소유 프로세스가 없음을 확인한 뒤 자동 복구합니다.
-
-## Demo 모드
-
-Demo는 운영 설정·자격 증명·운영 SQLite를 사용하지 않고, `tests\fixtures`를
-실제 파서와 상관분석 엔진에 순서대로 입력합니다. 전체 정상, Client 일시 저하,
-3회 연속 이상, Connection-Type 변화, MM Down, 2회 복구를 재현합니다.
-
-개발 환경:
-
-```powershell
-.\scripts\run_demo.ps1
-```
-
-배포 폴더:
+실제 장비 없이 전체 정상 → Client 연속 저하 → Connection-Type 변화 → MM Down → 복구 흐름을 확인하려면 Demo 모드를 사용할 수 있습니다.
 
 ```powershell
 .\ArubaMiniDashboard.exe --demo
 ```
 
-Demo도 로그와 알림 영역 UI를 공유하므로 같은 데이터 경로의 일반 실행과 동시에
-열 수 없습니다. 배포 검증용 `--smoke`와 `--ui-smoke`는 운영 데이터 경로를 만들거나
-단일 실행 잠금을 사용하지 않습니다.
+## 장비에서 실행하는 명령
 
-## 테스트
+운영 데이터 조회 명령은 다음 세 개로 제한합니다.
+
+```text
+show switches
+show lc-cluster load distribution client
+show lc-cluster group-membership
+```
+
+접속 환경에 따라 privileged EXEC 진입용 `enable`과 페이징 비활성화용 `no paging`만 세션에서 추가할 수 있습니다.
+
+- 설정 모드에 진입하지 않습니다.
+- 구성 변경 명령을 허용하지 않습니다.
+- SSH 호스트 키는 자격 증명을 보내기 전에 확인합니다.
+- 최초 호스트 키는 운영자가 승인해야 하며 변경된 키는 자동 교체하지 않습니다.
+- 비밀번호와 Enable Secret은 JSON, SQLite, 일반 로그, 배포물에 저장하지 않습니다.
+
+상세 경계는 [운영 보안 모델](docs/SECURITY_KO.md)을 참고하십시오.
+
+## 운영 흐름
+
+1. MM 관리 IP와 Cluster 구성원 4대를 등록합니다.
+2. Cluster Primary와 Fallback 순서를 확인합니다.
+3. Windows Credential Manager 또는 세션 전용 자격 증명을 선택합니다.
+4. 연결 테스트에서 SSH SHA-256 장비 지문을 확인합니다.
+5. `지금 점검`으로 첫 결과를 확인합니다.
+6. 결과가 정상임을 확인한 뒤 필요하면 자동 점검을 시작합니다.
+7. 장애가 발생하면 문제 IP와 판단 근거를 확인하고, 운영자가 확인 처리해 반복 알림을 제어합니다.
+8. 복구 조건이 충족되면 기존 장애와 별도로 복구 이력을 남깁니다.
+
+## 검증
+
+자동화 검증과 실제 장비 검증을 같은 의미로 사용하지 않습니다.
+
+| 검증 영역 | 상태 |
+|---|---|
+| 세 명령 Parser / 비식별 fixture | ✅ 자동 검증 |
+| 이상·복구·누락 streak | ✅ 자동 검증 |
+| 낮은 전체 사용량 오탐 방지 | ✅ 자동 검증 |
+| Connection-Type baseline / 확인 / 재시작 | ✅ 자동 검증 |
+| MM Down과 수집 실패 분리 | ✅ 자동 검증 |
+| Primary / Fallback 수집 경로 | ✅ 가짜 SSH·통합 테스트 |
+| SQLite 상태·재시작·손상 보호 | ✅ 자동 검증 |
+| Worker Thread / 중복 점검 제어 | ✅ 자동 검증 |
+| Offscreen PySide6 UI | ✅ 자동 검증 |
+| Windows onedir 패키지 / smoke | ✅ GitHub Actions |
+| 실제 Aruba 장비·ArubaOS별 출력 | ⚠️ 별도 현장 증거 필요 |
+| Python 미설치 Windows 11 실사용 환경 | ⚠️ 별도 현장 증거 필요 |
+
+구체적인 검증 범위와 공개 가능한 증거 수준은 [검증 보고서](docs/VALIDATION_REPORT_KO.md)에 정리되어 있습니다.
+
+## 개발자 UI 식별 모드 안전 경계
+
+F12 개발자 UI 식별 모드는 일반 운영 기능과 분리된 개발 보조 기능이며 **모든 새 실행은 항상 개발자 모드가 꺼진 상태로 시작**합니다.
+
+- 활성화는 애플리케이션 창이 **수정 키 없는 직접 `F12` 입력**을 받았을 때만 가능합니다.
+- `--ui-inspector` 같은 명령줄 옵션, 환경 변수, 설정 파일, 일반 메뉴와 트레이 메뉴에는 활성화 경로가 없습니다.
+- 요소 선택 중 `Esc`는 요소 선택만 취소하며 개발자 모드 자체는 유지합니다.
+- 요소를 클릭하면 원래 버튼·표·탭·메뉴 동작을 실행하지 않고 해당 요소의 식별 정보만 확인합니다.
+- Windows 네이티브 트레이 메뉴 항목은 화면을 가로채지 않고 정적 카탈로그에서 확인합니다.
+- 복사 내용에는 설정 입력값, 실제 장비 정보, 자격 증명, 원본 명령 출력, 로그 내용, 로컬 절대 경로를 포함하지 않습니다.
+
+상세 개발 규칙은 [`DEVELOPMENT.md`](DEVELOPMENT.md)에 정리되어 있습니다.
+
+## 개발 및 패키지 검증
+
+개발 기준은 CPython 3.13.15 x64 표준 GIL 빌드입니다.
 
 ```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --require-hashes -r .\requirements-lock.txt
+.\.venv\Scripts\python.exe -m pip install --no-deps -e .
 .\scripts\run_tests.ps1
 ```
 
-이 스크립트는 pytest, `compileall`, `pip check`를 순서대로 실행합니다. 테스트는
-비식별 fixture, 메모리/임시 SQLite, 가짜 SSH 경계, 로컬 Paramiko SSH 서버,
-offscreen PySide6 UI를 사용합니다. 실제 장비 출력 파일은 IP, Hostname,
-사용자명 등 민감정보를 제거한 뒤 `tests\fixtures`에 추가할 수 있습니다.
-
-자동화 테스트의 통과는 실제 ArubaOS 버전 호환성, Windows 알림 센터 정책,
-물리 화면 배율 또는 Python 미설치 클린 PC 동작의 증거를 대신하지 않습니다.
-
-## Windows 빌드
-
-기본 onedir/windowed 빌드:
+Windows onedir 패키지:
 
 ```powershell
 .\scripts\build.ps1
 ```
 
-진단용 Console:
-
-```powershell
-.\scripts\build.ps1 -Console
-```
-
-one-file 빌드는 지원하지 않습니다. LGPL 런타임을 사용자가 교체할 수 있는
-`_internal` 트리와 검증 자료를 영구적으로 제공하기 위해 onedir 폴더 전체만
-배포 단위로 사용합니다. `-OneFile` 요청은 빌드 시작 전에 실패합니다.
-
-빌드 스크립트는 다음 순서로 동작합니다.
-
-1. CPython 3.13.15 x64 표준 GIL 가상환경 확인 또는 생성
-2. 해시 고정 의존성 설치
-3. 전체 자동화 테스트 실행, 실패 시 중단
-4. PyInstaller 실행
-5. 문서, 성능 검증 보고서와 설정 예제 복사
-6. 금지 확장자, Qt exact inventory와 한국어 번역 2개, CLI 전용 모듈 제외,
-   PySide6/shiboken6/Paramiko/scp 외부 소스와 PYZ 비포함 확인
-7. Python 관련 환경변수와 PATH 항목을 제거한 로컬 EXE smoke 실행
-   (Netmiko·Paramiko·Windows Credential Manager 로드, 동결 fixture 탐색,
-   정상 데모 1회 파싱·IP 종합 판단 포함)
-8. SHA-256 파일 생성
-
-기본 결과는 `dist\ArubaMiniDashboard\ArubaMiniDashboard.exe`입니다. onedir
-폴더 전체가 배포 단위이며 내부 파일을 임의로 제거하면 안 됩니다. 패키지에는
-실행에 필요한 Python runtime과 라이브러리가 포함되므로 최종 사용자 PC에
-Python 설치가 필요하지 않도록 구성되어 있습니다.
-
-버전이 포함된 GitHub Prerelease용 ZIP과 SHA-256 파일은 다음 명령으로
-생성합니다.
+버전 ZIP과 SHA-256:
 
 ```powershell
 .\scripts\package_release.ps1 -Version 0.3.7
 ```
 
-기존 태그나 Release 자산을 덮어쓰지 않는 상세 절차는
-[Windows Prerelease 배포 절차](docs/RELEASE_PROCESS_KO.md)를 참조하십시오.
+개발 구조와 변경 원칙은 [`DEVELOPMENT.md`](DEVELOPMENT.md), Release 검증·배포 절차는 [Windows 배포 절차](docs/RELEASE_PROCESS_KO.md)를 참고하십시오.
 
-## 보안 제보와 라이선스
+## 문서
 
-민감한 보안 문제를 공개 Issue에 원문 로그·실제 IP·자격 증명과 함께 올리지
-마십시오. 제보 범위와 안전한 정보 형식은
-[GitHub 보안 정책](.github/SECURITY.md)과 [운영 보안 모델](docs/SECURITY_KO.md)에
-정리되어 있습니다.
+| 문서 | 용도 |
+|---|---|
+| [프로그램 구조](docs/ARCHITECTURE_KO.md) | 수집 → Parser → 상관분석 → 저장/UI 구조 |
+| [장애 판단 로직](docs/DETECTION_LOGIC_KO.md) | 장애·주의·복구·확인 불가 판정 기준 |
+| [검증 보고서](docs/VALIDATION_REPORT_KO.md) | 자동 검증과 현장 검증의 증거 경계 |
+| [운영 보안 모델](docs/SECURITY_KO.md) | 자격 증명·로그·SSH·공개정보 경계 |
+| [성능 검증](docs/PERFORMANCE_REPORT_KO.md) | 저사양 모드·대규모 표·성능 측정 |
+| [Windows QA](docs/WINDOWS11_QA_CHECKLIST_KO.md) | Windows UI/알림/배율 현장 체크리스트 |
+| [배포 절차](docs/RELEASE_PROCESS_KO.md) | Windows Prerelease 및 패키지 검증 |
+| [프로젝트 상태](docs/PROJECT_STATUS_KO.md) | 구현 완료 범위와 남은 외부 증거 |
 
-Aruba Mini Dashboard 자체 코드는 루트 [MIT License](LICENSE)로 배포합니다.
-Windows 배포물에는 그 원문과 바이트 단위로 동일한 `LICENSE.txt`를 포함하며,
-패키지 verifier가 누락이나 변경을 거부합니다. 이 MIT 라이선스는 배포물에 함께
-포함된 제3자 구성요소의 별도 저작권과 라이선스를 대체하지 않습니다. 해당
-고지와 라이선스 원문은 `THIRD_PARTY_NOTICES.txt`,
-`QT_THIRD_PARTY_NOTICES.txt`, `LGPL_RUNTIME_LICENSES\`에서 확인하십시오.
+## 현재 기능 범위
 
-Aruba Mini Dashboard의 배포 조건은 사용자가 LGPL 구성요소를 자신의 용도로
-수정하거나 그 수정 사항을 디버깅하기 위해 리버스 엔지니어링하는 것을
-제한하지 않습니다. 기술적 교체·복구 경로와 제3자 권리의 구분은
-[LGPL 런타임 교체 안내](docs/LGPL_RUNTIME_REPLACEMENT_KO_EN.md)에 기록되어
-있습니다.
+현재 프로젝트는 **운영자가 Aruba MM/WLC 상태를 빠르게 판단하도록 돕는 읽기 전용 모니터링 도구**입니다.
 
-Windows GitHub 배포는 수동 workflow와 변경 불가능한 버전 태그를 통해서만
-수행하며, 자동 검사·패키지 검증·해시 검증을 모두 통과한 onedir ZIP을
-Prerelease로 게시합니다. 실제 Aruba 장비와 Python 미설치 Windows 11 현장
-검수가 끝나기 전에는 Stable Release로 표시하지 않습니다.
+다음은 현재 범위가 아닙니다.
 
-## 검증 상태와 남은 현장 확인
+- WLC 설정 변경 또는 자동 복구 명령 실행
+- ClearPass/RADIUS 정책 조회
+- SNMP/Streaming Telemetry 기반 장기 시계열 수집
+- 중앙 서버 또는 클라우드 텔레메트리 전송
+- 실제 장비 장애 원인을 단일 명령만으로 확정하는 기능
 
-로컬 자동화는 파서, 감지·상관분석, 저장·재시작, 알림 중복 방지, SSH
-allowlist/호스트 키, Primary/Fallback, Worker Thread, UI 설정과 PyInstaller
-smoke 경로를 검증합니다. Windows Credential Manager 실제 API 왕복과 로컬
-Windows GUI 실행도 개발 PC 범위에서 확인할 수 있습니다.
+자동화 결과는 네트워크 장애 판단을 보조하며, 실제 장애 조치는 장비 상태와 운영 절차를 함께 확인해 결정해야 합니다.
 
-다음 항목은 별도 현장 증거가 필요하며 이 저장소의 자동화 결과만으로 완료로
-간주하지 않습니다.
+## 라이선스
 
-- 실제 ArubaMM-HW-10K 및 7240XM ArubaOS 버전별 세 명령 원본 형식
-- 실제 프롬프트, `enable`, `no paging` 지원 여부와 페이징 동작
-- Paramiko 5에서 실제 구형 ArubaOS의 KEX·호스트 키·서명 알고리즘 호환성
-- Primary 장애 시 실제 Fallback 수집 및 지문 승인 운영 절차
-- Python이 설치되지 않은 깨끗한 Windows 11 일반 사용자 PC/VM
-- 실제 100%, 125%, 150% 화면 배율, 고대비·다중 모니터의 창 경계와 Windows
-  알림 센터·트레이 정책
-- 실제 물리 F12/Fn 키 매핑과 창 포커스, 개발자 요소 선택 차단, 트레이 항목
-  카탈로그, 클립보드 정책, 고대비 테마와 다중 모니터
-- 사내 보안 정책에 따른 Credential Manager 사용 허용 여부
-
-현장 검수에는 [Windows 11 배포 검수 체크리스트](docs/WINDOWS11_QA_CHECKLIST_KO.md)를
-사용하십시오.
+프로젝트 자체 코드는 [MIT License](LICENSE)를 사용합니다. Windows 배포물의 PySide6/Qt 및 기타 제3자 구성요소는 각 라이선스와 고지를 따르며, 상세 내용은 `THIRD_PARTY_NOTICES.txt`, `QT_THIRD_PARTY_NOTICES.txt`, `LGPL_RUNTIME_LICENSES/` 및 [LGPL 런타임 교체 안내](docs/LGPL_RUNTIME_REPLACEMENT_KO_EN.md)를 참고하십시오.
