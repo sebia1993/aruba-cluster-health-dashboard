@@ -37,7 +37,7 @@ from aruba_mini_dashboard.main import restore_persisted_preferences
 from aruba_mini_dashboard.storage import SQLiteStorage
 from aruba_mini_dashboard.ui.settings_dialog import SettingsDialog
 from aruba_mini_dashboard.ui.detail_dialog import DetailDialog
-from aruba_mini_dashboard.ui.main_window import MainWindow
+from aruba_mini_dashboard.ui.main_window import HostKeyApprovalDialog, MainWindow
 from aruba_mini_dashboard.ui.widgets import NoWheelSlider
 
 
@@ -160,7 +160,10 @@ def test_declining_host_key_approval_discards_transient_connection_request(monke
     discarded: list[str] = []
     coordinator.discard_connection_test = discarded.append
     window = MainWindow(coordinator, AppSettings.default())
-    monkeypatch.setattr(QMessageBox, "question", lambda *_args, **_kwargs: QMessageBox.No)
+    monkeypatch.setattr(
+        "aruba_mini_dashboard.ui.main_window.HostKeyApprovalDialog.exec",
+        lambda _self: QDialog.Rejected,
+    )
 
     window._connection_test_finished(
         "mm",
@@ -176,6 +179,44 @@ def test_declining_host_key_approval_discards_transient_connection_request(monke
     assert discarded == ["mm"]
     window.tray_icon.hide()
     window.deleteLater()
+
+
+def test_batch_host_key_approval_dialog_shows_every_unknown_identity() -> None:
+    _app()
+    dialog = HostKeyApprovalDialog(
+        {
+            "details": (
+                {
+                    "role": "mm",
+                    "host": "192.0.2.1",
+                    "port": 22,
+                    "status": "approval_required",
+                    "algorithm": "ssh-ed25519",
+                    "fingerprint": "SHA256:mm",
+                },
+                {
+                    "role": "cluster",
+                    "host": "192.0.2.11",
+                    "port": 22,
+                    "status": "approval_required",
+                    "algorithm": "ssh-rsa",
+                    "fingerprint": "SHA256:wlc",
+                },
+                {
+                    "role": "cluster",
+                    "host": "192.0.2.12",
+                    "port": 22,
+                    "status": "verified",
+                },
+            )
+        }
+    )
+
+    assert dialog.table.rowCount() == 2
+    assert dialog.table.item(0, 0).text() == "MM"
+    assert dialog.table.item(1, 0).text() == "Controller"
+    assert dialog.table.item(1, 3).text() == "SHA256:wlc"
+    dialog.close()
 
 
 def test_dashboard_renders_summary_and_device_rows() -> None:
@@ -468,6 +509,82 @@ def test_invalid_non_secret_form_has_no_credential_side_effect() -> None:
 
     assert service.get(original_id).password == "original"
     assert list(persistent._credentials) == [original_id]
+    dialog.close()
+
+
+def test_initial_save_requests_integrated_connection_before_storing_credentials() -> None:
+    _app()
+    persistent = SessionCredentialStore()
+    service = CredentialService(persistent=persistent)
+    dialog = SettingsDialog(AppSettings.default(), service, initial_setup=True)
+    dialog.mm_ip.setText("192.0.2.1")
+    for edit, ip in zip(
+        dialog.member_ips,
+        ("192.0.2.11", "192.0.2.12", "192.0.2.13", "192.0.2.14"),
+        strict=True,
+    ):
+        edit.setText(ip)
+    dialog.primary_ip.setCurrentIndex(dialog.primary_ip.findData("192.0.2.11"))
+    dialog.shared_fields.username.setText("operator")
+    dialog.shared_fields.password.setText("temporary-password")
+    requested = QSignalSpy(dialog.connection_test_requested)
+
+    dialog._apply()
+
+    assert requested.count() == 1
+    assert requested.at(0)[0] == "all"
+    request = requested.at(0)[1]
+    assert request.purpose == "save"
+    assert request.credential is None
+    assert request.credential_overrides["mm"].password == "temporary-password"
+    assert persistent._credentials == {}
+    assert dialog.connection_request_pending is True
+    assert dialog.tabs.isEnabled() is False
+    dialog.complete_connection_request(False)
+    assert dialog.result() == QDialog.Rejected
+    assert dialog.tabs.isEnabled() is True
+    dialog.close()
+
+
+def test_successful_integrated_connection_stages_credentials_and_accepts_save() -> None:
+    _app()
+    persistent = SessionCredentialStore()
+    service = CredentialService(persistent=persistent)
+    dialog = SettingsDialog(AppSettings.default(), service, initial_setup=True)
+    dialog.mm_ip.setText("192.0.2.1")
+    for edit, ip in zip(
+        dialog.member_ips,
+        ("192.0.2.11", "192.0.2.12", "192.0.2.13", "192.0.2.14"),
+        strict=True,
+    ):
+        edit.setText(ip)
+    dialog.primary_ip.setCurrentIndex(dialog.primary_ip.findData("192.0.2.11"))
+    dialog.shared_fields.username.setText("operator")
+    dialog.shared_fields.password.setText("verified-password")
+
+    dialog._apply()
+    assert dialog.complete_connection_request(True) is True
+
+    assert dialog.result() == QDialog.Accepted
+    credential_id = dialog.settings.credentials.shared_credential_id
+    assert credential_id
+    assert service.get(credential_id).password == "verified-password"
+    dialog.rollback_staged_credentials()
+    dialog.close()
+
+
+def test_non_ssh_settings_save_skips_network_validation() -> None:
+    _app()
+    settings = AppSettings.default()
+    dialog = SettingsDialog(settings)
+    dialog.poll_interval.setValue(90)
+    requested = QSignalSpy(dialog.connection_test_requested)
+
+    dialog._apply()
+
+    assert requested.count() == 0
+    assert dialog.result() == QDialog.Accepted
+    assert dialog.settings.polling.interval_seconds == 90
     dialog.close()
 
 
@@ -799,12 +916,23 @@ def test_expired_session_credential_id_can_be_replaced_after_restart() -> None:
     # A new process has no knowledge or value for the old session-only ID.
     restarted_service = CredentialService(persistent=SessionCredentialStore())
     dialog = SettingsDialog(settings, restarted_service)
+    dialog.mm_ip.setText("192.0.2.1")
+    for edit, ip in zip(
+        dialog.member_ips,
+        ("192.0.2.11", "192.0.2.12", "192.0.2.13", "192.0.2.14"),
+        strict=True,
+    ):
+        edit.setText(ip)
+    dialog.primary_ip.setCurrentIndex(dialog.primary_ip.findData("192.0.2.11"))
     dialog.shared_fields.username.setText("operator")
     dialog.shared_fields.password.setText("fresh-session-secret")
     test_requests = QSignalSpy(dialog.connection_test_requested)
-    dialog._emit_connection_test("mm")
+    dialog._emit_connection_test("all")
     assert test_requests.count() == 1
-    assert test_requests.at(0)[1].credential.password == "fresh-session-secret"
+    assert test_requests.at(0)[1].credential is None
+    assert test_requests.at(0)[1].credential_overrides["mm"].password == "fresh-session-secret"
+    assert test_requests.at(0)[1].credential_overrides["cluster"].password == "fresh-session-secret"
+    dialog.complete_connection_request(False)
     collected = dialog._collect_settings(save_credentials=True)
 
     replacement_id = collected.credentials.shared_credential_id

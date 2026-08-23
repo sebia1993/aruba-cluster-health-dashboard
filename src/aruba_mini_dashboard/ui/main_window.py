@@ -10,9 +10,11 @@ from typing import Any, Callable
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QCloseEvent, QIcon, QKeySequence, QShowEvent
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QDialog,
+    QDialogButtonBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -64,6 +66,88 @@ STATUS_STYLES = {
     "down": ("#8A1C1C", "#FDECEC", "#D33A3A"),
     "unknown": ("#374151", "#F1F3F5", "#77808D"),
 }
+
+
+class HostKeyApprovalDialog(QDialog):
+    """Show every newly discovered host identity in one fail-safe decision."""
+
+    def __init__(self, result: Any, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.setWindowTitle("최초 SSH 호스트 키 일괄 승인")
+        layout = QVBoxLayout(self)
+        explanation = QLabel(
+            "장비 관리자에게 받은 지문과 모두 일치할 때만 승인하세요. "
+            "승인하면 아래 공개 키를 앱 전용 known_hosts에 한 번에 저장한 뒤 "
+            "로그인을 자동으로 확인합니다.",
+            self,
+        )
+        explanation.setWordWrap(True)
+        layout.addWidget(explanation)
+
+        candidates = [
+            item
+            for item in sequence(result, "details")
+            if display(value(item, "status", "")) == "approval_required"
+        ]
+        if not candidates:
+            candidates = [result]
+        grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        for item in candidates:
+            identity = (
+                display(value(item, "host", ""), ""),
+                display(value(item, "port", ""), ""),
+                display(value(item, "algorithm", ""), ""),
+                display(value(item, "fingerprint", ""), ""),
+            )
+            group = grouped.setdefault(identity, {"item": item, "roles": []})
+            role = display(value(item, "role", ""))
+            role_label = "MM" if role == "mm" else "Controller" if role == "cluster" else "장비"
+            if role_label not in group["roles"]:
+                group["roles"].append(role_label)
+        rows = tuple(grouped.values())
+        self.table = QTableWidget(len(rows), 4, self)
+        self.table.setHorizontalHeaderLabels(("역할", "대상", "키 형식", "SHA-256 지문"))
+        self.table.setAccessibleName("최초 연결 SSH 호스트 키 지문 목록")
+        self.table.setAccessibleDescription(
+            "장비 관리자에게 확인한 값과 비교한 뒤 전체 키를 한 번에 승인합니다."
+        )
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.verticalHeader().setVisible(False)
+        for row_index, group in enumerate(rows):
+            item = group["item"]
+            host = display(value(item, "host", ""), "")
+            port = display(value(item, "port", ""), "")
+            values = (
+                "/".join(group["roles"]),
+                f"{host}:{port}" if port else host,
+                display(value(item, "algorithm", ""), ""),
+                display(value(item, "fingerprint", ""), ""),
+            )
+            for column, text_ in enumerate(values):
+                self.table.setItem(row_index, column, QTableWidgetItem(text_))
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
+        self.table.resizeRowsToContents()
+        layout.addWidget(self.table)
+
+        buttons = QDialogButtonBox(self)
+        approve = buttons.addButton("모두 승인하고 연결", QDialogButtonBox.AcceptRole)
+        cancel = buttons.addButton("취소", QDialogButtonBox.RejectRole)
+        approve.clicked.connect(self.accept)
+        cancel.clicked.connect(self.reject)
+        cancel.setDefault(True)
+        layout.addWidget(buttons)
+        fit_window_to_available_screen(
+            self,
+            QSize(760, 380),
+            minimum_size=QSize(560, 280),
+            center_on_parent=True,
+        )
 
 
 class MainWindow(QMainWindow):
@@ -123,6 +207,7 @@ class MainWindow(QMainWindow):
         self.developer_inspector = developer_inspector
         self._developer_catalog_actions: list[QAction] = []
         self._quitting = False
+        self._active_settings_dialog: SettingsDialog | None = None
         self._current_view: DashboardView | None = None
         self._current_devices: list[Any] = []
         self._raw_outputs: Any = {}
@@ -823,7 +908,8 @@ class MainWindow(QMainWindow):
         if hasattr(self.coordinator, "connection_test_started"):
             self.coordinator.connection_test_started.connect(
                 lambda role: self.statusBar().showMessage(
-                    f"{'MM' if role == 'mm' else '클러스터'} SSH 연결을 확인하고 있습니다…"
+                    f"{'MM' if role == 'mm' else '클러스터' if role == 'cluster' else '전체 장비'} "
+                    "SSH 연결을 확인하고 있습니다…"
                 )
             )
             self.coordinator.connection_test_finished.connect(self._connection_test_finished)
@@ -1585,6 +1671,7 @@ class MainWindow(QMainWindow):
         if self.notification_service is not None:
             dialog.sound_test_requested.connect(self.notification_service.test_sound)
             dialog.notification_test_requested.connect(self.notification_service.test_notification)
+        self._active_settings_dialog = dialog
         # A scheduled poll can begin while this modal dialog is open.  Keep the
         # same dialog (and the operator's typed values) available when applying
         # is temporarily rejected, instead of closing it and discarding the
@@ -1600,6 +1687,8 @@ class MainWindow(QMainWindow):
                     self._refresh_setup_state()
                     return
         finally:
+            if self._active_settings_dialog is dialog:
+                self._active_settings_dialog = None
             # QDialog.close()/exec() only hides a parent-owned dialog. Delete it
             # after credential commit/rollback so repeated Settings use cannot
             # retain whole forms and inspector registrations for the process.
@@ -1803,6 +1892,7 @@ class MainWindow(QMainWindow):
         tester = getattr(self.coordinator, "test_connection", None)
         if not callable(tester):
             QMessageBox.information(self, "연결 테스트", "실행 중인 수집기에서 연결 테스트를 제공하지 않습니다.")
+            self._complete_active_settings_connection(False)
             return
         tester(role, settings)
 
@@ -1812,27 +1902,16 @@ class MainWindow(QMainWindow):
         host = display(value(result, "host", ""), "")
         port = display(value(result, "port", ""), "")
         fingerprint = display(value(result, "fingerprint", ""), "")
-        algorithm = display(value(result, "algorithm", ""), "")
         message = display(value(result, "message", "연결 테스트가 완료되었습니다."))
+        purpose = display(value(result, "purpose", "diagnostic"))
+        report = self._connection_result_report(result)
         if status == "approval_required":
-            details = (
-                f"대상: {host}:{port}\n"
-                f"키 형식: {algorithm}\n"
-                f"SHA-256 지문: {fingerprint}\n\n"
-                "장비 관리자에게 받은 지문과 일치할 때만 승인하세요. "
-                "승인하면 앱 전용 known_hosts에 저장한 뒤 로그인을 다시 확인합니다."
-            )
-            answer = QMessageBox.question(
-                self,
-                "최초 SSH 호스트 키 승인",
-                details,
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if answer != QMessageBox.Yes:
+            approval = HostKeyApprovalDialog(result, self)
+            if approval.exec() != QDialog.Accepted:
                 discard = getattr(self.coordinator, "discard_connection_test", None)
                 if callable(discard):
                     discard(role)
+                self._complete_active_settings_connection(False)
                 self.statusBar().showMessage("SSH 호스트 키 승인을 취소했습니다.", 5000)
                 return
             try:
@@ -1842,6 +1921,7 @@ class MainWindow(QMainWindow):
                 discard = getattr(self.coordinator, "discard_connection_test", None)
                 if callable(discard):
                     discard(role)
+                self._complete_active_settings_connection(False)
                 QMessageBox.critical(self, "SSH 호스트 키 저장 실패", str(exc))
             return
         if status == "mismatch":
@@ -1849,25 +1929,88 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(
                 self,
                 "SSH 호스트 키 불일치",
-                f"{message}\n\n대상: {host}:{port}\n현재 지문: {fingerprint}\n저장된 지문: {expected}",
+                f"{message}\n\n대상: {host}:{port}\n현재 지문: {fingerprint}\n"
+                f"저장된 지문: {expected}{report}",
             )
+            self._complete_active_settings_connection(False)
             self.statusBar().showMessage("SSH 키 불일치로 연결을 차단했습니다.", 10000)
             return
-        QMessageBox.information(
-            self,
-            "연결 테스트 성공",
-            f"{message}\n\n대상: {host}:{port}\nSHA-256 지문: {fingerprint}",
+        if status != "success":
+            QMessageBox.warning(
+                self,
+                "연결 확인 실패",
+                message + report,
+            )
+            self._complete_active_settings_connection(False)
+            self.statusBar().showMessage("SSH 연결 확인에 실패해 설정을 저장하지 않았습니다.", 8000)
+            return
+
+        pending_fallbacks = int(value(result, "pending_fallbacks", 0) or 0)
+        if purpose != "save" or pending_fallbacks:
+            presenter = QMessageBox.warning if pending_fallbacks else QMessageBox.information
+            presenter(
+                self,
+                "연결 확인 완료" if not pending_fallbacks else "연결 확인 완료 — 주의",
+                message + report,
+            )
+        completed = self._complete_active_settings_connection(True)
+        if purpose == "save" and not completed:
+            self.statusBar().showMessage("자격 증명 저장 단계에서 설정 저장을 완료하지 못했습니다.", 8000)
+            return
+        self.statusBar().showMessage(
+            "SSH 연결을 확인하고 설정을 저장했습니다."
+            if purpose == "save"
+            else "SSH 연결 진단을 완료했습니다.",
+            8000,
         )
-        self.statusBar().showMessage("SSH 연결 테스트를 완료했습니다.", 5000)
 
     @Slot(str, object)
     def _connection_test_failed(self, role: str, error: BaseException) -> None:
         QMessageBox.warning(
             self,
-            "연결 테스트 실패",
+            "연결 확인 실패",
             str(error) or "SSH 연결을 확인하지 못했습니다. 설정과 로그를 확인하세요.",
         )
-        self.statusBar().showMessage("SSH 연결 테스트에 실패했습니다.", 5000)
+        self._complete_active_settings_connection(False)
+        self.statusBar().showMessage("SSH 연결 확인에 실패했습니다.", 5000)
+
+    def _complete_active_settings_connection(self, success: bool) -> bool:
+        dialog = self._active_settings_dialog
+        if dialog is None or not bool(getattr(dialog, "connection_request_pending", False)):
+            return True
+        complete = getattr(dialog, "complete_connection_request", None)
+        if callable(complete):
+            result = complete(success)
+            return True if result is None else bool(result)
+        return False
+
+    @staticmethod
+    def _connection_result_report(result: Any) -> str:
+        details = sequence(result, "details")
+        if not details:
+            return ""
+        status_labels = {
+            "authenticated": "로그인 성공",
+            "verified": "지문 확인",
+            "approval_required": "승인 필요",
+            "mismatch": "지문 불일치",
+            "scan_failed": "지문 확인 실패",
+            "auth_failed": "로그인 실패",
+        }
+        lines = ["", "장비별 결과:"]
+        for item in details:
+            role = display(value(item, "role", ""))
+            role_label = "MM" if role == "mm" else "WLC"
+            item_host = display(value(item, "host", ""), "")
+            item_port = display(value(item, "port", ""), "")
+            item_status = display(value(item, "status", ""))
+            item_message = display(value(item, "message", ""), "")
+            label = status_labels.get(item_status, item_status or "확인 실패")
+            lines.append(
+                f"- {role_label} {item_host}:{item_port} — {label}"
+                + (f" ({item_message})" if item_message and item_status in {"scan_failed", "auth_failed"} else "")
+            )
+        return "\n" + "\n".join(lines)
 
     @Slot(str)
     def _notification_failed(self, message: str) -> None:

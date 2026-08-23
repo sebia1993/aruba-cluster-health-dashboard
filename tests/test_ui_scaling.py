@@ -153,8 +153,7 @@ for index in range(d.tabs.count()):
 for button in (
     d.buttons.button(QDialogButtonBox.Save),
     d.buttons.button(QDialogButtonBox.Cancel),
-    d.mm_test_button,
-    d.cluster_test_button,
+    d.connection_diagnostic_button,
 ):
     assert button.height() >= button.minimumSizeHint().height()
 assert d.mm_ip.toolTip()

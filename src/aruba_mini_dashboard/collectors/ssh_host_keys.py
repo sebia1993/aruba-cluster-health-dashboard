@@ -8,10 +8,12 @@ import os
 import socket
 import tempfile
 import threading
-from time import monotonic
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 
+from ..errors import ERROR_MESSAGES
 from .cancellable_socket import (
     SocketConnectCancelledError,
     close_socket_quietly,
@@ -20,19 +22,27 @@ from .cancellable_socket import (
 
 
 class SshHostKeyError(RuntimeError):
-    pass
+    default_code = "SSH_HOST_KEY_SCAN_FAILED"
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code or self.default_code
 
 
 class SshHostKeyUntrustedError(SshHostKeyError):
-    pass
+    default_code = "SSH_HOST_KEY_UNKNOWN"
 
 
 class SshHostKeyMismatchError(SshHostKeyError):
-    pass
+    default_code = "SSH_HOST_KEY_MISMATCH"
 
 
 class SshHostKeyCancelledError(SshHostKeyError):
-    pass
+    default_code = "CANCELLED"
+
+
+class SshHostKeyAlgorithmError(SshHostKeyError):
+    default_code = "SSH_ALGORITHM_INCOMPATIBLE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +127,10 @@ def scan_ssh_host_key(
     except Exception as exc:
         if cancel_event is not None and cancel_event.is_set():
             raise SshHostKeyCancelledError("SSH 지문 확인이 취소되었습니다.") from None
+        if _is_algorithm_incompatibility(exc):
+            raise SshHostKeyAlgorithmError(
+                ERROR_MESSAGES["SSH_ALGORITHM_INCOMPATIBLE"]
+            ) from exc
         raise SshHostKeyError("SSH 서버 지문을 확인하지 못했습니다.") from exc
     finally:
         if transport is not None:
@@ -151,18 +165,47 @@ def check_scanned_host_key(scanned: ScannedHostKey, known_hosts_path: Path) -> H
 def register_scanned_host_key(scanned: ScannedHostKey, known_hosts_path: Path) -> Path:
     """Atomically register an explicitly approved key; never replace a key."""
 
-    import paramiko
+    return register_scanned_host_keys((scanned,), known_hosts_path)
+
+
+def register_scanned_host_keys(
+    scanned_keys: Iterable[ScannedHostKey],
+    known_hosts_path: Path,
+) -> Path:
+    """Atomically register an approved batch without replacing existing keys.
+
+    Every conflict is checked before the temporary file is written, so an
+    approval covering several MM/WLC endpoints is committed all-or-nothing.
+    """
 
     destination = Path(known_hosts_path)
     host_keys = _load_host_keys(destination)
-    existing = host_keys.lookup(scanned.target)
-    if existing and scanned.algorithm in existing and existing[scanned.algorithm] != scanned.key:
-        raise SshHostKeyMismatchError("저장된 SSH 키와 새 키가 달라 자동 교체하지 않았습니다.")
-    host_keys.add(scanned.target, scanned.algorithm, scanned.key)
+    approved: dict[tuple[str, str], ScannedHostKey] = {}
+    for scanned in scanned_keys:
+        identity = (scanned.target, scanned.algorithm)
+        duplicate = approved.get(identity)
+        if duplicate is not None and duplicate.key != scanned.key:
+            raise SshHostKeyMismatchError(
+                "같은 SSH 대상에 서로 다른 키가 제시되어 승인하지 않았습니다."
+            )
+        approved[identity] = scanned
+        existing = host_keys.lookup(scanned.target)
+        if existing and scanned.algorithm in existing and existing[scanned.algorithm] != scanned.key:
+            raise SshHostKeyMismatchError(
+                "저장된 SSH 키와 새 키가 달라 자동 교체하지 않았습니다."
+            )
+    if not approved:
+        raise ValueError("승인할 SSH 호스트 키가 없습니다.")
+    for scanned in approved.values():
+        host_keys.add(scanned.target, scanned.algorithm, scanned.key)
     temporary: Path | None = None
     try:
         destination.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
+        descriptor, name = tempfile.mkstemp(
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            dir=destination.parent,
+        )
         os.close(descriptor)
         temporary = Path(name)
         host_keys.save(str(temporary))
@@ -217,3 +260,13 @@ def _load_host_keys(path: Path):
         except (OSError, ValueError) as exc:
             raise SshHostKeyError("앱 전용 known_hosts 파일을 읽을 수 없습니다.") from exc
     return host_keys
+
+
+def _is_algorithm_incompatibility(exc: BaseException) -> bool:
+    class_name = type(exc).__name__.casefold()
+    message = str(exc).casefold()
+    return (
+        "incompatiblepeer" in class_name
+        or "incompatible ssh peer" in message
+        or "no acceptable" in message and "algorithm" in message
+    )
