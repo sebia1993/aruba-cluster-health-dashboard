@@ -117,9 +117,8 @@ JSON, SQLite, 일반 로그와 배포 폴더에 저장하지 않습니다.
 
 구형 SSH 장비와 Paramiko 5.0.0이 안전한 알고리즘을 협상하지 못하면
 SSH_ALGORITHM_INCOMPATIBLE 오류로 표시합니다. 프로그램은 호환성을 위해 약한
-알고리즘을 자동 활성화하지 않습니다. 대상 MM/7240XM의 읽기 전용 연결과 수집은
-운영자가 확인했으며, 특정 legacy ArubaOS와 협상할 수 없는 경우는 명시적 지원
-경계로 처리합니다.
+알고리즘을 자동 활성화하지 않습니다. 대상 MM/7240XM의 읽기 전용 연결·수집과
+특정 legacy ArubaOS 호환성은 운영 전 승인된 환경에서 별도로 확인하십시오.
 
 종료 요청은 새 점검을 차단하고 재시도 대기를 깨운 뒤 연결 중인 TCP socket과
 활성 SSH 전송을 닫습니다. worker thread나 프로세스를 강제로 종료하지 않습니다.
@@ -186,14 +185,13 @@ transaction이므로 실패 시 함께 rollback하며, 활성 장애 10,000건 �
 세부 화면의 최근 원본과 로그에는 사내 IP/Hostname 등 운영 정보가 남을 수
 있으므로 외부 공유 전에 반드시 비식별화하십시오.
 
-운영 환경 확인
+현장 검증 주의
 --------------
 기본 fixture는 비식별 예시이므로 실제 ArubaOS 버전의 출력 형식과 다를 수
 있습니다. 파싱 실패를 장비 Down으로 해석하지 말고, 비식별화한 실제 출력을
 tests\fixtures에 추가해 parser 테스트를 갱신하십시오.
 
-대상 Aruba MM/7240XM의 실제 read-only SSH 동작은 운영자가 확인했습니다.
-이 배포물은 Python이 없는 PC를 목표로 패키징되며, 배포 PC나 조직 정책이 바뀐
-경우 WINDOWS11_QA_CHECKLIST_KO.md를 사용하여 Python 미설치 Windows 11,
-화면 배율과 알림·트레이 같은 환경 항목만 확인하십시오.
+이 배포물은 Python이 없는 PC를 목표로 패키징되지만, 현장 배포 전 반드시
+WINDOWS11_QA_CHECKLIST_KO.md를 사용하여 Python 미설치 Windows 11 일반 사용자
+PC/VM, 화면 배율, 알림·트레이, 실제 read-only SSH를 검수하십시오.
 성능 기준선과 측정하지 못한 항목은 PERFORMANCE_REPORT_KO.md를 확인하십시오.

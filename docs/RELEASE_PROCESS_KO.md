@@ -171,9 +171,9 @@ workflow는 다음 순서를 바꿀 수 없도록 구성되어 있습니다.
 - 제3자 고지와 Qt/LGPL 런타임 인벤토리 위치
 - 빌드에 사용한 정확한 source commit과 Python 버전
 - GitHub 자동 Source code 아카이브가 Windows 실행 패키지가 아니라는 설명
-- 실제 Aruba MM/7240XM 읽기 전용 동작은 운영자가 확인했고 민감한 장비 증거는
-  공개하지 않는다는 상태, Python 미설치 클린 Windows 11, 실제 DPI, 알림 정책,
-  저사양 PC/HDD/장시간 운전과 코드 서명은 외부 환경별 확인 항목이라는 제한사항
+- 실제 Aruba MM/7240XM 읽기 전용 동작, Python 미설치 클린 Windows 11,
+  실제 DPI, 알림 정책, 저사양 PC/HDD/장시간 운전과 코드 서명은 별도 현장
+  증거가 필요하다는 제한사항
 - 기본 전체 pytest와 별도로 Timeout, 연결 끊김, 승인·재시도, 잘못된 출력,
   설정·자격 증명 저장 실패를 반복하는 결정적 1,000회 reliability suite 통과
 - 저사양 모드의 자동 간격 최소 120초, MM·클러스터 최대 2개 병렬 수집,
@@ -201,7 +201,7 @@ workflow는 다음 순서를 바꿀 수 없도록 구성되어 있습니다.
 - [ ] 로컬 ZIP SHA-256, checksum 본문, GitHub asset digest가 일치함
 - [ ] `Source code (zip/tar.gz)`가 Windows 실행 패키지가 아님을 notes에 명시함
 - [ ] MIT License 링크와 제3자 고지 위치가 notes에 명시됨
-- [ ] 실제 장비 동작의 운영자 확인과 민감 증거 비공개 상태를 명시함
+- [ ] 실제 장비 동작의 별도 현장 증거 필요 상태를 명시함
 - [ ] 클린 Windows·DPI·알림·코드 서명의 외부 환경 경계를 명시함
 - [ ] 구형 Aruba의 Paramiko 5 legacy 알고리즘 지원 경계를 명시함
 - [ ] 결정적 1,000회 reliability suite 통과를 명시함
