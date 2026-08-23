@@ -86,7 +86,14 @@ py -3.13 -m venv .venv
 .\scripts\run_tests.ps1
 ```
 
-이 스크립트는 pytest, `compileall`, `pip check`를 실행합니다.
+이 스크립트는 전체 pytest, 1,000회 결정적 fault-injection / soak,
+`compileall`, `pip check`를 실행합니다.
+
+안정성 반복 횟수를 늘려 별도로 실행하려면 다음을 사용합니다.
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_reliability_soak.py --cycles 5000
+```
 
 Windows 배포물까지 영향을 주는 변경은 다음도 확인합니다.
 

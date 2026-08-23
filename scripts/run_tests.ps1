@@ -17,6 +17,8 @@ $env:PYTHONUTF8 = "1"
 $env:QT_QPA_PLATFORM = if ($env:QT_QPA_PLATFORM) { $env:QT_QPA_PLATFORM } else { "offscreen" }
 & $PythonExe -m pytest -q
 if ($LASTEXITCODE -ne 0) { throw "pytest failed with exit code $LASTEXITCODE" }
+& $PythonExe scripts\run_reliability_soak.py --cycles 1000
+if ($LASTEXITCODE -ne 0) { throw "reliability soak failed with exit code $LASTEXITCODE" }
 & $PythonExe -m compileall -q src tests scripts
 if ($LASTEXITCODE -ne 0) { throw "compileall failed with exit code $LASTEXITCODE" }
 & $PythonExe -m pip check
