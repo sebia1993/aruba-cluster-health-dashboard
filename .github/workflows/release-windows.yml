@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing annotated release tag, for example v0.4.0"
+        description: "Existing annotated release tag, for example v0.4.1"
         required: true
         type: string
       release_mode:
@@ -446,7 +446,8 @@ jobs:
 
           - 소스 커밋: ``$($env:AMD_SOURCE_COMMIT)``
           - Python: ``3.13.15`` (Windows x64 standard GIL runtime)
-          - 테스트, 제3자 고지 정합성, PyInstaller 빌드, 앱 PE 버전 리소스,
+          - 전체 테스트와 결정적 1,000회 reliability soak, 제3자 고지 정합성,
+            PyInstaller 빌드, 앱 PE 버전 리소스,
             내장 Python DLL 집합·AMD64·3.13.15 메타데이터, Qt exact inventory,
             LGPL Python 소스의 외부 제공·PYZ 비포함, 원본 onedir 검증, ZIP 안전 경로와
             민감 파일 검사, 압축 해제 후 EXE 스모크 검증 통과
@@ -473,6 +474,16 @@ jobs:
           - Windows 네이티브 트레이 메뉴 항목은 화면 오버레이가 아니라 ``요소 목록``의 정적
             카탈로그에서 확인합니다.
 
+          ## v0.4.1 프로그램 안정성
+
+          - 점검 중 합쳐진 수동 요청은 현재 연결 확인이나 점검이 끝난 직후 정확히 한 번
+            실행하며, 신호 처리 중 새 작업이 시작된 경우 중복 worker를 만들지 않습니다.
+          - Qt worker pool이 작업 제출을 거부해도 busy 상태, worker 추적, 연결 확인 map과
+            자격 증명 override를 포함한 일회성 요청을 즉시 폐기하고 다음 점검을 복구합니다.
+          - Timeout, 연결 끊김, 지문 승인 거부·재시도, 잘못된 출력, 설정 transaction과
+            자격 증명 부분 저장 실패를 결정적 순서로 1,000회 반복해 worker·socket·요청·
+            임시 저장 상태가 남지 않는지 검증합니다.
+
           ## v0.4.0 저장·연결 통합
 
           - SSH 연결 설정을 저장하면 자격 증명 조회 전에 MM과 Controller 공개 키를 모두
@@ -485,17 +496,17 @@ jobs:
           - 연결과 무관한 설정은 네트워크 점검 없이 저장하고, 전체 연결 재확인은 설정의
             ``고급 진단 > 연결 다시 확인``에서 실행합니다.
 
-          ## 현장 확인 범위
+          ## 운영자 확인과 외부 환경 경계
 
-          실제 Aruba 장비 출력과 사내 SSH 환경, 코드 서명, Python 미설치 클린 Windows 11,
-          실제 100%/125%/150% DPI, 저사양 PC·HDD·느린 네트워크·24시간 이상 운전 및
-          조직 정책이 적용된 알림 검증은 별도 현장 확인이 필요합니다.
-          실제 구형 ArubaOS와 Paramiko 5.0.0의 KEX·호스트 키·서명 알고리즘 호환성,
-          사내망에서 진행 중인 연결·명령의 종료 지연도 별도 현장 확인이 필요합니다.
-          실제 물리 F12/Fn 키 매핑, 창 포커스, 시스템 트레이 카탈로그, 조직 클립보드 정책,
-          고대비 테마와 다중 모니터에서의 개발자 모드·대화상자 화면 경계도 별도 현장 확인이 필요합니다.
-          실제 장비 설정을 변경하는 명령은 지원하지 않지만, 운영망 적용 전 읽기 전용 계정과
-          호스트 키 정책을 현장 기준으로 다시 확인하십시오.
+          실제 Aruba MM/7240XM의 읽기 전용 연결·수집과 화면 동작은 운영자가 확인했습니다.
+          실제 IP, Hostname, 계정, SSH 지문과 CLI 원문은 공개하지 않습니다. 이번 patch는
+          장비 명령과 판단 규칙을 바꾸지 않으며 장비 확인을 다시 요구하지 않습니다.
+          Python 미설치 클린 Windows 11, 코드 서명, 실제 100%/125%/150% DPI,
+          저사양 PC·HDD·느린 네트워크·24시간 이상 운전, 조직 알림 정책·조직 클립보드 정책,
+          물리 F12/Fn 키 매핑, 시스템 트레이 카탈로그, 고대비 테마와 다중 모니터는
+          배포 환경별 확인 항목입니다.
+          Paramiko 5.0.0은 약한 legacy 알고리즘을 자동 활성화하지 않으며 안전한 협상이
+          불가능하면 ``SSH_ALGORITHM_INCOMPATIBLE`` 지원 경계로 명시합니다.
           "@
           $notesText = $notesText -replace '(?m)^          ', ''
           [System.IO.File]::WriteAllText($notesPath, $notesText, (New-Object System.Text.UTF8Encoding($false)))

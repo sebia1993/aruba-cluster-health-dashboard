@@ -219,7 +219,7 @@ class PollCoordinator(QObject):
         self._connection_test_settings[role] = settings
         worker.signals.succeeded.connect(self._on_connection_test_succeeded)
         worker.signals.failed.connect(self._on_connection_test_failed)
-        self._thread_pool.start(worker)
+        self._submit_worker(worker, connection_role=role)
 
     def approve_host_key(self, scanned: Any) -> Any:
         if self._host_key_approver is None:
@@ -266,7 +266,45 @@ class PollCoordinator(QObject):
         self._workers.add(worker)
         worker.signals.succeeded.connect(self._on_worker_succeeded)
         worker.signals.failed.connect(self._on_worker_failed)
-        self._thread_pool.start(worker)
+        self._submit_worker(worker)
+
+    def _submit_worker(
+        self,
+        worker: _PollWorker,
+        *,
+        connection_role: str | None = None,
+    ) -> bool:
+        """Submit one worker and fully unwind state if Qt rejects it."""
+
+        try:
+            self._thread_pool.start(worker)
+            return True
+        except Exception:
+            LOGGER.exception("Background worker submission failed")
+            self._workers.discard(worker)
+            if connection_role is not None:
+                self._connection_workers.pop(worker, None)
+                # The request can contain an unsaved credential override. Never
+                # retain it when no worker owns the attempt.
+                self._connection_test_settings.pop(connection_role, None)
+            # A queued manual request must not recursively resubmit into a pool
+            # that has just rejected work. Automatic mode may try again at its
+            # normal bounded interval.
+            self._manual_pending = False
+            self._busy = False
+            self.busy_changed.emit(False)
+            if not self._shutdown_requested:
+                if connection_role is not None:
+                    self.connection_test_failed.emit(
+                        connection_role,
+                        RuntimeError("백그라운드 연결 확인 작업을 시작하지 못했습니다."),
+                    )
+                else:
+                    self.cycle_failed.emit(
+                        RuntimeError("백그라운드 점검 작업을 시작하지 못했습니다.")
+                    )
+            self._continue_after_work()
+            return False
 
     @Slot(object, object)
     def _on_worker_succeeded(self, worker: _PollWorker, result: Any) -> None:
@@ -288,8 +326,7 @@ class PollCoordinator(QObject):
         if getattr(result, "status", "") != "approval_required":
             self._connection_test_settings.pop(role, None)
         self.connection_test_finished.emit(role, result)
-        if self._automatic and not self._timer.isActive():
-            self._schedule_next()
+        self._continue_after_work()
 
     @Slot(object, object)
     def _on_connection_test_failed(self, worker: _PollWorker, error: BaseException) -> None:
@@ -301,8 +338,7 @@ class PollCoordinator(QObject):
         if self._shutdown_requested:
             return
         self.connection_test_failed.emit(role, error)
-        if self._automatic and not self._timer.isActive():
-            self._schedule_next()
+        self._continue_after_work()
 
     @Slot()
     def _finish_cycle(
@@ -325,8 +361,24 @@ class PollCoordinator(QObject):
             )
             self.cycle_failed.emit(error)
 
-        if self._manual_pending and not self._cancel_event.is_set():
+        self._continue_after_work()
+
+    def _continue_after_work(self) -> None:
+        """Drain one coalesced manual request, then restore automatic timing."""
+
+        if self._shutdown_requested:
             self._manual_pending = False
+            return
+        # A direct Qt slot may have started a retry or a new poll while handling
+        # the completion signal. Do not overlap that re-entrant work.
+        if self._busy:
+            return
+        if self._manual_pending:
+            self._manual_pending = False
+            if self._cancel_event.is_set():
+                if self._automatic and not self._timer.isActive():
+                    self._schedule_next()
+                return
             self._start_cycle("manual-pending")
             return
         if self._automatic and not self._timer.isActive():

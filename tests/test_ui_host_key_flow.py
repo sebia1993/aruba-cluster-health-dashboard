@@ -578,6 +578,7 @@ def test_integrated_onboarding_blocks_a_key_change_during_any_authentication(
     assert result.host == "192.0.2.12"
 
 
+@pytest.mark.reliability
 def test_batch_host_key_registration_is_atomic_on_any_conflict(tmp_path: Path) -> None:
     paramiko = pytest.importorskip("paramiko")
     known_hosts = tmp_path / "known_hosts"

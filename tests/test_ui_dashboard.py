@@ -19,6 +19,7 @@ from aruba_mini_dashboard.config import (
 from aruba_mini_dashboard.credentials import (
     CredentialNotFoundError,
     CredentialService,
+    CredentialStoreUnavailableError,
     DeviceCredential,
     SessionCredentialStore,
 )
@@ -489,6 +490,56 @@ def test_separate_credential_update_preserves_omitted_values_and_other_role() ->
     dialog.commit_staged_credentials()
     with pytest.raises(CredentialNotFoundError):
         service.get(mm_id)
+    dialog.close()
+
+
+@pytest.mark.reliability
+def test_second_credential_save_failure_rolls_back_the_first_staged_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _app()
+    persistent = SessionCredentialStore()
+    service = CredentialService(persistent=persistent)
+    mm_id = service.save(
+        DeviceCredential("mm-user", "old-mm-password"),
+        session_only=False,
+    )
+    cluster_id = service.save(
+        DeviceCredential("cluster-user", "old-cluster-password"),
+        session_only=False,
+    )
+    settings = AppSettings.default()
+    settings.credentials.use_shared_credentials = False
+    settings.mobility_master.credential_id = mm_id
+    settings.cluster.credential_id = cluster_id
+    dialog = SettingsDialog(settings, service)
+    dialog.mm_fields.password.setText("new-mm-password")
+    dialog.cluster_fields.password.setText("new-cluster-password")
+    original_save = service.save
+    calls = 0
+
+    def fail_second_save(credential, *, session_only, credential_id=None):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise CredentialStoreUnavailableError("injected credential-store failure")
+        return original_save(
+            credential,
+            session_only=session_only,
+            credential_id=credential_id,
+        )
+
+    monkeypatch.setattr(service, "save", fail_second_save)
+
+    with pytest.raises(CredentialStoreUnavailableError, match="injected"):
+        dialog._collect_settings(save_credentials=True)
+
+    assert calls == 2
+    assert set(persistent._credentials) == {mm_id, cluster_id}
+    assert service.get(mm_id).password == "old-mm-password"
+    assert service.get(cluster_id).password == "old-cluster-password"
+    assert dialog._staged_new_credential_ids == []
+    assert dialog._staged_old_credential_ids == []
     dialog.close()
 
 

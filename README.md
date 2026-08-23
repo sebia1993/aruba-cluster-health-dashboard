@@ -17,7 +17,7 @@
 | 담당 범위 | 문제 정의, 상태 모델, Parser·상관분석, Windows UI, SSH 안전 경계, 패키징과 CI/CD |
 | 핵심 판단 | 접속 실패를 장비 장애로 단정하지 않고, 연속 관측과 이전 정상 기준값으로 순간 변동의 오탐을 억제 |
 | 검증 증거 | 비식별 fixture, 가짜 SSH 통합 테스트, Offscreen UI, Windows onedir 패키지와 smoke 자동 검증 |
-| 증거의 한계 | 자동·합성 검증 결과이며, 실제 Aruba 장비·운영 환경 검증 및 업무 성과 수치와 구분 |
+| 증거의 한계 | 자동·합성 검증과 운영자 확인 범위를 구분하며, 실제 장비 원문·업무 성과 수치는 비공개 |
 
 ## 한눈에 보기
 
@@ -188,9 +188,10 @@ show lc-cluster group-membership
 | Primary / Fallback 수집 경로 | ✅ 가짜 SSH·통합 테스트 |
 | SQLite 상태·재시작·손상 보호 | ✅ 자동 검증 |
 | Worker Thread / 중복 점검 제어 | ✅ 자동 검증 |
+| Timeout·연결 끊김·잘못된 출력·저장 실패 반복 | ✅ 결정적 fault-injection / soak |
 | Offscreen PySide6 UI | ✅ 자동 검증 |
 | Windows onedir 패키지 / smoke | ✅ GitHub Actions |
-| 실제 Aruba 장비·ArubaOS별 출력 | ⚠️ 별도 현장 증거 필요 |
+| 실제 Aruba MM / 7240XM 읽기 전용 동작 | ✅ 운영자 확인 완료, 민감 원문 비공개 |
 | Python 미설치 Windows 11 실사용 환경 | ⚠️ 별도 현장 증거 필요 |
 
 구체적인 검증 범위와 공개 가능한 증거 수준은 [검증 보고서](docs/VALIDATION_REPORT_KO.md)에 정리되어 있습니다.
@@ -219,6 +220,14 @@ py -3.13 -m venv .venv
 .\scripts\run_tests.ps1
 ```
 
+`run_tests.ps1`은 전체 pytest 뒤 Timeout, 연결 끊김, 잘못된 출력, 취소·재시도,
+원자적 저장 실패를 1,000회 반복하는 안정성 suite도 실행합니다. 더 긴 반복은 다음과
+같이 실행할 수 있습니다.
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_reliability_soak.py --cycles 5000
+```
+
 Windows onedir 패키지:
 
 ```powershell
@@ -228,7 +237,7 @@ Windows onedir 패키지:
 버전 ZIP과 SHA-256:
 
 ```powershell
-.\scripts\package_release.ps1 -Version 0.4.0
+.\scripts\package_release.ps1 -Version 0.4.1
 ```
 
 개발 구조와 변경 원칙은 [`DEVELOPMENT.md`](DEVELOPMENT.md), Release 검증·배포 절차는 [Windows 배포 절차](docs/RELEASE_PROCESS_KO.md)를 참고하십시오.

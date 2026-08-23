@@ -22,13 +22,16 @@
 | 저장 시 지문 일괄 승인·로그인 | ✅ 자동 검증 | 가짜 SSH / offscreen 설정 UI |
 | SQLite 저장·재시작·손상 보호 | ✅ 자동 검증 | 임시/메모리 SQLite 테스트 |
 | Worker Thread / 중복 점검 | ✅ 자동 검증 | PollCoordinator / UI 테스트 |
+| 반복 Timeout·Disconnect·Parser·저장 실패 | ✅ 자동 검증 | 결정적 fault-injection / soak |
 | PySide6 offscreen UI | ✅ 자동 검증 | GUI 테스트 |
 | Windows onedir 패키지 | ✅ GitHub Actions | `ci-windows.yml` |
 | 추출 후 EXE smoke | ✅ GitHub Actions | 버전 ZIP 검증 경로 |
-| 실제 Aruba MM / 7240XM 출력 | ⚠️ 별도 현장 증거 | 자동 fixture로 대체하지 않음 |
+| 실제 Aruba MM / 7240XM 읽기 전용 동작 | ✅ 운영자 확인 | 민감 원문은 공개하지 않음 |
 | Python 미설치 Windows 11 운용 | ⚠️ 별도 현장 증거 | 실제 PC/VM 검증 필요 |
 
-> 자동 테스트가 실제 Aruba 장비 호환성을 증명한다고 표현하지 않습니다. 자동 검증은 구현된 Parser·상태 전이·저장·UI·패키지 계약이 재현 가능하게 동작하는지를 검증합니다.
+> 자동 테스트와 운영자 현장 확인은 서로 다른 증거입니다. 실제 대상 장비 동작은
+> 운영자가 확인했으며, 자동 검증은 Parser·상태 전이·저장·UI·패키지 계약과 반복
+> 장애 뒤의 프로그램 상태 복구를 재현 가능하게 검증합니다.
 
 ## 2. 자동 검증 실행
 
@@ -41,6 +44,7 @@
 주요 항목:
 
 - pytest
+- 1,000회 결정적 fault-injection / soak
 - `compileall`
 - `pip check`
 - 비식별 fixture Parser
@@ -48,6 +52,12 @@
 - SQLite와 설정 검증
 - 가짜 SSH / 로컬 Paramiko SSH 경계
 - Offscreen PySide6 UI
+
+긴 안정성 반복만 별도로 실행할 수도 있습니다.
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\run_reliability_soak.py --cycles 5000
+```
 
 Windows 패키지 검증:
 
@@ -188,9 +198,27 @@ SQLite 관련 주요 경계:
 - Primary 실패 시 Fallback
 - 실제 수집 Controller 기록
 
-실제 구형 ArubaOS와 Paramiko의 KEX/서명 알고리즘 호환성은 별도 현장 검증 대상으로 남깁니다.
+대상 MM/7240XM의 읽기 전용 연결·수집은 운영자가 확인했습니다. 버전별 legacy
+알고리즘을 추측해 자동 활성화하지 않으며, 안전한 협상이 불가능하면
+`SSH_ALGORITHM_INCOMPATIBLE`로 종료하는 지원 경계를 유지합니다.
 
-## 8. Windows 패키지 검증
+## 8. 반복 장애 주입·Soak 검증
+
+`pytest -m reliability`는 난수에 의존하지 않는 고정 순서로 다음 실패를 반복합니다.
+
+- Timeout, 연결 끊김, 작업 스케줄 제출 거부
+- 점검 중 여러 번 누른 수동 요청의 1회 병합과 다음 회차 시작
+- 연결 확인 실패·취소·지문 승인 거부·승인 후 재시도
+- 설정 commit, rollback, commit marker가 남은 비정상 종료 복구
+- 두 번째 자격 증명 저장 실패 시 첫 번째 임시 저장 rollback
+- 여러 endpoint 호스트 키 일괄 저장의 충돌 원자성
+- 제어 문자, 긴 행, 잘못된 byte와 불완전한 표가 섞인 Parser 입력
+
+기본 pytest는 120회 경계를 빠르게 확인하고, Windows CI와 Release 빌드는 별도
+1,000회 suite를 다시 실행합니다. 각 반복 뒤 worker, busy 상태, 연결 요청 map,
+수동 대기 요청과 설정 transaction 임시 파일이 남지 않는지 확인합니다.
+
+## 9. Windows 패키지 검증
 
 CI와 패키지 검증기는 다음을 확인합니다.
 
@@ -205,27 +233,21 @@ CI와 패키지 검증기는 다음을 확인합니다.
 
 이 검증은 실제 조직 정책, EDR, Windows 알림센터 정책과 물리 모니터 배율 검수를 대체하지 않습니다.
 
-## 9. 현장 검증 체크리스트
+## 10. 운영자 확인과 외부 환경 경계
 
-실제 허가된 환경에서 검증할 경우 다음을 확인합니다.
+실제 Aruba MM/7240XM의 접속, 읽기 전용 세 명령 수집과 화면 동작은 운영자가
+확인했습니다. 이번 patch는 장비 명령과 판단 규칙을 바꾸지 않고 프로그램 내부의
+반복 실패 복구만 강화하므로 장비 확인을 릴리스 전제 조건으로 다시 요구하지 않습니다.
 
-| 항목 | 확인 내용 |
+| 항목 | 상태 |
 |---|---|
-| MM 연결 | 저장 시 SSH 지문 일괄 승인과 자동 로그인 정상 |
-| MM 출력 | 실제 `show switches`가 Parser와 일치 |
-| Cluster 연결 | Primary 조회 정상 |
-| Fallback | 준비 미완료 경고와 Primary 불가 시 Fallback 수집 정상 |
-| Client 분배 | 실제 Active/Standby와 화면 값 대조 |
-| Membership | Connection-Type과 화면 값 대조 |
-| 설정 변경 | 점검 전후 구성 변경 없음 |
-| 자동 점검 | 지정 간격과 중복 실행 방지 확인 |
-| 장애/복구 | 실제 또는 승인된 시험 시나리오에서 상태 전이 확인 |
-| Credential Manager | 실제 Windows 사용자 범위에서 저장/조회 확인 |
-| 알림/Tray | 조직 정책이 적용된 Windows에서 확인 |
-| 화면 배율 | 100/125/150%와 다중 모니터 확인 |
-| 클린 PC | Python 미설치 Windows 11에서 배포 폴더 실행 |
+| MM / 7240XM 연결과 읽기 전용 수집 | ✅ 운영자 확인 완료 |
+| 실제 주소·장비명·SSH 지문·CLI 원문 | 🔒 비공개 |
+| 장애 주입 뒤 프로그램 상태 복구 | ✅ 자동 반복 검증 |
+| Python 미설치 클린 Windows / 조직 정책 / 실제 DPI | 외부 환경별 확인 항목 |
+| 코드 서명 / EDR / 물리 모니터 | 배포 환경별 확인 항목 |
 
-## 10. 공개 가능한 현장 검증 요약
+## 11. 공개 가능한 현장 검증 요약
 
 실제 검증을 완료했더라도 공개 저장소에는 아래 정도만 기록합니다.
 
@@ -240,7 +262,7 @@ CI와 패키지 검증기는 다음을 확인합니다.
 - 실제 주소·장비명·출력 원문: 비공개
 ```
 
-## 11. 공개하지 않는 정보
+## 12. 공개하지 않는 정보
 
 - 실제 IP / Hostname / 장비 별칭
 - SSH 사용자명 / 비밀번호 / Enable Secret

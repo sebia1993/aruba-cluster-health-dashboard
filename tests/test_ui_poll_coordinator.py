@@ -288,6 +288,99 @@ def test_retry_consumes_approval_pending_request_even_when_coordinator_is_busy()
     assert coordinator.shutdown()
 
 
+def test_manual_request_queued_during_connection_test_runs_once_after_completion() -> None:
+    _app()
+    connection_entered = threading.Event()
+    release_connection = threading.Event()
+    pool = QThreadPool()
+    pool.setMaxThreadCount(1)
+    poll_calls: list[int] = []
+
+    class Success:
+        status = "success"
+
+    def collect(_cancel_event) -> int:
+        poll_calls.append(len(poll_calls) + 1)
+        return poll_calls[-1]
+
+    def tester(_role, _settings, _cancel_event) -> Success:
+        connection_entered.set()
+        assert release_connection.wait(2)
+        return Success()
+
+    coordinator = PollCoordinator(
+        collect,
+        thread_pool=pool,
+        connection_tester=tester,
+    )
+    connection_finished = QSignalSpy(coordinator.connection_test_finished)
+    cycle_started = QSignalSpy(coordinator.cycle_started)
+    cycle_finished = QSignalSpy(coordinator.cycle_finished)
+    queued = QSignalSpy(coordinator.manual_poll_queued)
+
+    coordinator.test_connection("all", object())
+    assert connection_entered.wait(1)
+    coordinator.check_now()
+    coordinator.check_now()
+    assert queued.count() == 1
+    release_connection.set()
+
+    assert _wait_until(
+        lambda: connection_finished.count() == 1 and cycle_finished.count() == 1
+    )
+    assert poll_calls == [1]
+    assert cycle_started.at(0)[0] == "manual-pending"
+    assert coordinator._manual_pending is False
+    assert coordinator._workers == set()
+    assert not coordinator.busy
+    assert coordinator.shutdown()
+
+
+def test_worker_submission_failure_releases_busy_and_transient_request_state() -> None:
+    _app()
+
+    class RejectingThreadPool:
+        def start(self, _worker) -> None:
+            raise RuntimeError("private injected scheduler detail")
+
+        def waitForDone(self, _timeout_ms: int) -> bool:
+            return True
+
+    pool = RejectingThreadPool()
+    coordinator = PollCoordinator(
+        lambda: None,
+        thread_pool=pool,
+        connection_tester=lambda *_args: None,
+    )
+    cycle_failed = QSignalSpy(coordinator.cycle_failed)
+    connection_failed = QSignalSpy(coordinator.connection_test_failed)
+    busy_changed = QSignalSpy(coordinator.busy_changed)
+
+    coordinator.check_now()
+
+    assert cycle_failed.count() == 1
+    assert "private injected" not in str(cycle_failed.at(0)[0])
+    assert coordinator._workers == set()
+    assert not coordinator.busy
+
+    transient_request = object()
+    coordinator.test_connection("all", transient_request)
+
+    assert connection_failed.count() == 1
+    assert "private injected" not in str(connection_failed.at(0)[1])
+    assert coordinator._connection_workers == {}
+    assert coordinator._connection_test_settings == {}
+    assert coordinator._workers == set()
+    assert not coordinator.busy
+    assert [busy_changed.at(index)[0] for index in range(busy_changed.count())] == [
+        True,
+        False,
+        True,
+        False,
+    ]
+    assert coordinator.shutdown()
+
+
 def test_shutdown_prevents_new_poll_and_connection_test_submissions() -> None:
     _app()
     pool = QThreadPool()

@@ -124,6 +124,9 @@ Netmiko·Paramiko·Windows Credential Manager, 동결 fixture 탐색, 데모
       최근 결과가 한 번에 표시됨
 - [ ] 점검 중 반복 클릭으로 점검 coordinator worker가 중복 생성되지 않으며
       앱 전용 Qt worker 풀의 동시 점검은 1개로 제한됨
+- [ ] `scripts\run_tests.ps1`의 1,000회 reliability suite가 Timeout, 연결 끊김,
+      취소·재시도, 잘못된 출력과 저장 실패 뒤에도 worker·busy·일회성 요청·임시
+      transaction 상태가 남지 않는 것을 확인함
 - [ ] 선택적 성능 로그가 기본적으로 생성되지 않고, 켰을 때만
       `logs\performance.log`에 집계 시간·개수가 기록됨
 - [ ] 성능 로그에 IP, Hostname, 사용자 ID, 비밀번호, Enable Secret, credential ID,
@@ -134,9 +137,10 @@ Netmiko·Paramiko·Windows Credential Manager, 동결 fixture 탐색, 데모
 - [ ] 저전력 CPU·4~8GB RAM·SATA SSD 또는 HDD 환경에서 UI가 응답 없음 상태가
       되지 않으며 장시간 운전 후 스레드·핸들·메모리가 지속 증가하지 않음
 
-실제 저사양 PC, HDD cold start, 느린 Aruba SSH와 24시간 이상 soak를 실행하지
-않았다면 통과로 표시하지 말고 `PERFORMANCE_REPORT_KO.md`의 미측정 항목으로
-남기십시오.
+실제 저사양 PC, HDD cold start, 느린 Aruba SSH와 24시간 이상 soak는 배포 환경이
+바뀔 때 수행하는 선택적 환경 평가입니다. 프로그램 안정성 릴리스 기준은 위의
+결정적 1,000회 reliability suite이며, 물리 환경 측정값은 수행한 경우에만
+`PERFORMANCE_REPORT_KO.md`에 기록합니다.
 
 ## 실제 출력과 판단 규칙
 

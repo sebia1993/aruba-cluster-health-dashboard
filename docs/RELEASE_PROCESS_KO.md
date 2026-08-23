@@ -63,6 +63,10 @@ Actions에서 재현 가능하게 빌드하고, 검증된 자산만 GitHub Prere
   `known_hosts` 갱신, 변경 키 차단, MM 및 최소 1대 Controller 필수 성공 정책과
   Fallback 준비 경고를 추가한 minor Prerelease입니다. 별도 필수 사전 테스트는
   제거하고 전체 재확인은 고급 진단으로 이동했습니다.
+- `v0.4.1`: 수동 요청 병합과 worker 제출 실패 복구를 보강하고 Timeout, 연결 끊김,
+  승인·재시도, 잘못된 출력, 설정 transaction과 자격 증명 부분 저장을 반복하는
+  결정적 1,000회 reliability suite를 Windows CI와 Release 경로에 추가한 patch
+  Prerelease입니다. 장비 명령과 판단 규칙은 변경하지 않습니다.
 
 ## 로컬 검증
 
@@ -71,21 +75,21 @@ CPython 3.13.15 x64 표준 GIL 빌드와 Windows PowerShell 5.1 환경에서 실
 
 ```powershell
 .\scripts\run_tests.ps1
-.\scripts\package_release.ps1 -Version 0.4.0
+.\scripts\package_release.ps1 -Version 0.4.1
 ```
 
 성공하면 `dist\release`에는 다음 두 파일만 생성됩니다.
 
 ```text
-ArubaMiniDashboard-v0.4.0-windows-x64.zip
-ArubaMiniDashboard-v0.4.0-windows-x64.zip.sha256
+ArubaMiniDashboard-v0.4.1-windows-x64.zip
+ArubaMiniDashboard-v0.4.1-windows-x64.zip.sha256
 ```
 
 다른 위치로 전달된 자산은 다시 빌드하지 않고 다음과 같이 검증할 수 있습니다.
 
 ```powershell
 .\scripts\package_release.ps1 `
-  -Version 0.4.0 `
+  -Version 0.4.1 `
   -OutputDirectory artifacts\release `
   -VerifyOnly
 ```
@@ -105,8 +109,8 @@ Qt exact inventory와 한국어 번역 2개, PySide6/shiboken6/Paramiko/scp 외�
 ```powershell
 git switch main
 git pull --ff-only
-git tag -a v0.4.0 -m "Aruba Mini Dashboard v0.4.0"
-git push origin v0.4.0
+git tag -a v0.4.1 -m "Aruba Mini Dashboard v0.4.1"
+git push origin v0.4.1
 ```
 
 태그가 잘못된 커밋을 가리키면 Release workflow를 실행하지 않습니다. 게시된
@@ -122,7 +126,7 @@ Workflow가 사용하는 공식 Actions는 Node.js 24 기반 버전의 검토된
 사용하려면 runner `2.327.1` 이상이 필요합니다. 구형 Node 런타임을 강제로 허용하는
 환경 변수로 우회하지 않습니다.
 
-- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.4.0`
+- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.4.1`
 - `release_mode`:
   - `build-only`: 빌드·검증 후 Actions artifact만 생성
   - `draft-prerelease`: 검증된 두 자산을 새 Prerelease Draft에 업로드하고 정지
@@ -167,9 +171,11 @@ workflow는 다음 순서를 바꿀 수 없도록 구성되어 있습니다.
 - 제3자 고지와 Qt/LGPL 런타임 인벤토리 위치
 - 빌드에 사용한 정확한 source commit과 Python 버전
 - GitHub 자동 Source code 아카이브가 Windows 실행 패키지가 아니라는 설명
-- 실제 Aruba 장비, 사내 SSH, Python 미설치 클린 Windows 11, 실제 DPI,
-  알림 정책, 저사양 PC/HDD/장시간 운전과 코드 서명이 별도 현장 검증이라는
-  제한사항
+- 실제 Aruba MM/7240XM 읽기 전용 동작은 운영자가 확인했고 민감한 장비 증거는
+  공개하지 않는다는 상태, Python 미설치 클린 Windows 11, 실제 DPI, 알림 정책,
+  저사양 PC/HDD/장시간 운전과 코드 서명은 외부 환경별 확인 항목이라는 제한사항
+- 기본 전체 pytest와 별도로 Timeout, 연결 끊김, 승인·재시도, 잘못된 출력,
+  설정·자격 증명 저장 실패를 반복하는 결정적 1,000회 reliability suite 통과
 - 저사양 모드의 자동 간격 최소 120초, MM·클러스터 최대 2개 병렬 수집,
   적응형 원본 출력 보관과 250대 단위 전체 표 페이지, 수동 점검 즉시 실행,
   일반 모드와 동일한 명령·감지 규칙·결과 정확성
@@ -179,7 +185,7 @@ workflow는 다음 순서를 바꿀 수 없도록 구성되어 있습니다.
 - 종료 요청이 새 작업을 차단하고 취소 가능한 TCP와 활성 SSH 전송을 닫되
   worker thread·프로세스를 강제로 종료하지 않는다는 경계
 - Paramiko 5.0.0의 `SSH_ALGORITHM_INCOMPATIBLE` 안내와 약한 legacy 알고리즘을
-  자동 활성화하지 않는 정책, 실제 구형 ArubaOS 호환성의 현장 검증 경계
+  자동 활성화하지 않는 정책 및 버전별 legacy 알고리즘 지원 경계
 - SQLite schema·JSON 한도·비밀 필드 거부, 전체 Authorization 값 마스킹과
   로그 기록 실패 시 원문 record 재출력 방지
 - 설정·상세·개발자 대화상자와 복원된 메인 창의 사용 가능한 화면 영역 보정,
@@ -195,9 +201,10 @@ workflow는 다음 순서를 바꿀 수 없도록 구성되어 있습니다.
 - [ ] 로컬 ZIP SHA-256, checksum 본문, GitHub asset digest가 일치함
 - [ ] `Source code (zip/tar.gz)`가 Windows 실행 패키지가 아님을 notes에 명시함
 - [ ] MIT License 링크와 제3자 고지 위치가 notes에 명시됨
-- [ ] 실제 장비·클린 Windows·DPI·알림·코드 서명 미검증 경계를 명시함
-- [ ] 구형 Aruba의 Paramiko 5 알고리즘 호환성과 실제 SSH 종료 지연의 미검증
-      경계를 명시함
+- [ ] 실제 장비 동작의 운영자 확인과 민감 증거 비공개 상태를 명시함
+- [ ] 클린 Windows·DPI·알림·코드 서명의 외부 환경 경계를 명시함
+- [ ] 구형 Aruba의 Paramiko 5 legacy 알고리즘 지원 경계를 명시함
+- [ ] 결정적 1,000회 reliability suite 통과를 명시함
 - [ ] 저사양 PC/HDD/느린 네트워크/장시간 운전의 실제 검증 여부를 명시함
 - [ ] 실제 F12/Fn 키 매핑·창 포커스·트레이 카탈로그·클립보드·고대비·다중
       모니터의 개발자 모드 현장 검증 여부를 명시함
