@@ -1,6 +1,6 @@
 # Aruba MM / WLC 상태 모니터링
 
-[![Windows CI](https://github.com/sebia1993/aruba-mm-wlc-mini-dashboard/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/sebia1993/aruba-mm-wlc-mini-dashboard/actions/workflows/ci-windows.yml)
+[![Windows CI](https://github.com/sebia1993/aruba-cluster-health-dashboard/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/sebia1993/aruba-cluster-health-dashboard/actions/workflows/ci-windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **Aruba Mobility Master(MM)와 7240XM 클러스터의 여러 상태 정보를 읽기 전용 SSH로 수집하고, 장비 IP 기준으로 상관분석해 `정상 / 주의 / 장애 / 확인 불가`를 판단하는 Windows 네트워크 모니터링 도구입니다.**
@@ -8,6 +8,16 @@
 단순 Ping 또는 SSH 접속 성공 여부가 아니라 **MM 보고 상태, Active/Standby Client 분배, Cluster Connection-Type을 함께 비교**하고, 일시적인 수집 실패나 순간적인 Client 감소를 실제 WLC 장애로 오인하지 않는 것을 핵심 설계 목표로 삼았습니다.
 
 > 저장소의 화면 예시와 테스트 데이터는 비식별 fixture와 문서용 주소만 사용합니다. 실제 운영망 IP, Hostname, 계정, 원본 명령 출력은 공개하지 않습니다.
+
+## 포트폴리오 요약
+
+| 채용 관점 | 내용 |
+|---|---|
+| 해결한 문제 | 여러 CLI 결과를 사람이 따로 대조하던 무선 클러스터 점검을 하나의 상태와 판단 근거로 통합 |
+| 담당 범위 | 문제 정의, 상태 모델, Parser·상관분석, Windows UI, SSH 안전 경계, 패키징과 CI/CD |
+| 핵심 판단 | 접속 실패를 장비 장애로 단정하지 않고, 연속 관측과 이전 정상 기준값으로 순간 변동의 오탐을 억제 |
+| 검증 증거 | 비식별 fixture, 가짜 SSH 통합 테스트, Offscreen UI, Windows onedir 패키지와 smoke 자동 검증 |
+| 증거의 한계 | 자동·합성 검증 결과이며, 실제 Aruba 장비·운영 환경 검증 및 업무 성과 수치와 구분 |
 
 ## 한눈에 보기
 
@@ -249,6 +259,14 @@ Windows onedir 패키지:
 - 실제 장비 장애 원인을 단일 명령만으로 확정하는 기능
 
 자동화 결과는 네트워크 장애 판단을 보조하며, 실제 장애 조치는 장비 상태와 운영 절차를 함께 확인해 결정해야 합니다.
+
+## 함께 보는 네트워크 자동화 프로젝트
+
+| 프로젝트 | 보여주는 역량 |
+|---|---|
+| [Multi-target Ping Monitor](https://github.com/sebia1993/multi-target-ping-monitor) | 최대 50개 대상의 지연·손실 관측과 장시간 세션 복구 |
+| [Aruba 2930F Config Backup](https://github.com/sebia1993/aruba-2930f-config-backup) | 읽기 전용 설정 수집과 SSH 지문·결과 무결성 통제 |
+| [Aruba Wireless Policy Mapper](https://github.com/sebia1993/aruba-wireless-policy-mapper) | Alias·Role·ACL 관계 분석과 변경 영향 설명 |
 
 ## 라이선스
 
