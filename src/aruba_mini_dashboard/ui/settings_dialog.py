@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import copy
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from PySide6.QtCore import QSize, Signal, Slot
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -28,19 +28,6 @@ from aruba_mini_dashboard.config import AppSettings, ClusterMemberSettings
 from aruba_mini_dashboard.credentials import CredentialError, DeviceCredential
 
 from .developer_inspector import DeveloperInspectorController, UiElementMetadata
-
-
-LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(slots=True, repr=False)
-class ConnectionTestRequest:
-    settings: AppSettings
-    credential: DeviceCredential | None = None
-
-    def __repr__(self) -> str:
-        return "ConnectionTestRequest(settings=[NON_SECRET], credential=[REDACTED])"
-
 from .widgets import (
     ClickArmedComboBox,
     ClickArmedSpinBox,
@@ -48,6 +35,44 @@ from .widgets import (
     SubtleTabWidget,
     fit_window_to_available_screen,
 )
+
+
+LOGGER = logging.getLogger(__name__)
+_TRANSIENT_CREDENTIAL_ID = "00000000-0000-4000-8000-000000000000"
+
+
+@dataclass(slots=True, repr=False)
+class ConnectionTestRequest:
+    settings: AppSettings
+    credential: DeviceCredential | None = None
+    credential_overrides: dict[str, "CredentialOverride"] = field(default_factory=dict)
+    purpose: str = "diagnostic"
+
+    def __repr__(self) -> str:
+        return (
+            "ConnectionTestRequest(settings=[NON_SECRET], credential=[REDACTED], "
+            "credential_overrides=[REDACTED], purpose="
+            f"{self.purpose!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class CredentialOverride:
+    """Unsaved field changes kept opaque until host identities are checked."""
+
+    username: str | None = None
+    password: str | None = None
+    enable_secret: str | None = None
+
+    @property
+    def has_complete_login(self) -> bool:
+        return bool(self.username and self.password)
+
+    def __repr__(self) -> str:
+        return (
+            "CredentialOverride(username=[REDACTED], password=[REDACTED], "
+            "enable_secret=[REDACTED])"
+        )
 
 
 class _CredentialFields(QGroupBox):
@@ -99,6 +124,15 @@ class _CredentialFields(QGroupBox):
             ),
         )
 
+    def override(self) -> CredentialOverride | None:
+        if not self.has_new_value():
+            return None
+        return CredentialOverride(
+            username=self.username.text().strip() or None,
+            password=self.password.text() or None,
+            enable_secret=self.enable_secret.text() or None,
+        )
+
 
 class SettingsDialog(QDialog):
     connection_test_requested = Signal(str, object)
@@ -123,13 +157,15 @@ class SettingsDialog(QDialog):
         self._developer_catalog_actions: list[QAction] = []
         self._staged_new_credential_ids: list[str] = []
         self._staged_old_credential_ids: list[str] = []
+        self._connection_pending = False
+        self._pending_connection_purpose = ""
 
         self.root_layout = QVBoxLayout(self)
         self.initial_setup_guide: QLabel | None = None
         if initial_setup:
             self.initial_setup_guide = QLabel(
                 "처음 사용하려면 MM과 컨트롤러 4대, Primary 및 자격 증명을 등록하세요. "
-                "저장 후 메인 화면에서 ‘지금 점검’을 눌러 확인합니다.",
+                "저장을 누르면 SSH 지문을 한 화면에서 확인하고 로그인까지 자동으로 점검합니다.",
                 self,
             )
             self.initial_setup_guide.setWordWrap(True)
@@ -145,6 +181,17 @@ class SettingsDialog(QDialog):
         self._build_devices_tab()
         self._build_polling_tab()
         self._build_notifications_tab()
+
+        self.connection_progress_label = QLabel("", self)
+        self.connection_progress_label.setWordWrap(True)
+        self.connection_progress_label.setObjectName("connectionProgress")
+        self.connection_progress_label.setStyleSheet(
+            "QLabel#connectionProgress { background: #FFF7E0; border: 1px solid #D8A93A; "
+            "border-radius: 5px; padding: 7px; color: #5F4100; }"
+        )
+        self.connection_progress_label.setAccessibleName("저장 전 연결 확인 상태")
+        self.connection_progress_label.setVisible(False)
+        self.root_layout.addWidget(self.connection_progress_label)
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.Save | QDialogButtonBox.Cancel,
@@ -352,25 +399,30 @@ class SettingsDialog(QDialog):
         self._update_credential_mode(self.shared_credentials.isChecked())
         outer.addWidget(credentials_box)
 
-        tests = QHBoxLayout()
-        self.mm_test_button = QPushButton("MM 연결 테스트")
-        self.cluster_test_button = QPushButton("클러스터 연결 테스트")
+        diagnostic_content = QWidget(contents)
+        diagnostic_layout = QVBoxLayout(diagnostic_content)
+        diagnostic_layout.setContentsMargins(12, 2, 0, 4)
+        self.connection_diagnostic_button = QPushButton("연결 다시 확인", diagnostic_content)
         self._describe(
-            self.mm_test_button,
-            "MM 연결 테스트",
-            "저장 전에 입력한 MM 설정으로 읽기 전용 SSH 호스트 키와 로그인을 확인합니다.",
+            self.connection_diagnostic_button,
+            "연결 다시 확인",
+            "MM과 모든 Controller의 SSH 호스트 키를 먼저 확인한 뒤 로그인을 한 번에 진단합니다.",
         )
-        self._describe(
-            self.cluster_test_button,
-            "클러스터 연결 테스트",
-            "Primary 및 자동 Fallback 순서로 읽기 전용 SSH 호스트 키와 로그인을 확인합니다.",
+        self.connection_diagnostic_button.clicked.connect(
+            lambda: self._emit_connection_test("all")
         )
-        self.mm_test_button.clicked.connect(lambda: self._emit_connection_test("mm"))
-        self.cluster_test_button.clicked.connect(lambda: self._emit_connection_test("cluster"))
-        tests.addWidget(self.mm_test_button)
-        tests.addWidget(self.cluster_test_button)
-        tests.addStretch(1)
-        outer.addLayout(tests)
+        diagnostic_layout.addWidget(self.connection_diagnostic_button)
+        diagnostic_note = QLabel(
+            "일반 저장은 연결 설정이 바뀐 경우에만 같은 점검을 자동 실행합니다. "
+            "이미 승인된 동일 지문은 다시 묻지 않으며, 변경된 지문은 저장을 차단합니다.",
+            diagnostic_content,
+        )
+        diagnostic_note.setWordWrap(True)
+        diagnostic_layout.addWidget(diagnostic_note)
+        self.connection_diagnostic_section = CollapsibleSection(
+            "고급 진단", diagnostic_content, contents
+        )
+        outer.addWidget(self.connection_diagnostic_section)
         outer.addStretch(1)
 
         self.devices_scroll = QScrollArea(self)
@@ -790,18 +842,18 @@ class SettingsDialog(QDialog):
                     field_purpose,
                 )
         register_widget(
-            self.mm_test_button,
-            "MM 연결 테스트 버튼",
-            "SETTINGS-CONNECTION-TEST-MM",
-            devices_path + " > 연결 테스트",
-            "저장 전에 입력한 MM 연결 설정을 읽기 전용으로 확인합니다.",
+            self.connection_diagnostic_section,
+            "고급 연결 진단 영역",
+            "SETTINGS-CONNECTION-DIAGNOSTIC-SECTION",
+            devices_path + " > 고급 진단",
+            "MM과 모든 컨트롤러의 SSH 지문 및 로그인 재확인 작업을 제공합니다.",
         )
         register_widget(
-            self.cluster_test_button,
-            "클러스터 연결 테스트 버튼",
-            "SETTINGS-CONNECTION-TEST-WLC",
-            devices_path + " > 연결 테스트",
-            "저장 전에 입력한 클러스터 연결 설정을 읽기 전용으로 확인합니다.",
+            self.connection_diagnostic_button,
+            "연결 다시 확인 버튼",
+            "SETTINGS-CONNECTION-DIAGNOSTIC",
+            devices_path + " > 고급 진단",
+            "입력한 모든 장비의 SSH 지문과 로그인을 한 번에 다시 확인합니다.",
         )
 
         operations_path = "설정 > 운영"
@@ -862,7 +914,7 @@ class SettingsDialog(QDialog):
             "설정 저장 버튼",
             "SETTINGS-SAVE",
             "설정 > 하단 작업",
-            "입력값을 검증한 뒤 설정 적용을 요청합니다.",
+            "연결 변경 시 SSH 지문과 로그인을 먼저 확인한 뒤 설정 적용을 요청합니다.",
         )
         register_widget(
             self.buttons.button(QDialogButtonBox.Cancel),
@@ -883,25 +935,38 @@ class SettingsDialog(QDialog):
         self.mm_fields.setVisible(not shared)
         self.cluster_fields.setVisible(not shared)
 
-    def _emit_connection_test(self, role: str) -> None:
+    def _emit_connection_test(self, role: str = "all") -> None:
+        if self._connection_pending:
+            return
         try:
             candidate = self._collect_settings(save_credentials=False)
-            candidate.validate()
-            fields = (
-                self.shared_fields
-                if self.shared_credentials.isChecked()
-                else (self.mm_fields if role == "mm" else self.cluster_fields)
-            )
-            transient = None
-            if fields.has_new_value():
-                credential_id = candidate.credentials.effective_id(role, candidate) or None
-                transient = self._credential_with_current(fields, credential_id)
+            request = self._connection_request(candidate, purpose="diagnostic")
+            self._validate_connection_request(candidate, request)
         except Exception as exc:
             QMessageBox.warning(self, "입력 확인", str(exc))
             return
-        self.connection_test_requested.emit(role, ConnectionTestRequest(candidate, transient))
+        self._set_connection_pending("diagnostic")
+        self.connection_test_requested.emit(role, request)
 
     def _apply(self) -> None:
+        if self._connection_pending:
+            return
+        try:
+            candidate = self._collect_settings(save_credentials=False)
+            candidate.validate()
+            if self._requires_connection_check(candidate):
+                request = self._connection_request(candidate, purpose="save")
+                self._validate_connection_request(candidate, request)
+                self._set_connection_pending("save")
+                self.connection_test_requested.emit("all", request)
+                return
+        except Exception as exc:
+            self.rollback_staged_credentials()
+            QMessageBox.warning(self, "설정을 저장할 수 없음", str(exc))
+            return
+        self._finish_save()
+
+    def _finish_save(self) -> bool:
         try:
             candidate = self._collect_settings(save_credentials=True)
             if self.initial_setup:
@@ -910,10 +975,178 @@ class SettingsDialog(QDialog):
                 candidate.validate()
         except Exception as exc:
             self.rollback_staged_credentials()
+            self._clear_connection_pending()
             QMessageBox.warning(self, "설정을 저장할 수 없음", str(exc))
-            return
+            return False
+        self._clear_connection_pending()
         self.settings = candidate
         self.accept()
+        return True
+
+    def complete_connection_request(self, success: bool) -> bool:
+        """Resume the modal form after its asynchronous SSH check finishes."""
+
+        if not self._connection_pending:
+            return False
+        purpose = self._pending_connection_purpose
+        if success and purpose == "save":
+            return self._finish_save()
+        self._clear_connection_pending()
+        return success
+
+    def reject(self) -> None:
+        if self._connection_pending and not self._parent_is_quitting():
+            self.connection_progress_label.setText(
+                "SSH 연결 확인이 끝난 뒤 취소할 수 있습니다. 새 자격 증명은 아직 저장하지 않았습니다."
+            )
+            return
+        super().reject()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._connection_pending and not self._parent_is_quitting():
+            self.connection_progress_label.setText(
+                "SSH 연결 확인이 끝난 뒤 창을 닫을 수 있습니다. 새 자격 증명은 아직 저장하지 않았습니다."
+            )
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def _parent_is_quitting(self) -> bool:
+        parent = self.parent()
+        coordinator = getattr(parent, "coordinator", None)
+        return bool(
+            getattr(parent, "_quitting", False)
+            or getattr(coordinator, "shutting_down", False)
+        )
+
+    @property
+    def connection_request_pending(self) -> bool:
+        return self._connection_pending
+
+    @property
+    def pending_connection_purpose(self) -> str:
+        return self._pending_connection_purpose
+
+    def _set_connection_pending(self, purpose: str) -> None:
+        self._connection_pending = True
+        self._pending_connection_purpose = purpose
+        self.tabs.setEnabled(False)
+        self.buttons.button(QDialogButtonBox.Save).setEnabled(False)
+        self.buttons.button(QDialogButtonBox.Cancel).setEnabled(False)
+        self.connection_progress_label.setText(
+            "저장 전 SSH 지문과 로그인을 확인하고 있습니다…"
+            if purpose == "save"
+            else "MM과 컨트롤러의 SSH 지문과 로그인을 다시 확인하고 있습니다…"
+        )
+        self.connection_progress_label.setVisible(True)
+
+    def _clear_connection_pending(self) -> None:
+        self._connection_pending = False
+        self._pending_connection_purpose = ""
+        self.tabs.setEnabled(True)
+        self.buttons.button(QDialogButtonBox.Save).setEnabled(True)
+        self.buttons.button(QDialogButtonBox.Cancel).setEnabled(True)
+        self.connection_progress_label.clear()
+        self.connection_progress_label.setVisible(False)
+
+    def _connection_request(
+        self,
+        candidate: AppSettings,
+        *,
+        purpose: str,
+    ) -> ConnectionTestRequest:
+        overrides: dict[str, CredentialOverride] = {}
+        if self.shared_credentials.isChecked():
+            override = self.shared_fields.override()
+            if override is not None:
+                overrides = {"mm": override, "cluster": override}
+        else:
+            for role, fields in (("mm", self.mm_fields), ("cluster", self.cluster_fields)):
+                override = fields.override()
+                if override is not None:
+                    overrides[role] = override
+        return ConnectionTestRequest(
+            settings=candidate,
+            credential_overrides=overrides,
+            purpose=purpose,
+        )
+
+    def _validate_connection_request(
+        self,
+        candidate: AppSettings,
+        request: ConnectionTestRequest,
+    ) -> None:
+        candidate.validate()
+        fields = (
+            [self.shared_fields]
+            if self.shared_credentials.isChecked()
+            else [self.mm_fields, self.cluster_fields]
+        )
+        if self.session_only.isChecked() != self._initial_session_only and not all(
+            item.username.text().strip() and item.password.text() for item in fields
+        ):
+            raise RuntimeError(
+                "자격 증명 저장 방식을 변경하려면 해당 계정의 사용자 ID와 비밀번호를 다시 입력하세요."
+            )
+
+        validation_copy = copy.deepcopy(candidate)
+        missing_roles: list[str] = []
+        for role in ("mm", "cluster"):
+            if validation_copy.credentials.effective_id(role, validation_copy):
+                continue
+            override = request.credential_overrides.get(role)
+            if override is None or not override.has_complete_login:
+                missing_roles.append("MM" if role == "mm" else "클러스터")
+                continue
+            if validation_copy.credentials.use_shared_credentials:
+                validation_copy.credentials.shared_credential_id = _TRANSIENT_CREDENTIAL_ID
+            elif role == "mm":
+                validation_copy.mobility_master.credential_id = _TRANSIENT_CREDENTIAL_ID
+            else:
+                validation_copy.cluster.credential_id = _TRANSIENT_CREDENTIAL_ID
+        if missing_roles:
+            raise RuntimeError(f"{', '.join(missing_roles)} 자격 증명의 사용자 ID와 비밀번호가 필요합니다.")
+        validation_copy.validate_for_monitoring()
+
+    def _requires_connection_check(self, candidate: AppSettings) -> bool:
+        if self.initial_setup:
+            return True
+        credential_fields = (
+            [self.shared_fields]
+            if self.shared_credentials.isChecked()
+            else [self.mm_fields, self.cluster_fields]
+        )
+        return (
+            self._connection_signature(candidate) != self._connection_signature(self.settings)
+            or any(item.has_new_value() for item in credential_fields)
+        )
+
+    @staticmethod
+    def _connection_signature(settings: AppSettings) -> tuple[object, ...]:
+        mm = settings.mobility_master
+        cluster = settings.cluster
+        credentials = settings.credentials
+        return (
+            mm.management_ip.strip(),
+            mm.ssh_port,
+            mm.connect_timeout_seconds,
+            mm.command_timeout_seconds,
+            mm.retries,
+            mm.enable_required,
+            tuple(member.ip.strip() for member in cluster.members),
+            cluster.primary_controller_ip.strip(),
+            tuple(item.strip() for item in cluster.fallback_controller_ips),
+            cluster.ssh_port,
+            cluster.connect_timeout_seconds,
+            cluster.command_timeout_seconds,
+            cluster.retries,
+            cluster.enable_required,
+            credentials.use_shared_credentials,
+            credentials.session_only,
+            credentials.shared_credential_id,
+            mm.credential_id,
+            cluster.credential_id,
+        )
 
     def _collect_settings(self, *, save_credentials: bool) -> AppSettings:
         settings = copy.deepcopy(self.settings)

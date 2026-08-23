@@ -19,6 +19,7 @@
 | 복수 문제 IP 상관분석 | ✅ 자동 검증 | correlation engine 테스트 |
 | Primary / Fallback | ✅ 자동 검증 | Collector / 가짜 SSH 통합 테스트 |
 | strict host-key 경계 | ✅ 자동 검증 | 로컬 SSH 통합 경로 |
+| 저장 시 지문 일괄 승인·로그인 | ✅ 자동 검증 | 가짜 SSH / offscreen 설정 UI |
 | SQLite 저장·재시작·손상 보호 | ✅ 자동 검증 | 임시/메모리 SQLite 테스트 |
 | Worker Thread / 중복 점검 | ✅ 자동 검증 | PollCoordinator / UI 테스트 |
 | PySide6 offscreen UI | ✅ 자동 검증 | GUI 테스트 |
@@ -180,7 +181,9 @@ SQLite 관련 주요 경계:
 
 - 허용 명령만 실행
 - 호스트 키 사전 확인
+- 여러 endpoint의 원자적 일괄 승인과 자격 증명 조회 순서
 - 변경된 호스트 키 자동 승인 금지
+- MM 및 최소 1대 Controller 필수 로그인과 Fallback 준비 경고
 - 취소 가능한 TCP/SSH 경로
 - Primary 실패 시 Fallback
 - 실제 수집 Controller 기록
@@ -208,10 +211,10 @@ CI와 패키지 검증기는 다음을 확인합니다.
 
 | 항목 | 확인 내용 |
 |---|---|
-| MM 연결 | SSH와 지문 승인 절차 정상 |
+| MM 연결 | 저장 시 SSH 지문 일괄 승인과 자동 로그인 정상 |
 | MM 출력 | 실제 `show switches`가 Parser와 일치 |
 | Cluster 연결 | Primary 조회 정상 |
-| Fallback | Primary 불가 시 Fallback 수집 정상 |
+| Fallback | 준비 미완료 경고와 Primary 불가 시 Fallback 수집 정상 |
 | Client 분배 | 실제 Active/Standby와 화면 값 대조 |
 | Membership | Connection-Type과 화면 값 대조 |
 | 설정 변경 | 점검 전후 구성 변경 없음 |

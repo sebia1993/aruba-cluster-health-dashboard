@@ -25,7 +25,10 @@ from aruba_mini_dashboard.collectors.base import (
 )
 from aruba_mini_dashboard.collectors.cluster_collector import ClusterCollector
 from aruba_mini_dashboard.collectors.mm_collector import MmCollector
-from aruba_mini_dashboard.collectors.ssh_host_keys import scan_ssh_host_key
+from aruba_mini_dashboard.collectors.ssh_host_keys import (
+    SshHostKeyAlgorithmError,
+    scan_ssh_host_key,
+)
 from aruba_mini_dashboard.config import ClusterSettings, MobilityMasterSettings
 from aruba_mini_dashboard.credentials import DeviceCredential
 
@@ -919,3 +922,36 @@ def test_host_key_scan_is_pre_authentication_and_has_no_credential_argument(monk
     assert calls["socket_address"] == ("192.0.2.10", 2222)
     assert "username" not in calls and "password" not in calls
     assert calls["closed"] is True
+
+
+def test_host_key_scan_classifies_algorithm_incompatibility_without_legacy_fallback(
+    monkeypatch,
+) -> None:
+    class IncompatiblePeer(Exception):
+        pass
+
+    class FakeTransport:
+        def __init__(self, _sock):
+            return None
+
+        def start_client(self, *, event, timeout):
+            event.set()
+
+        def get_exception(self):
+            return IncompatiblePeer("private host algorithm detail")
+
+        def close(self):
+            return None
+
+    fake_socket = SimpleNamespace(close=lambda: None)
+    monkeypatch.setitem(sys.modules, "paramiko", SimpleNamespace(Transport=FakeTransport))
+    monkeypatch.setattr(
+        "aruba_mini_dashboard.collectors.ssh_host_keys.open_cancellable_ipv4_socket",
+        lambda *_args, **_kwargs: fake_socket,
+    )
+
+    with pytest.raises(SshHostKeyAlgorithmError) as exc_info:
+        scan_ssh_host_key("192.0.2.10", 22, timeout=5)
+
+    assert exc_info.value.code == "SSH_ALGORITHM_INCOMPATIBLE"
+    assert "private" not in str(exc_info.value).casefold()

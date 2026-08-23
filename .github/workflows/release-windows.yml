@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing annotated release tag, for example v0.3.7"
+        description: "Existing annotated release tag, for example v0.4.0"
         required: true
         type: string
       release_mode:
@@ -473,17 +473,17 @@ jobs:
           - Windows 네이티브 트레이 메뉴 항목은 화면 오버레이가 아니라 ``요소 목록``의 정적
             카탈로그에서 확인합니다.
 
-          ## v0.3.7 안정성·보안 강화
+          ## v0.4.0 저장·연결 통합
 
-          - 종료 요청은 새 작업을 차단하고 재시도 대기를 깨운 뒤 연결 중인 TCP socket과
-            활성 SSH 전송을 닫습니다. worker thread나 프로세스를 강제로 종료하지 않습니다.
-          - Paramiko 5.0.0에서 구형 장비와 안전한 SSH 알고리즘을 협상할 수 없으면
-            ``SSH_ALGORITHM_INCOMPATIBLE``로 안내하며 약한 legacy 알고리즘을 자동 활성화하지 않습니다.
-          - SQLite 필수 schema 제약·인덱스와 저장 JSON 한도를 검증하고 비밀 필드 이름을
-            거부합니다. Authorization Bearer/Basic 전체 값과 등록된 자격 증명은 로그에서
-            마스킹하며 로그 기록 실패 시 원문 record를 표준 오류로 다시 출력하지 않습니다.
-          - 복원된 메인 창과 설정·상세·개발자 대화상자는 현재 사용 가능한 화면 영역 안에
-            맞춰 배치합니다.
+          - SSH 연결 설정을 저장하면 자격 증명 조회 전에 MM과 Controller 공개 키를 모두
+            스캔하고, 새 SHA-256 지문을 한 화면에서 일괄 승인한 뒤 로그인을 자동 확인합니다.
+          - 승인 키는 앱 전용 ``known_hosts``에 원자적으로 기록하며 기존 키와 다른 지문은
+            Primary/Fallback 성공 여부와 관계없이 차단합니다. 약한 legacy 알고리즘은 자동
+            활성화하지 않습니다.
+          - MM 로그인과 최소 1대의 Cluster Controller 로그인이 성공해야 저장합니다. 나머지
+            Controller 실패는 ``Fallback 준비 미완료 N대`` 경고와 장비별 결과로 구분합니다.
+          - 연결과 무관한 설정은 네트워크 점검 없이 저장하고, 전체 연결 재확인은 설정의
+            ``고급 진단 > 연결 다시 확인``에서 실행합니다.
 
           ## 현장 확인 범위
 

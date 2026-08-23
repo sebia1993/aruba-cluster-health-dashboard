@@ -8,7 +8,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -25,6 +25,7 @@ from .collectors.base import (
     SHOW_SWITCHES,
     CollectionBundle,
     CommandResult,
+    SshConnectionOptions,
     SshOperationError,
 )
 from .collectors.aruba_ssh import ArubaSshAdapter
@@ -33,8 +34,10 @@ from .collectors.mm_collector import MmCollector
 from .collectors.ssh_host_keys import (
     SshHostKeyCancelledError,
     SshHostKeyError,
+    ScannedHostKey,
     check_scanned_host_key,
     register_scanned_host_key,
+    register_scanned_host_keys,
     scan_ssh_host_key,
 )
 from .config import (
@@ -243,6 +246,31 @@ class ConnectionTestResult:
     algorithm: str = ""
     scanned: Any | None = None
     expected_fingerprints: tuple[str, ...] = ()
+    details: tuple["ConnectionEndpointResult", ...] = ()
+    purpose: str = "diagnostic"
+    core_ready: bool = False
+    pending_fallbacks: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionEndpointResult:
+    role: str
+    host: str
+    port: int
+    status: str
+    message: str
+    fingerprint: str = ""
+    algorithm: str = ""
+    expected_fingerprints: tuple[str, ...] = ()
+    error_code: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _ConnectionTarget:
+    role: str
+    host: str
+    port: int
+    endpoint: Any
 
 
 class CachedBaselineStore:
@@ -780,8 +808,16 @@ class RuntimePoller:
     ) -> ConnectionTestResult:
         """Verify the host key before retrieving or sending credentials."""
 
-        transient_credential = getattr(candidate_settings, "credential", None)
-        candidate_settings = getattr(candidate_settings, "settings", candidate_settings)
+        request = candidate_settings
+        purpose = str(getattr(request, "purpose", "diagnostic"))
+        transient_credential = getattr(request, "credential", None)
+        candidate_settings = getattr(request, "settings", request)
+        if role == "all":
+            return self._test_all_connections(
+                request,
+                candidate_settings,
+                cancellation_event,
+            )
         if role == "mm":
             endpoint = candidate_settings.mobility_master
             hosts = [endpoint.management_ip.strip()]
@@ -832,6 +868,7 @@ class RuntimePoller:
                     algorithm=scanned.algorithm,
                     scanned=scanned,
                     expected_fingerprints=check.expected_fingerprints,
+                    purpose=purpose,
                 )
             if check.status == "mismatch":
                 return ConnectionTestResult(
@@ -844,19 +881,18 @@ class RuntimePoller:
                     algorithm=scanned.algorithm,
                     scanned=scanned,
                     expected_fingerprints=check.expected_fingerprints,
+                    purpose=purpose,
                 )
         if not scans:
             raise SshHostKeyError(
                 "모든 Cluster 수집 Controller의 SSH 지문을 확인하지 못했습니다. "
                 "IP, 포트 및 네트워크 연결을 확인하세요."
             )
-        credential = transient_credential
-        if credential is None:
-            credential_id = candidate_settings.credentials.effective_id(role, candidate_settings)
-            if not credential_id:
-                raise RuntimeError("자격 증명을 입력하거나 먼저 저장한 뒤 연결 테스트를 실행하세요.")
-            credential = self.credential_service.get(credential_id)
-        from .collectors.base import SshConnectionOptions
+        credential = transient_credential or self._resolve_connection_test_credential(
+            role,
+            candidate_settings,
+            request,
+        )
 
         with self.logging_context.scoped_secrets(
             (credential.username, credential.password, credential.enable_secret)
@@ -919,10 +955,397 @@ class RuntimePoller:
                 ),
                 fingerprint=first_scan.fingerprint,
                 algorithm=first_scan.algorithm,
+                purpose=purpose,
+                core_ready=True,
             )
 
+    def _test_all_connections(
+        self,
+        request: Any,
+        candidate_settings: AppSettings,
+        cancellation_event: threading.Event | None,
+    ) -> ConnectionTestResult:
+        """Discover every identity first, then authenticate the complete set."""
+
+        purpose = str(getattr(request, "purpose", "diagnostic"))
+        targets = self._connection_targets(candidate_settings)
+        scans: dict[tuple[str, int], ScannedHostKey] = {}
+        scan_errors: dict[tuple[str, int], SshHostKeyError] = {}
+        checks: dict[tuple[str, int], Any] = {}
+
+        for target in targets:
+            identity = (target.host, target.port)
+            if identity in scans or identity in scan_errors:
+                continue
+            try:
+                scanned = scan_ssh_host_key(
+                    target.host,
+                    target.port,
+                    timeout=target.endpoint.connect_timeout_seconds,
+                    cancel_event=cancellation_event,
+                )
+            except SshHostKeyCancelledError:
+                raise
+            except SshHostKeyError as exc:
+                scan_errors[identity] = exc
+                LOGGER.info(
+                    "Connection onboarding host-key scan unavailable for %s (%s)",
+                    target.role,
+                    exc.code,
+                )
+                continue
+            scans[identity] = scanned
+            checks[identity] = check_scanned_host_key(scanned, self.paths.known_hosts)
+
+        def scan_details() -> tuple[ConnectionEndpointResult, ...]:
+            rows: list[ConnectionEndpointResult] = []
+            for target in targets:
+                identity = (target.host, target.port)
+                error = scan_errors.get(identity)
+                if error is not None:
+                    rows.append(
+                        ConnectionEndpointResult(
+                            target.role,
+                            target.host,
+                            target.port,
+                            "scan_failed",
+                            str(error),
+                            error_code=error.code,
+                        )
+                    )
+                    continue
+                scanned = scans[identity]
+                check = checks[identity]
+                status = {
+                    "verified": "verified",
+                    "mismatch": "mismatch",
+                    "unregistered": "approval_required",
+                    "unregistered_algorithm": "approval_required",
+                }.get(check.status, "scan_failed")
+                rows.append(
+                    ConnectionEndpointResult(
+                        target.role,
+                        target.host,
+                        target.port,
+                        status,
+                        (
+                            "승인된 SSH 호스트 키입니다."
+                            if status == "verified"
+                            else "최초 연결 SSH 호스트 키 승인이 필요합니다."
+                            if status == "approval_required"
+                            else "저장된 SSH 호스트 키와 현재 키가 다릅니다."
+                        ),
+                        scanned.fingerprint,
+                        scanned.algorithm,
+                        check.expected_fingerprints,
+                    )
+                )
+            return tuple(rows)
+
+        mismatches = [
+            (identity, check)
+            for identity, check in checks.items()
+            if check.status == "mismatch"
+        ]
+        if mismatches:
+            (host, port), check = mismatches[0]
+            scanned = scans[(host, port)]
+            return ConnectionTestResult(
+                status="mismatch",
+                role="all",
+                host=host,
+                port=port,
+                message=(
+                    "저장된 SSH 호스트 키와 장비가 제시한 키가 다릅니다. "
+                    "다른 Controller의 성공 여부와 관계없이 저장을 차단했습니다."
+                ),
+                fingerprint=scanned.fingerprint,
+                algorithm=scanned.algorithm,
+                scanned=scanned,
+                expected_fingerprints=check.expected_fingerprints,
+                details=scan_details(),
+                purpose=purpose,
+            )
+
+        mm_scanned = any(
+            target.role == "mm" and (target.host, target.port) in scans
+            for target in targets
+        )
+        cluster_scanned = any(
+            target.role == "cluster" and (target.host, target.port) in scans
+            for target in targets
+        )
+        if not mm_scanned or not cluster_scanned:
+            return ConnectionTestResult(
+                status="failed",
+                role="all",
+                host="",
+                port=0,
+                message=(
+                    "MM과 최소 1대의 Cluster Controller SSH 지문을 확인해야 "
+                    "연결 설정을 저장할 수 있습니다."
+                ),
+                details=scan_details(),
+                purpose=purpose,
+            )
+
+        unknown_identities = [
+            identity
+            for identity, check in checks.items()
+            if check.status in {"unregistered", "unregistered_algorithm"}
+        ]
+        if unknown_identities:
+            unknown_scans = tuple(scans[identity] for identity in unknown_identities)
+            first = unknown_scans[0]
+            return ConnectionTestResult(
+                status="approval_required",
+                role="all",
+                host=", ".join(scanned.host for scanned in unknown_scans),
+                port=first.port if all(item.port == first.port for item in unknown_scans) else 0,
+                message=(
+                    f"최초 연결 장비 {len(unknown_scans)}대의 SSH 호스트 키를 "
+                    "한 화면에서 승인해야 합니다."
+                ),
+                fingerprint=first.fingerprint if len(unknown_scans) == 1 else "",
+                algorithm=first.algorithm if len(unknown_scans) == 1 else "",
+                scanned=unknown_scans,
+                details=scan_details(),
+                purpose=purpose,
+            )
+
+        credentials: dict[str, DeviceCredential] = {}
+        credential_errors: dict[str, BaseException] = {}
+        for role in ("mm", "cluster"):
+            try:
+                credentials[role] = self._resolve_connection_test_credential(
+                    role,
+                    candidate_settings,
+                    request,
+                )
+            except (CredentialError, RuntimeError, ValueError) as exc:
+                credential_errors[role] = exc
+
+        authentication_details: list[ConnectionEndpointResult] = []
+        authenticated_targets: list[_ConnectionTarget] = []
+        authenticated_scans: list[ScannedHostKey] = []
+        secrets = tuple(
+            value
+            for credential in credentials.values()
+            for value in (credential.username, credential.password, credential.enable_secret)
+        )
+        with self.logging_context.scoped_secrets(secrets):
+            for target in targets:
+                identity = (target.host, target.port)
+                error = scan_errors.get(identity)
+                if error is not None:
+                    authentication_details.append(
+                        ConnectionEndpointResult(
+                            target.role,
+                            target.host,
+                            target.port,
+                            "scan_failed",
+                            str(error),
+                            error_code=error.code,
+                        )
+                    )
+                    continue
+                scanned = scans[identity]
+                credential_error = credential_errors.get(target.role)
+                if credential_error is not None:
+                    authentication_details.append(
+                        ConnectionEndpointResult(
+                            target.role,
+                            target.host,
+                            target.port,
+                            "auth_failed",
+                            str(credential_error),
+                            scanned.fingerprint,
+                            scanned.algorithm,
+                            error_code="CREDENTIAL_MISSING",
+                        )
+                    )
+                    continue
+                options = SshConnectionOptions(
+                    host=target.host,
+                    port=target.port,
+                    connect_timeout_seconds=target.endpoint.connect_timeout_seconds,
+                    command_timeout_seconds=target.endpoint.command_timeout_seconds,
+                    known_hosts_path=self.paths.known_hosts,
+                    enable_required=target.endpoint.enable_required,
+                )
+                adapter = self._create_tracked_adapter(
+                    options,
+                    credentials[target.role],
+                    cancellation_event,
+                )
+                trust_error: SshOperationError | None = None
+                try:
+                    adapter.connect()
+                    authenticated_targets.append(target)
+                    authenticated_scans.append(scanned)
+                    authentication_details.append(
+                        ConnectionEndpointResult(
+                            target.role,
+                            target.host,
+                            target.port,
+                            "authenticated",
+                            "SSH 호스트 키와 로그인을 확인했습니다.",
+                            scanned.fingerprint,
+                            scanned.algorithm,
+                        )
+                    )
+                except SshOperationError as exc:
+                    if exc.code in HOST_KEY_TRUST_ERROR_CODES:
+                        trust_error = exc
+                    authentication_details.append(
+                        ConnectionEndpointResult(
+                            target.role,
+                            target.host,
+                            target.port,
+                            "mismatch" if trust_error is not None else "auth_failed",
+                            str(exc),
+                            scanned.fingerprint,
+                            scanned.algorithm,
+                            error_code=exc.code,
+                        )
+                    )
+                finally:
+                    adapter.close()
+                if trust_error is not None:
+                    return ConnectionTestResult(
+                        status="mismatch",
+                        role="all",
+                        host=target.host,
+                        port=target.port,
+                        message=(
+                            "지문 확인 직후 SSH 호스트 키가 바뀌어 자격 증명 전송과 "
+                            "설정 저장을 차단했습니다."
+                        ),
+                        fingerprint=scanned.fingerprint,
+                        algorithm=scanned.algorithm,
+                        scanned=scanned,
+                        details=tuple(authentication_details),
+                        purpose=purpose,
+                    )
+
+        mm_ready = any(target.role == "mm" for target in authenticated_targets)
+        cluster_successes = sum(
+            target.role == "cluster" for target in authenticated_targets
+        )
+        cluster_target_count = sum(target.role == "cluster" for target in targets)
+        pending_fallbacks = cluster_target_count - cluster_successes
+        core_ready = mm_ready and cluster_successes >= 1
+        if core_ready:
+            warning = (
+                f" Fallback 준비 미완료 {pending_fallbacks}대가 있어 경고와 함께 저장할 수 있습니다."
+                if pending_fallbacks
+                else ""
+            )
+            first_scan = authenticated_scans[0]
+            return ConnectionTestResult(
+                status="success",
+                role="all",
+                host=", ".join(target.host for target in authenticated_targets),
+                port=first_scan.port,
+                message=(
+                    f"MM과 Cluster Controller {cluster_successes}대의 SSH 지문 및 로그인을 확인했습니다."
+                    + warning
+                ),
+                fingerprint=first_scan.fingerprint,
+                algorithm=first_scan.algorithm,
+                details=tuple(authentication_details),
+                purpose=purpose,
+                core_ready=True,
+                pending_fallbacks=pending_fallbacks,
+            )
+        return ConnectionTestResult(
+            status="failed",
+            role="all",
+            host=", ".join(target.host for target in authenticated_targets),
+            port=0,
+            message=(
+                "연결 설정을 저장하지 않았습니다. MM 로그인 성공과 최소 1대의 "
+                "Cluster Controller 로그인 성공이 모두 필요합니다."
+            ),
+            details=tuple(authentication_details),
+            purpose=purpose,
+            pending_fallbacks=pending_fallbacks,
+        )
+
+    @staticmethod
+    def _connection_targets(settings: AppSettings) -> tuple[_ConnectionTarget, ...]:
+        mm = settings.mobility_master
+        cluster = settings.cluster
+        mm_host = mm.management_ip.strip()
+        cluster_hosts = tuple(
+            dict.fromkeys(
+                host.strip()
+                for host in (
+                    cluster.primary_controller_ip,
+                    *cluster.fallback_controller_ips,
+                )
+                if host.strip()
+            )
+        )
+        if not mm_host or not cluster_hosts:
+            raise ValueError("MM과 최소 1대의 Cluster Controller IP가 필요합니다.")
+        return (
+            _ConnectionTarget("mm", mm_host, mm.ssh_port, mm),
+            *(
+                _ConnectionTarget("cluster", host, cluster.ssh_port, cluster)
+                for host in cluster_hosts
+            ),
+        )
+
+    def _resolve_connection_test_credential(
+        self,
+        role: str,
+        settings: AppSettings,
+        request: Any,
+    ) -> DeviceCredential:
+        transient = getattr(request, "credential", None)
+        if transient is not None:
+            return transient
+        overrides = getattr(request, "credential_overrides", {}) or {}
+        override = overrides.get(role)
+        credential_id = settings.credentials.effective_id(role, settings)
+        if override is None:
+            if not credential_id:
+                raise RuntimeError(
+                    "자격 증명을 입력하거나 먼저 저장한 뒤 연결을 확인하세요."
+                )
+            return self.credential_service.get(credential_id)
+
+        username = getattr(override, "username", None)
+        password = getattr(override, "password", None)
+        enable_secret = getattr(override, "enable_secret", None)
+        current: DeviceCredential | None = None
+        if credential_id and (
+            username is None or password is None or enable_secret is None
+        ):
+            try:
+                current = self.credential_service.get(credential_id)
+            except (CredentialError, ValueError):
+                if not username or not password:
+                    raise RuntimeError(
+                        "저장된 자격 증명을 찾을 수 없습니다. 사용자 ID와 비밀번호를 다시 입력해 주세요."
+                    ) from None
+        return DeviceCredential(
+            username=username or (current.username if current else ""),
+            password=password or (current.password if current else ""),
+            enable_secret=(
+                enable_secret
+                if enable_secret is not None
+                else (current.enable_secret if current else "")
+            ),
+        )
+
     def approve_host_key(self, scanned: Any) -> Path:
-        return register_scanned_host_key(scanned, self.paths.known_hosts)
+        if isinstance(scanned, ScannedHostKey):
+            return register_scanned_host_key(scanned, self.paths.known_hosts)
+        if isinstance(scanned, Iterable) and not isinstance(scanned, (str, bytes, bytearray)):
+            return register_scanned_host_keys(tuple(scanned), self.paths.known_hosts)
+        raise TypeError("승인할 SSH 호스트 키 형식이 올바르지 않습니다.")
 
     def __call__(self, cancellation_event: threading.Event | None = None):
         poll_started = time.perf_counter()
