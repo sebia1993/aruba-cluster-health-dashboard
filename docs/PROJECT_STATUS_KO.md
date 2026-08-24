@@ -22,7 +22,7 @@ Windows 11에서 Aruba Mobility Master와 7240XM Cluster의 상태를 읽기 전
 - [x] Client 연속 이상 / 복구 판정
 - [x] 저사용량 오탐 방지
 - [x] 구성원 누락 debounce
-- [x] Connection-Type baseline / 변화 사건
+- [x] Connection-Type/STATUS 열 분리, baseline / 변화 사건
 - [x] IP 기준 복수 원인 상관분석
 - [x] Incident 확인 / 복구 lifecycle
 - [x] PySide6 Dashboard / 설정 / 세부 정보

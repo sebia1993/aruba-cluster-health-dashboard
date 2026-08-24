@@ -17,7 +17,9 @@ from aruba_mini_dashboard.parsers.common import (
 
 HEADER_ALIASES = {
     "ip": ("Switch IP", "IP Address", "IPv4 Address", "IP"),
+    "priority": ("Priority",),
     "connection_type": ("Connection-Type", "Connection Type", "ConnectionType"),
+    "status": ("STATUS", "Status"),
 }
 
 

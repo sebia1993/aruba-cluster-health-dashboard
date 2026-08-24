@@ -73,7 +73,9 @@ WLC-A Active 5 / Peer 8 / Cluster 전체 사용량 매우 낮음
 show lc-cluster group-membership
 ```
 
-첫 정상 관측값을 baseline으로 사용하고 이후 값이 달라지면 변화 사건을 생성합니다.
+표의 `Connection-Type` 열만 첫 정상 baseline으로 사용하고 이후 값이 달라지면
+변화 사건을 생성합니다. 다음 `STATUS` 열의 `CONNECTED`, `last HBT_RSP`, `RTD`는
+실시간 상태 정보이므로 Connection-Type 비교에 포함하지 않습니다.
 
 ```text
 기존: L2-Connected
@@ -82,6 +84,10 @@ show lc-cluster group-membership
 ```
 
 운영자가 변화를 확인하면 반복 알림 대상에서는 제외할 수 있지만, 확인 자체가 원래 baseline으로 자동 복귀시키는 것은 아닙니다.
+
+v0.4.2로 처음 실행할 때 이전 버전이 STATUS까지 붙여 저장한 값은 로컬 SQLite
+v5 마이그레이션에서 분리합니다. 분리 후 이전값과 현재값이 같은 오탐만 자동으로
+종료하고 실제 타입 변화와 과거 사건 이력은 유지합니다.
 
 ## 3. 상태 전이
 

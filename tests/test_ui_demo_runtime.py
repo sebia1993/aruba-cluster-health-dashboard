@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -11,7 +12,14 @@ from aruba_mini_dashboard.credentials import CredentialService, SessionCredentia
 from aruba_mini_dashboard.demo import DEMO_STAGES, DemoPoller, demo_fixture_directory
 from aruba_mini_dashboard.logging_setup import setup_logging
 from aruba_mini_dashboard.main import RuntimePoller
-from aruba_mini_dashboard.models import ConnectionBaseline, PollCycleResult
+from aruba_mini_dashboard.models import (
+    ConnectionBaseline,
+    ConnectionChange,
+    Incident,
+    IncidentType,
+    PollCycleResult,
+    Severity,
+)
 from aruba_mini_dashboard.parsers import (
     parse_group_membership,
     parse_load_distribution,
@@ -82,6 +90,82 @@ def test_fixture_directory_resolves_source_tree() -> None:
     path = demo_fixture_directory()
     assert path.name == "fixtures"
     assert (path / "mm_show_switches_normal.txt").is_file()
+
+
+def test_v4_false_connection_warning_is_silent_after_restart_and_first_poll(
+    tmp_path: Path,
+) -> None:
+    paths = AppPaths.from_environment(tmp_path).ensure()
+    observed = datetime(2026, 8, 11, 1, 0, tzinfo=timezone.utc)
+    previous = (
+        "L2-Connected CONNECTED (Member, last HBT_RSP 44ms ago, RTD = 0.000 ms)"
+    )
+    current = (
+        "L2-Connected CONNECTED (Member, last HBT_RSP 67ms ago, RTD = 0.125 ms)"
+    )
+    change = ConnectionChange(
+        collector_ip="192.0.2.11",
+        member_ip="192.0.2.12",
+        previous_value=previous,
+        current_value=current,
+        first_detected_at=observed,
+        last_confirmed_at=observed,
+    )
+    with SQLiteStorage(paths) as legacy_storage:
+        legacy_storage.set(
+            ConnectionBaseline(
+                collector_ip="192.0.2.11",
+                member_ip="192.0.2.12",
+                display_value=current,
+                normalized_value="legacy-polluted-value",
+                observed_at=observed,
+            )
+        )
+        legacy_storage.save_connection_change(change)
+        legacy_storage.save_domain_incident(
+            Incident(
+                incident_id="legacy-false-incident",
+                incident_type=IncidentType.CONNECTION_TYPE_CHANGED,
+                severity=Severity.WARNING,
+                reason=f"Connection-Type 변경: {previous} → {current}",
+                first_detected_at=observed,
+                last_seen_at=observed,
+                ip="192.0.2.12",
+                event_token=change.event_token,
+                details={"previous": previous, "current": current},
+            )
+        )
+
+    legacy = sqlite3.connect(paths.database)
+    legacy.execute("PRAGMA user_version=4")
+    legacy.commit()
+    legacy.close()
+
+    storage = SQLiteStorage(paths)
+    runtime = RuntimePoller(
+        AppSettings.default(),
+        paths,
+        CredentialService(persistent=SessionCredentialStore()),
+        storage,
+        setup_logging(paths),
+    )
+    snapshot = runtime.correlate(
+        membership_cycle("group_membership_7240xm.txt", observed + timedelta(minutes=1))
+    )
+
+    assert snapshot.problem_ips == []
+    assert snapshot.notification_events == []
+    assert snapshot.active_incidents == []
+    assert storage.load_pending_connection_changes() == []
+    assert storage.get("192.0.2.12").display_value == "L2-Connected"
+    stored_incident = next(
+        item
+        for item in storage.list_incidents()
+        if item.incident_id == "legacy-false-incident"
+    )
+    assert stored_incident.active is False
+    assert stored_incident.acknowledged is True
+    storage.close()
 
 
 def test_runtime_prunes_stale_unregistered_inventory_before_restoring_it(

@@ -59,7 +59,7 @@ Aruba 무선 클러스터 상태를 확인할 때 한 명령만 보면 실제 �
 | 복구 직후 상태 흔들림 | 기본 2회 연속 정상 관측 후 복구로 확정 |
 | Cluster 전체 사용량이 낮음 | 전체 Active Client와 Peer 기준을 함께 확인해 저사용량 상태를 장애와 분리 |
 | 구성원 행이 순간적으로 누락 | 기본 3회 연속 누락을 확인해 일시적인 출력 변동을 완화 |
-| Connection-Type 변화 | 최초 정상 값을 baseline으로 저장하고 이후 변화만 사건으로 기록 |
+| Connection-Type 변화 | STATUS의 heartbeat·RTD를 제외한 타입만 baseline으로 저장하고 이후 실제 변화만 사건으로 기록 |
 | Primary 조회 실패 | 등록 순서에 따른 Fallback으로 수집을 계속하되 실제 수집 Controller를 별도로 기록 |
 | 접속·명령·Parser 실패 | **WLC Down으로 추정하지 않고 `확인 불가/부분 수집`으로 분리** |
 | 같은 IP에 여러 문제 발생 | 원인을 IP 기준으로 누적해 하나의 종합 상태와 판단 근거로 표시 |
@@ -183,7 +183,7 @@ show lc-cluster group-membership
 | 세 명령 Parser / 비식별 fixture | ✅ 자동 검증 |
 | 이상·복구·누락 streak | ✅ 자동 검증 |
 | 낮은 전체 사용량 오탐 방지 | ✅ 자동 검증 |
-| Connection-Type baseline / 확인 / 재시작 | ✅ 자동 검증 |
+| Connection-Type/STATUS 열 분리, baseline / 확인 / 재시작 | ✅ 자동 검증 |
 | MM Down과 수집 실패 분리 | ✅ 자동 검증 |
 | Primary / Fallback 수집 경로 | ✅ 가짜 SSH·통합 테스트 |
 | SQLite 상태·재시작·손상 보호 | ✅ 자동 검증 |
@@ -237,7 +237,7 @@ Windows onedir 패키지:
 버전 ZIP과 SHA-256:
 
 ```powershell
-.\scripts\package_release.ps1 -Version 0.4.1
+.\scripts\package_release.ps1 -Version 0.4.2
 ```
 
 개발 구조와 변경 원칙은 [`DEVELOPMENT.md`](DEVELOPMENT.md), Release 검증·배포 절차는 [Windows 배포 절차](docs/RELEASE_PROCESS_KO.md)를 참고하십시오.

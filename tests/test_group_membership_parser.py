@@ -50,6 +50,23 @@ def test_header_spacing_hyphen_ansi_and_pager_are_supported() -> None:
     assert [row.connection_type for row in result.rows] == ["L2-Connected", "N/A"]
 
 
+def test_7240xm_full_table_keeps_dynamic_status_out_of_connection_type() -> None:
+    result = parse_group_membership(fixture("group_membership_7240xm.txt"))
+
+    assert result.status is ParseStatus.COMPLETE
+    assert [row.connection_type for row in result.rows] == [
+        "N/A",
+        "L2-Connected",
+        "L2-Connected",
+        "L2-Connected",
+    ]
+    member = next(row for row in result.rows if row.ip == "192.0.2.12")
+    assert member.raw_fields["status"] == (
+        "CONNECTED (Member, last HBT_RSP 44ms ago, RTD = 0.000 ms)"
+    )
+    assert member.raw_fields["priority"] == "128"
+
+
 def test_broken_row_does_not_discard_valid_members() -> None:
     output = """IP Address       Connection-Type
 192.0.2.11       Type-A

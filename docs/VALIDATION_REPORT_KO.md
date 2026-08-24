@@ -15,7 +15,7 @@
 | 3회 이상 / 2회 복구 streak | ✅ 자동 검증 | anomaly detector 테스트 |
 | 낮은 전체 사용량 오탐 방지 | ✅ 자동 검증 | anomaly detector 테스트 |
 | 구성원 누락 debounce | ✅ 자동 검증 | anomaly detector 테스트 |
-| Connection-Type baseline / 변화 | ✅ 자동 검증 | correlation / incident 테스트 |
+| Connection-Type/STATUS 열 분리, baseline / 변화 | ✅ 자동 검증 | parser / correlation / SQLite migration 테스트 |
 | 복수 문제 IP 상관분석 | ✅ 자동 검증 | correlation engine 테스트 |
 | Primary / Fallback | ✅ 자동 검증 | Collector / 가짜 SSH 통합 테스트 |
 | strict host-key 경계 | ✅ 자동 검증 | 로컬 SSH 통합 경로 |
