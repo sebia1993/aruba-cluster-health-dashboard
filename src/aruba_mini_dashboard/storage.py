@@ -22,11 +22,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
+from .connection_types import clean_legacy_connection_type, normalize_connection_type
 from .config import AppPaths, _field_name_tokens, _is_secret_field_name, default_app_paths
 
 
 LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 HISTORY_RETENTION_DAYS = 180
 HISTORY_RETENTION_MAX_ROWS = 10_000
 HISTORY_MAINTENANCE_INTERVAL = timedelta(days=1)
@@ -573,9 +574,17 @@ class SQLiteStorage:
                 COMMIT;
                 """
             )
+        if version < 5:
+            _migrate_connection_type_state_v5(connection)
 
     def _validate_legacy_schema(self, version: int) -> None:
         """Fail before a committed migration can mutate malformed legacy data."""
+
+        if version >= 4:
+            # v5 changes the semantics of persisted Connection-Type values but
+            # retains the complete v4 table and index contracts.
+            self._validate_schema()
+            return
 
         connection = self._require_connection()
         tables = list(_LEGACY_BASE_TABLES)
@@ -604,7 +613,7 @@ class SQLiteStorage:
         _validate_index_contracts(connection, legacy_indexes)
 
     def _validate_schema(self) -> None:
-        """Reject an incomplete or weakened v4 schema before runtime reads."""
+        """Reject an incomplete or weakened current schema before runtime reads."""
 
         connection = self._require_connection()
         for table in _REQUIRED_SCHEMA_COLUMNS:
@@ -726,7 +735,11 @@ class SQLiteStorage:
         normalized_connection_type: str | None = None,
         observed_at: datetime | str | None = None,
     ) -> None:
-        normalized = normalized_connection_type if normalized_connection_type is not None else _normalize_type(connection_type)
+        normalized = (
+            normalized_connection_type
+            if normalized_connection_type is not None
+            else normalize_connection_type(connection_type)
+        )
         self._write(
             lambda db: db.execute(
                 """INSERT INTO connection_baselines
@@ -2053,8 +2066,102 @@ def _optional_parse_stored_timestamp(value: object) -> datetime | None:
     return None if value in (None, "") else _parse_stored_timestamp(value)
 
 
-def _normalize_type(value: str) -> str:
-    return " ".join(str(value).strip().casefold().replace("-", " ").split())
+def _migrate_connection_type_state_v5(connection: sqlite3.Connection) -> None:
+    """Repair values polluted by the legacy group-membership STATUS column."""
+
+    cleanup_at = _timestamp(None)
+    false_event_tokens: set[str] = set()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        baseline_rows = connection.execute(
+            "SELECT member_ip, connection_type FROM connection_baselines"
+        ).fetchall()
+        for row in baseline_rows:
+            cleaned, changed = clean_legacy_connection_type(row["connection_type"])
+            if not changed:
+                continue
+            connection.execute(
+                """UPDATE connection_baselines
+                   SET connection_type=?, normalized_connection_type=?
+                   WHERE member_ip=?""",
+                (
+                    cleaned,
+                    normalize_connection_type(cleaned),
+                    str(row["member_ip"]),
+                ),
+            )
+
+        change_rows = connection.execute(
+            """SELECT event_token, previous_value, current_value, acknowledged
+               FROM connection_changes"""
+        ).fetchall()
+        for row in change_rows:
+            previous, previous_changed = clean_legacy_connection_type(
+                row["previous_value"]
+            )
+            current, current_changed = clean_legacy_connection_type(row["current_value"])
+            if not previous_changed and not current_changed:
+                continue
+
+            event_token = str(row["event_token"])
+            false_positive = (
+                normalize_connection_type(previous)
+                == normalize_connection_type(current)
+            )
+            acknowledged = int(row["acknowledged"])
+            if false_positive:
+                acknowledged = 1
+                false_event_tokens.add(event_token)
+            connection.execute(
+                """UPDATE connection_changes
+                   SET previous_value=?, current_value=?, acknowledged=?
+                   WHERE event_token=?""",
+                (previous, current, acknowledged, event_token),
+            )
+
+        for event_token in false_event_tokens:
+            incident_rows = connection.execute(
+                """SELECT incident_id, payload_json
+                   FROM incidents
+                   WHERE incident_type='connection_type_changed'
+                     AND reason_key=?
+                     AND active=1""",
+                (event_token,),
+            ).fetchall()
+            for incident_row in incident_rows:
+                payload = _json_load(
+                    incident_row["payload_json"],
+                    require_mapping=True,
+                )
+                details = payload.get("details", {})
+                if type(details) is not dict:
+                    raise StorageCorruptError(
+                        "저장된 로컬 상태 형식이 손상되었습니다."
+                    )
+                details = dict(details)
+                details["automatic_cleanup"] = (
+                    "legacy_connection_status_column_v5"
+                )
+                payload["details"] = details
+                if not payload.get("acknowledged_at"):
+                    payload["acknowledged_at"] = cleanup_at
+                connection.execute(
+                    """UPDATE incidents
+                       SET active=0, acknowledged=1, payload_json=?
+                       WHERE incident_id=?""",
+                    (_json_dump(payload), str(incident_row["incident_id"])),
+                )
+
+        connection.execute("PRAGMA user_version=5")
+        connection.commit()
+    except BaseException:
+        try:
+            connection.rollback()
+        except sqlite3.DatabaseError as rollback_error:
+            raise StorageError(
+                "Connection-Type 상태 마이그레이션을 되돌리지 못했습니다."
+            ) from rollback_error
+        raise
 
 
 def _validate_json_shape(value: object) -> None:

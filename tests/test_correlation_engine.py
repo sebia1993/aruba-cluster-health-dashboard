@@ -635,6 +635,51 @@ def test_connection_format_only_difference_is_not_a_change() -> None:
     assert health.problem_ips == []
 
 
+def test_7240xm_heartbeat_and_rtd_changes_do_not_change_connection_type() -> None:
+    initial = fixture("group_membership_7240xm.txt")
+    updated = initial.replace("HBT_RSP 44ms", "HBT_RSP 67ms").replace(
+        "RTD = 0.000 ms", "RTD = 0.125 ms", 1
+    )
+    engine = CorrelationEngine()
+    first_poll = cycle()
+    first_poll.membership_result = parse_group_membership(initial)
+    assert engine.correlate(first_poll).problem_ips == []
+
+    second_poll = cycle(checked_at=NOW + timedelta(minutes=1))
+    second_poll.membership_result = parse_group_membership(updated)
+    health = engine.correlate(second_poll)
+
+    assert health.problem_ips == []
+    assert engine.pending_connection_changes() == ()
+    member = health.device_by_ip("192.0.2.12")
+    assert member is not None
+    assert member.connection_type == "L2-Connected"
+    assert member.connection_type_changed is False
+
+
+def test_7240xm_real_connection_type_change_remains_a_warning() -> None:
+    initial = fixture("group_membership_7240xm.txt")
+    changed = initial.replace(
+        "peer 192.0.2.12           128    L2-Connected",
+        "peer 192.0.2.12           128    L3-Connected",
+    )
+    engine = CorrelationEngine()
+    first_poll = cycle()
+    first_poll.membership_result = parse_group_membership(initial)
+    engine.correlate(first_poll)
+
+    changed_poll = cycle(checked_at=NOW + timedelta(minutes=1))
+    changed_poll.membership_result = parse_group_membership(changed)
+    health = engine.correlate(changed_poll)
+
+    assert health.problem_ips == ["192.0.2.12"]
+    member = health.device_by_ip("192.0.2.12")
+    assert member is not None
+    assert member.previous_connection_type == "L2-Connected"
+    assert member.connection_type == "L3-Connected"
+    assert member.connection_type_changed is True
+
+
 def test_load_member_missing_is_debounced_and_recovers_after_two_present_cycles() -> None:
     engine = CorrelationEngine()
     for index in range(3):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import hashlib
 import io
@@ -37,7 +38,7 @@ def test_sqlite_uses_wal_and_persists_baseline_protocol_across_restart(tmp_path:
     paths = make_paths(tmp_path)
     observed = datetime(2026, 8, 11, 1, 30, tzinfo=timezone.utc)
     with SQLiteStorage(paths) as storage:
-        assert storage.schema_version == 4
+        assert storage.schema_version == SCHEMA_VERSION
         storage.set(
             DomainConnectionBaseline(
                 collector_ip="192.0.2.11",
@@ -96,7 +97,7 @@ def test_v3_migration_selects_latest_member_baseline_and_pending_change(tmp_path
     legacy.close()
 
     with SQLiteStorage(paths) as migrated:
-        assert migrated.schema_version == 4
+        assert migrated.schema_version == SCHEMA_VERSION
         baseline = migrated.get("192.0.2.12")
         assert baseline is not None
         assert baseline.collector_ip == "192.0.2.13"
@@ -114,6 +115,227 @@ def test_v3_migration_selects_latest_member_baseline_and_pending_change(tmp_path
             ("newer-token", 0),
             ("older-token", 1),
         ]
+
+
+def test_v4_migration_repairs_status_pollution_without_losing_real_changes(
+    tmp_path: Path,
+) -> None:
+    paths = make_paths(tmp_path)
+    with SQLiteStorage(paths):
+        pass
+
+    observed = "2026-08-11T01:30:00+00:00"
+    false_token = "false-status-token"
+    true_token = "real-type-token"
+
+    def incident_payload(token: str, previous: str, current: str) -> str:
+        return json.dumps(
+            {
+                "severity": "warning",
+                "reason": f"Connection-Type 변경: {previous} → {current}",
+                "alias": None,
+                "acknowledged_at": None,
+                "recovered_at": None,
+                "last_notified_at": None,
+                "event_token": token,
+                "details": {"previous": previous, "current": current},
+            },
+            ensure_ascii=False,
+        )
+
+    legacy = sqlite3.connect(paths.database)
+    legacy.executemany(
+        """INSERT INTO connection_baselines
+               (source_controller_ip, member_ip, connection_type,
+                normalized_connection_type, observed_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (
+            (
+                "192.0.2.11",
+                "192.0.2.12",
+                "L2-Connected CONNECTED (Member, last HBT_RSP 67ms ago, RTD = 0.125 ms)",
+                "legacy-false-normalized",
+                observed,
+            ),
+            (
+                "192.0.2.11",
+                "192.0.2.13",
+                "L2-Connected CONNECTED (Member, last HBT_RSP 82ms ago, RTD = 0.396 ms)",
+                "legacy-true-normalized",
+                observed,
+            ),
+            (
+                "192.0.2.11",
+                "192.0.2.14",
+                "Vendor-Future CONNECTED (Member)",
+                "vendor-future-connected(member)",
+                observed,
+            ),
+        ),
+    )
+    false_previous = (
+        "L2-Connected CONNECTED (Member, last HBT_RSP 44ms ago, RTD = 0.000 ms)"
+    )
+    false_current = (
+        "L2-Connected CONNECTED (Member, last HBT_RSP 67ms ago, RTD = 0.125 ms)"
+    )
+    true_previous = "N/A CONNECTED (Leader)"
+    true_current = (
+        "L2-Connected CONNECTED (Member, last HBT_RSP 82ms ago, RTD = 0.396 ms)"
+    )
+    legacy.executemany(
+        """INSERT INTO connection_changes
+               (event_token, collector_ip, member_ip, previous_value, current_value,
+                first_detected_at, last_confirmed_at, acknowledged)
+           VALUES (?, '192.0.2.11', ?, ?, ?, ?, ?, 0)""",
+        (
+            (
+                false_token,
+                "192.0.2.12",
+                false_previous,
+                false_current,
+                observed,
+                observed,
+            ),
+            (
+                true_token,
+                "192.0.2.13",
+                true_previous,
+                true_current,
+                observed,
+                observed,
+            ),
+        ),
+    )
+    legacy.executemany(
+        """INSERT INTO incidents
+               (incident_id, ip, incident_type, reason_key, first_detected_at,
+                last_seen_at, resolved_at, active, acknowledged, payload_json)
+           VALUES (?, ?, 'connection_type_changed', ?, ?, ?, NULL, 1, 0, ?)""",
+        (
+            (
+                "false-incident",
+                "192.0.2.12",
+                false_token,
+                observed,
+                observed,
+                incident_payload(false_token, false_previous, false_current),
+            ),
+            (
+                "true-incident",
+                "192.0.2.13",
+                true_token,
+                observed,
+                observed,
+                incident_payload(true_token, true_previous, true_current),
+            ),
+        ),
+    )
+    legacy.execute(
+        """INSERT INTO events(event_type, ip, incident_id, occurred_at, payload_json)
+           VALUES ('activated', '192.0.2.12', 'false-incident', ?, '{}')""",
+        (observed,),
+    )
+    legacy.execute("PRAGMA user_version=4")
+    legacy.commit()
+    legacy.close()
+
+    with SQLiteStorage(paths) as migrated:
+        assert migrated.schema_version == 5
+        baselines = {
+            item.member_ip: item for item in migrated.load_connection_baselines()
+        }
+        assert baselines["192.0.2.12"].connection_type == "L2-Connected"
+        assert baselines["192.0.2.12"].normalized_connection_type == "l2connected"
+        assert baselines["192.0.2.13"].connection_type == "L2-Connected"
+        assert baselines["192.0.2.14"].connection_type == "Vendor-Future CONNECTED (Member)"
+
+        pending = migrated.load_pending_connection_changes()
+        assert len(pending) == 1
+        assert pending[0].event_token == true_token
+        assert pending[0].previous_value == "N/A"
+        assert pending[0].current_value == "L2-Connected"
+
+        changes = migrated._read(
+            lambda db: db.execute(
+                """SELECT event_token, previous_value, current_value, acknowledged
+                   FROM connection_changes ORDER BY event_token"""
+            ).fetchall()
+        )
+        assert [tuple(row) for row in changes] == [
+            (false_token, "L2-Connected", "L2-Connected", 1),
+            (true_token, "N/A", "L2-Connected", 0),
+        ]
+
+        incidents = {item.incident_id: item for item in migrated.list_incidents()}
+        assert incidents["false-incident"].active is False
+        assert incidents["false-incident"].acknowledged is True
+        assert incidents["false-incident"].payload["acknowledged_at"] is not None
+        assert incidents["false-incident"].payload["details"]["automatic_cleanup"] == (
+            "legacy_connection_status_column_v5"
+        )
+        assert incidents["true-incident"].active is True
+        assert incidents["true-incident"].acknowledged is False
+        assert [item.incident_id for item in migrated.load_domain_incidents(active_only=True)] == [
+            "true-incident"
+        ]
+        assert len(migrated.list_events()) == 1
+
+
+def test_v4_connection_cleanup_rolls_back_all_rows_when_incident_payload_is_corrupt(
+    tmp_path: Path,
+) -> None:
+    paths = make_paths(tmp_path)
+    with SQLiteStorage(paths):
+        pass
+    observed = "2026-08-11T01:30:00+00:00"
+    legacy = sqlite3.connect(paths.database)
+    legacy.execute(
+        """INSERT INTO connection_baselines
+               (source_controller_ip, member_ip, connection_type,
+                normalized_connection_type, observed_at)
+           VALUES ('192.0.2.11', '192.0.2.12',
+                   'L2-Connected CONNECTED (Member, last HBT_RSP 67ms ago)',
+                   'polluted', ?)""",
+        (observed,),
+    )
+    legacy.execute(
+        """INSERT INTO connection_changes
+               (event_token, collector_ip, member_ip, previous_value, current_value,
+                first_detected_at, last_confirmed_at, acknowledged)
+           VALUES ('false-token', '192.0.2.11', '192.0.2.12',
+                   'L2-Connected CONNECTED (Member, last HBT_RSP 44ms ago)',
+                   'L2-Connected CONNECTED (Member, last HBT_RSP 67ms ago)',
+                   ?, ?, 0)""",
+        (observed, observed),
+    )
+    legacy.execute(
+        """INSERT INTO incidents
+               (incident_id, ip, incident_type, reason_key, first_detected_at,
+                last_seen_at, resolved_at, active, acknowledged, payload_json)
+           VALUES ('false-incident', '192.0.2.12', 'connection_type_changed',
+                   'false-token', ?, ?, NULL, 1, 0, '{')""",
+        (observed, observed),
+    )
+    legacy.execute("PRAGMA user_version=4")
+    legacy.commit()
+    legacy.close()
+
+    with pytest.raises(StorageCorruptError):
+        SQLiteStorage(paths)
+
+    preserved = sqlite3.connect(paths.database)
+    try:
+        assert preserved.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert preserved.execute(
+            "SELECT connection_type FROM connection_baselines"
+        ).fetchone()[0].startswith("L2-Connected CONNECTED")
+        assert preserved.execute(
+            "SELECT acknowledged FROM connection_changes"
+        ).fetchone()[0] == 0
+        assert preserved.execute("SELECT active FROM incidents").fetchone()[0] == 1
+    finally:
+        preserved.close()
 
 
 def test_storage_persists_streak_incident_ack_recovery_and_event(tmp_path: Path) -> None:

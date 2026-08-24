@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Iterable, Mapping, Sequence, TypeVar
 
+from aruba_mini_dashboard.connection_types import normalize_connection_type
 from aruba_mini_dashboard.models import ParseIssue, ParseResult, ParseStatus
 
 
@@ -169,10 +170,6 @@ def output_excerpt(output: str, limit: int = 2_048) -> str:
 @lru_cache(maxsize=512)
 def normalize_header(value: str) -> str:
     return HEADER_SEPARATOR_RE.sub("", value).casefold()
-
-
-def normalize_connection_type(value: str) -> str:
-    return normalize_header(value.strip())
 
 
 def normalize_mm_status(value: str) -> str:

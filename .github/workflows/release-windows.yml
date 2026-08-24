@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing annotated release tag, for example v0.4.1"
+        description: "Existing annotated release tag, for example v0.4.2"
         required: true
         type: string
       release_mode:
@@ -474,6 +474,16 @@ jobs:
           - Windows 네이티브 트레이 메뉴 항목은 화면 오버레이가 아니라 ``요소 목록``의 정적
             카탈로그에서 확인합니다.
 
+          ## v0.4.2 Connection-Type 오탐 수정
+
+          - 7240XM Membership 전체 표의 ``Connection-Type``과 ``STATUS`` 열을 분리해
+            ``last HBT_RSP``와 ``RTD`` 변동을 타입 변화로 잘못 알리지 않습니다.
+          - 실제 ``N/A``, ``L2-Connected``, ``L3-Connected`` 변화는 계속 주의 사건으로
+            기록하며, SQLite v5 마이그레이션은 기존 오탐만 자동 종료하고 실제 변화와
+            과거 이력을 보존합니다.
+          - 비식별 전체 표와 재시작 마이그레이션으로 검증하며 장비 명령과 SSH 연결
+            방식은 변경하지 않습니다.
+
           ## v0.4.1 프로그램 안정성
 
           - 점검 중 합쳐진 수동 요청은 현재 연결 확인이나 점검이 끝난 직후 정확히 한 번
@@ -499,8 +509,9 @@ jobs:
           ## 현장 확인 범위
 
           실제 Aruba 장비 출력과 사내 SSH 환경은 별도 현장 증거가 필요합니다. 실제 IP,
-          Hostname, 계정, SSH 지문과 CLI 원문은 공개하지 않습니다. 이번 patch의 자동 검증은
-          프로그램 내부의 반복 실패 복구를 확인하며 실제 장비 호환성을 대체하지 않습니다.
+          Hostname, 계정, SSH 지문과 CLI 원문은 공개하지 않습니다. 이번 prerelease의 자동
+          검증은 비식별 Membership 전체 표, SQLite 마이그레이션과 반복 실패 복구를 확인하며
+          실제 장비 호환성을 대체하지 않습니다.
           Python 미설치 클린 Windows 11, 코드 서명, 실제 100%/125%/150% DPI,
           저사양 PC·HDD·느린 네트워크·24시간 이상 운전, 조직 알림 정책·조직 클립보드 정책,
           물리 F12/Fn 키 매핑, 시스템 트레이 카탈로그, 고대비 테마와 다중 모니터는
