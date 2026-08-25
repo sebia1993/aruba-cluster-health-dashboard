@@ -173,6 +173,17 @@ class NotificationService(QObject):
             if key[0] == ip:
                 self._remember_acknowledgement(key)
 
+    @Slot(str)
+    def acknowledge_connection_type(self, ip: str) -> None:
+        """Suppress only the accepted Connection-Type notification lifecycle."""
+
+        prefix = "connection_type_changed:"
+        for key in tuple(self._last_shown):
+            if key[0] == ip and (
+                key[1] == "connection_type_changed" or key[1].startswith(prefix)
+            ):
+                self._remember_acknowledgement(key)
+
     def clear_resolved(self, ip: str, issue_type: str) -> None:
         key = (ip, issue_type)
         self._acknowledged.pop(key, None)

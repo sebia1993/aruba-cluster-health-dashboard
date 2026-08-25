@@ -298,7 +298,9 @@ def test_membership_event_survives_locked_flush_and_settings_rebuild(
         membership_cycle("group_membership_changed.txt", initial_at + timedelta(minutes=2))
     )
 
-    assert storage.get("192.0.2.12").display_value == "Type-B"
+    # The changed value is durable as a pending candidate, while the
+    # operator-accepted Type-A baseline remains authoritative.
+    assert storage.get("192.0.2.12").display_value == "Type-A"
     pending = storage.load_pending_connection_changes()
     assert len(pending) == 1
     assert (pending[0].previous_value, pending[0].current_value) == ("Type-A", "Type-B")
@@ -672,7 +674,7 @@ def test_failed_atomic_acknowledgement_is_retained_for_same_runtime_retry(
         raise StorageBusyError("locked")
 
     monkeypatch.setattr(storage, "save_cycle_domain_state", locked)
-    runtime.acknowledge_ip("192.0.2.12")
+    assert runtime.accept_connection_type_baseline("192.0.2.12") is True
     assert runtime._pending_connection_acknowledgements == {"192.0.2.12"}
     assert len(storage.load_pending_connection_changes()) == 1
 
@@ -750,7 +752,7 @@ def test_failover_connection_change_persists_by_member_across_restart(tmp_path: 
     reopened_storage.close()
 
 
-def test_reverted_connection_type_supersedes_old_event_without_recovery_across_restart(
+def test_unaccepted_connection_type_return_to_baseline_recovers_across_restart(
     tmp_path: Path,
 ) -> None:
     paths = AppPaths.from_environment(tmp_path).ensure()
@@ -785,32 +787,25 @@ def test_reverted_connection_type_supersedes_old_event_without_recovery_across_r
     )
 
     assert len(reverted.notification_events) == 1
-    replacement = reverted.notification_events[0]
-    assert replacement.incident_id != original.incident_id
-    assert replacement.details["previous"] == "Type-B"
-    assert replacement.details["current"] == "Type-A"
-    assert [item.incident_id for item in reverted.active_incidents] == [
-        replacement.incident_id
-    ]
+    recovered = reverted.notification_events[0]
+    assert recovered.incident_id == original.incident_id
+    assert recovered.active is False
+    assert recovered.recovered_at == initial_at + timedelta(minutes=2)
+    assert reverted.active_incidents == []
+    assert first_storage.get("192.0.2.12").display_value == "Type-A"
+    assert first_storage.load_pending_connection_changes() == []
 
     persisted = first_storage.load_domain_incidents()
-    persisted_by_id = {item.incident_id: item for item in persisted}
-    superseded = persisted_by_id[original.incident_id]
-    assert superseded.active is False
-    assert superseded.acknowledged is False
-    assert superseded.recovered_at is None
-    assert persisted_by_id[replacement.incident_id].active is True
-    pending = first_storage.load_pending_connection_changes()
-    assert len(pending) == 1
-    assert (pending[0].previous_value, pending[0].current_value) == (
-        "Type-B",
-        "Type-A",
-    )
+    assert len(persisted) == 1
+    stored = persisted[0]
+    assert stored.incident_id == original.incident_id
+    assert stored.active is False
+    assert stored.acknowledged is False
+    assert stored.recovered_at == initial_at + timedelta(minutes=2)
     event_types = [
         item["event_type"] for item in reversed(first_storage.list_events())
     ]
-    assert event_types == ["activated", "activated", "superseded"]
-    assert "recovered" not in event_types
+    assert event_types == ["activated", "recovered"]
     first_storage.close()
 
     reopened_storage = SQLiteStorage(paths)
@@ -829,14 +824,11 @@ def test_reverted_connection_type_supersedes_old_event_without_recovery_across_r
     )
 
     assert reconfirmed.notification_events == []
-    assert [item.incident_id for item in reconfirmed.active_incidents] == [
-        replacement.incident_id
-    ]
+    assert reconfirmed.active_incidents == []
+    assert reopened_storage.get("192.0.2.12").display_value == "Type-A"
+    assert reopened_storage.load_pending_connection_changes() == []
     restarted_events = [
         item["event_type"] for item in reversed(reopened_storage.list_events())
     ]
-    assert restarted_events == [*event_types, "updated"]
-    assert restarted_events.count("activated") == 2
-    assert restarted_events.count("superseded") == 1
-    assert "recovered" not in restarted_events
+    assert restarted_events == event_types
     reopened_storage.close()

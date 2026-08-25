@@ -2253,7 +2253,9 @@ def main(argv: list[str] | None = None) -> int:
         runtime.accept_connection_type_baseline
     )
     window.acknowledge_requested.connect(notifications.acknowledge_ip)
-    window.connection_type_baseline_requested.connect(notifications.acknowledge_ip)
+    window.connection_type_baseline_requested.connect(
+        notifications.acknowledge_connection_type
+    )
     notifications.notification_shown.connect(runtime.mark_notification_delivered)
     app.setQuitOnLastWindowClosed(not window.tray_icon.isVisible())
 

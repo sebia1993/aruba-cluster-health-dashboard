@@ -2090,7 +2090,7 @@ class MainWindow(QMainWindow):
 
     def _set_acknowledgement_mode(self, connection_type_change: bool) -> None:
         text = (
-            "Connection-Type 정상 기준 설정"
+            "현재 Connection-Type 정상 기준 설정"
             if connection_type_change
             else "알림 확인"
         )
