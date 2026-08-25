@@ -73,6 +73,22 @@ jobs:
             rm -f .github/v060-bootstrap-skipped
             exit 0
           fi
+          # The packaged README does not contain the developer-only packaging
+          # command on all historical branches. Keep the version header update
+          # required, but remove that optional patch line before applying.
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('apply_v060.py')
+          lines = path.read_text(encoding='utf-8').splitlines()
+          lines = [
+              line for line in lines
+              if not (
+                  "replace_required('docs/README.txt'" in line
+                  and 'package_release.ps1' in line
+              )
+          ]
+          path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          PY
           python apply_v060.py
           python -m compileall -q src tests scripts
 
