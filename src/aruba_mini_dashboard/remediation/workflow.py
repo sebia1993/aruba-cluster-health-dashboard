@@ -1,25 +1,23 @@
 from __future__ import annotations
 
+import logging
 import threading
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
 
 from aruba_mini_dashboard.collectors.base import SshOperationError
 
-from .backend import (
-    RemediationBackend,
-    cluster_snapshot,
-    combined_snapshot,
-    mm_snapshot,
-)
+from .backend import RemediationBackend, cluster_snapshot, combined_snapshot, mm_snapshot
 from .models import (
     ActionResultCode,
     ClusterObservation,
+    DispatchPhase,
     MmObservation,
+    RebalanceGateObservation,
     RemediationCandidate,
     RemediationEvent,
     RemediationOutcome,
@@ -28,9 +26,12 @@ from .models import (
     WorkflowResult,
     utc_now,
 )
-from .report import write_report
+from .report import preflight_report_directory, write_report
 from .repository import RemediationRepository
 from .settings import RemediationSettings
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -69,6 +70,9 @@ class RemediationWorkflow:
         self.now = now
         stamp = candidate.detected_at.astimezone(timezone.utc).strftime("%Y%m%d-%H%M%S")
         suffix = uuid.uuid4().hex[:8]
+        fingerprint = candidate.configuration_fingerprint or str(
+            getattr(backend, "configuration_fingerprint", "")
+        )
         self.run = RemediationRun(
             run_id=f"REM-{stamp}-{suffix}",
             incident_key=candidate.incident_key,
@@ -77,6 +81,7 @@ class RemediationWorkflow:
             cluster_name=candidate.cluster_name,
             expected_member_ips=candidate.expected_member_ips,
             started_at=self.now(),
+            configuration_fingerprint=fingerprint,
             app_version=app_version,
         )
         self._sequence = 0
@@ -108,12 +113,15 @@ class RemediationWorkflow:
         )
         self.run.events.append(event)
         self.run.stage = stage
-        self.repository.append_event(self.run.run_id, event)
-        self.repository.update_run(self.run)
+        self.repository.commit_transition(self.run, event=event)
 
     def _snapshot(self, name: str, data: dict[str, Any]) -> None:
         self.run.snapshots[name] = data
-        self.repository.save_snapshot(self.run.run_id, name, data)
+        self.repository.commit_transition(
+            self.run,
+            snapshot_name=name,
+            snapshot_data=data,
+        )
 
     def _check_cancelled(self) -> None:
         if self.cancel_event.is_set():
@@ -151,6 +159,7 @@ class RemediationWorkflow:
             endpoint_ip=self.candidate.target_ip,
         )
         try:
+            self._local_preflight()
             mm_pre = self._precheck()
             cluster_pre = self._best_effort_cluster_snapshot()
             self._snapshot(
@@ -160,19 +169,19 @@ class RemediationWorkflow:
             action = self._connect_target()
             try:
                 self.run.reload_reserved = True
-                self.repository.update_run(self.run)
+                self.run.reload_dispatch_phase = DispatchPhase.RESERVED
                 self._event(
                     RemediationStage.RELOAD,
                     "reload_dispatch_reserved",
                     "RELOAD_DISPATCH_RESERVED",
-                    "중복 실행 방지를 위해 reload force 전송 슬롯을 영구 예약했습니다.",
+                    "중복 실행 방지를 위해 reload force 쓰기 슬롯을 원자적으로 예약했습니다.",
                     endpoint_ip=self.candidate.target_ip,
                 )
                 reload_result = action.run_reload_force()
             finally:
                 action.close()
             self.run.reload_sent = reload_result.sent
-            self.repository.update_run(self.run)
+            self.run.reload_dispatch_phase = reload_result.dispatch_phase
             self._event(
                 RemediationStage.RELOAD,
                 "reload_force",
@@ -180,16 +189,16 @@ class RemediationWorkflow:
                 reload_result.message,
                 endpoint_ip=self.candidate.target_ip,
                 duration_ms=reload_result.duration_ms,
-                evidence={"accepted": reload_result.accepted},
+                evidence={
+                    "accepted": reload_result.accepted,
+                    "dispatch_phase": reload_result.dispatch_phase.value,
+                },
             )
             if reload_result.code in {
                 ActionResultCode.RELOAD_REJECTED,
                 ActionResultCode.ACTION_NOT_SENT,
             }:
-                raise _WorkflowAbort(
-                    reload_result.code.value.upper(),
-                    reload_result.message,
-                )
+                raise _WorkflowAbort(reload_result.code.value.upper(), reload_result.message)
 
             mm_up = self._wait_for_mm_up()
             leader_ip, rejoin = self._wait_for_rejoin()
@@ -201,23 +210,37 @@ class RemediationWorkflow:
             )
             leader_session = self._connect_leader(leader_ip)
             try:
+                gate = self._final_rebalance_gate(leader_session, leader_ip)
+                self._snapshot(
+                    "final_rebalance_gate",
+                    combined_snapshot(gate.mm, gate.cluster, self.candidate.expected_member_ips),
+                )
+                if not gate.passed:
+                    raise _WorkflowAbort(gate.reason_code, gate.reason_message)
+                self._event(
+                    RemediationStage.FINAL_GATE,
+                    "final_rebalance_gate",
+                    "PASSED",
+                    "동일 Leader SSH 세션의 Membership과 MM 전체 Up을 재분배 직전에 확인했습니다.",
+                    endpoint_ip=leader_ip,
+                )
                 self.run.rebalance_reserved = True
-                self.repository.update_run(self.run)
+                self.run.rebalance_dispatch_phase = DispatchPhase.RESERVED
                 self._event(
                     RemediationStage.REBALANCE,
                     "rebalance_dispatch_reserved",
                     "REBALANCE_DISPATCH_RESERVED",
-                    "중복 실행 방지를 위해 클러스터 재분배 전송 슬롯을 영구 예약했습니다.",
+                    "중복 실행 방지를 위해 클러스터 재분배 쓰기 슬롯을 원자적으로 예약했습니다.",
                     endpoint_ip=leader_ip,
                 )
                 rebalance_result = leader_session.run_rebalance()
             finally:
                 leader_session.close()
             self.run.rebalance_sent = rebalance_result.sent
+            self.run.rebalance_dispatch_phase = rebalance_result.dispatch_phase
             self.run.rebalance_confirmed = (
                 rebalance_result.code is ActionResultCode.REBALANCE_TRIGGERED
             )
-            self.repository.update_run(self.run)
             self._event(
                 RemediationStage.REBALANCE,
                 "cluster_rebalance",
@@ -225,13 +248,16 @@ class RemediationWorkflow:
                 rebalance_result.message,
                 endpoint_ip=leader_ip,
                 duration_ms=rebalance_result.duration_ms,
-                evidence={"accepted": rebalance_result.accepted},
+                evidence={
+                    "accepted": rebalance_result.accepted,
+                    "dispatch_phase": rebalance_result.dispatch_phase.value,
+                },
             )
-            if rebalance_result.code is ActionResultCode.REBALANCE_REJECTED:
-                raise _WorkflowAbort(
-                    "REBALANCE_REJECTED",
-                    rebalance_result.message,
-                )
+            if rebalance_result.code in {
+                ActionResultCode.REBALANCE_REJECTED,
+                ActionResultCode.ACTION_NOT_SENT,
+            }:
+                raise _WorkflowAbort(rebalance_result.code.value.upper(), rebalance_result.message)
 
             post_ok, mm_post, cluster_post = self._post_monitor()
             self._snapshot(
@@ -243,7 +269,7 @@ class RemediationWorkflow:
                     RemediationOutcome.COMPLETED,
                     RemediationStage.COMPLETED,
                     "",
-                    "Controller 재부팅, Cluster 재가입, Leader 재분배 요청과 사후 정상 상태를 모두 확인했습니다.",
+                    "Controller 재부팅, Cluster 재가입, 동일 Leader 세션의 최종 검증, 재분배 요청과 사후 정상 상태를 모두 확인했습니다.",
                     release_target=True,
                 )
             if post_ok:
@@ -280,6 +306,7 @@ class RemediationWorkflow:
                 release_target=(not self.run.reload_reserved),
             )
         except Exception:
+            LOGGER.exception("Unexpected automatic remediation error")
             return self._finalize(
                 RemediationOutcome.FAILED,
                 RemediationStage.FAILED,
@@ -288,6 +315,24 @@ class RemediationWorkflow:
                 release_target=(not self.run.reload_reserved),
             )
 
+    def _local_preflight(self) -> None:
+        self._check_cancelled()
+        self.repository.preflight()
+        preflight_report_directory(self.reports_dir)
+        current = str(getattr(self.backend, "configuration_fingerprint", self.run.configuration_fingerprint))
+        if self.run.configuration_fingerprint and current and current != self.run.configuration_fingerprint:
+            raise _WorkflowAbort(
+                "CONFIGURATION_FINGERPRINT_CHANGED",
+                "장애 감지 이후 장비 설정 또는 신뢰 정보가 변경되어 자동조치를 중단했습니다.",
+                RemediationOutcome.STOPPED,
+                RemediationStage.STOPPED,
+            )
+        self._event(
+            RemediationStage.LOCAL_PREFLIGHT,
+            "local_state_preflight",
+            "PASSED",
+            "SQLite 원자적 쓰기, 보고서 폴더와 실행 설정 지문을 확인했습니다.",
+        )
 
     def _precheck(self) -> MmObservation:
         self._check_cancelled()
@@ -326,7 +371,7 @@ class RemediationWorkflow:
     def _best_effort_cluster_snapshot(self) -> ClusterObservation | None:
         try:
             cluster = self.backend.collect_cluster()
-        except Exception as exc:
+        except Exception:
             self._event(
                 RemediationStage.PRECHECK,
                 "pre_action_cluster_snapshot",
@@ -345,57 +390,67 @@ class RemediationWorkflow:
         return cluster
 
     def _connect_target(self):
+        return self._connect_action_endpoint(
+            self.candidate.target_ip,
+            stage=RemediationStage.TARGET_SSH,
+            operation="target_ssh_connect",
+            success_message="대상 Controller SSH 접속에 성공했습니다.",
+            failure_message="대상 Controller SSH 접속에 실패했습니다.",
+            exhausted_code="TARGET_SSH_ATTEMPTS_EXHAUSTED",
+        )
+
+    def _connect_leader(self, leader_ip: str):
+        return self._connect_action_endpoint(
+            leader_ip,
+            stage=RemediationStage.LEADER_SSH,
+            operation="leader_ssh_connect",
+            success_message="현재 Leader Controller SSH 접속에 성공했습니다.",
+            failure_message="Leader Controller SSH 접속에 실패했습니다.",
+            exhausted_code="LEADER_SSH_ATTEMPTS_EXHAUSTED",
+        )
+
+    def _connect_action_endpoint(
+        self,
+        endpoint_ip: str,
+        *,
+        stage: RemediationStage,
+        operation: str,
+        success_message: str,
+        failure_message: str,
+        exhausted_code: str,
+    ):
         last_error: SshOperationError | None = None
         for attempt in range(1, self.settings.ssh_max_attempts + 1):
             self._check_cancelled()
             started = monotonic()
             try:
-                adapter = self.backend.open_action_session(self.candidate.target_ip)
+                adapter = self.backend.open_action_session(endpoint_ip)
             except SshOperationError as exc:
                 last_error = exc
                 self._event(
-                    RemediationStage.TARGET_SSH,
-                    "target_ssh_connect",
-                    exc.code,
-                    exc.user_message,
-                    endpoint_ip=self.candidate.target_ip,
-                    attempt=attempt,
+                    stage, operation, exc.code, exc.user_message,
+                    endpoint_ip=endpoint_ip, attempt=attempt,
                     duration_ms=int((monotonic() - started) * 1000),
                 )
                 if not exc.retryable:
                     raise _WorkflowAbort(exc.code, exc.user_message)
-                if attempt < self.settings.ssh_max_attempts:
-                    self._wait(self.settings.ssh_retry_interval_seconds)
-                continue
             except Exception:
                 self._event(
-                    RemediationStage.TARGET_SSH,
-                    "target_ssh_connect",
-                    "SSH_CONNECT_FAILED",
-                    "대상 Controller SSH 접속에 실패했습니다.",
-                    endpoint_ip=self.candidate.target_ip,
-                    attempt=attempt,
+                    stage, operation, "SSH_CONNECT_FAILED", failure_message,
+                    endpoint_ip=endpoint_ip, attempt=attempt,
                     duration_ms=int((monotonic() - started) * 1000),
                 )
-                if attempt < self.settings.ssh_max_attempts:
-                    self._wait(self.settings.ssh_retry_interval_seconds)
-                continue
-            self._event(
-                RemediationStage.TARGET_SSH,
-                "target_ssh_connect",
-                "CONNECTED",
-                "대상 Controller SSH 접속에 성공했습니다.",
-                endpoint_ip=self.candidate.target_ip,
-                attempt=attempt,
-                duration_ms=int((monotonic() - started) * 1000),
-            )
-            return adapter
-        message = (
-            last_error.user_message
-            if last_error is not None
-            else "대상 Controller SSH 접속을 최대 3회 시도했으나 모두 실패했습니다."
-        )
-        raise _WorkflowAbort("TARGET_SSH_ATTEMPTS_EXHAUSTED", message)
+            else:
+                self._event(
+                    stage, operation, "CONNECTED", success_message,
+                    endpoint_ip=endpoint_ip, attempt=attempt,
+                    duration_ms=int((monotonic() - started) * 1000),
+                )
+                return adapter
+            if attempt < self.settings.ssh_max_attempts:
+                self._wait(self.settings.ssh_retry_interval_seconds)
+        message = last_error.user_message if last_error else failure_message
+        raise _WorkflowAbort(exhausted_code, message)
 
     def _wait_for_mm_up(self) -> MmObservation:
         deadline = monotonic() + self.settings.mm_up_timeout_seconds
@@ -409,11 +464,7 @@ class RemediationWorkflow:
                 RemediationStage.WAITING_MM_UP,
                 "mm_recovery_poll",
                 "UP" if mm.complete and state == "up" else (mm.error_code or state.upper()),
-                (
-                    "MM에서 대상 Controller Up을 확인했습니다."
-                    if mm.complete and state == "up"
-                    else "MM에서 대상 Controller 복구를 대기 중입니다."
-                ),
+                "MM에서 대상 Controller Up을 확인했습니다." if mm.complete and state == "up" else "MM에서 대상 Controller 복구를 대기 중입니다.",
                 endpoint_ip=self.candidate.target_ip,
                 attempt=attempt,
                 evidence={"complete": mm.complete, "state": state},
@@ -422,10 +473,7 @@ class RemediationWorkflow:
                 self._snapshot("mm_up", mm_snapshot(mm))
                 return mm
             self._wait(self.settings.mm_poll_interval_seconds)
-        raise _WorkflowAbort(
-            "MM_UP_TIMEOUT",
-            "제한시간 내 MM에서 대상 Controller Up을 확인하지 못했습니다.",
-        )
+        raise _WorkflowAbort("MM_UP_TIMEOUT", "제한시간 내 MM에서 대상 Controller Up을 확인하지 못했습니다.")
 
     def _wait_for_rejoin(self) -> tuple[str, ClusterObservation]:
         deadline = monotonic() + self.settings.membership_timeout_seconds
@@ -467,19 +515,16 @@ class RemediationWorkflow:
             if valid and stable_leader == leader:
                 stable += 1
             elif valid:
-                stable_leader = leader
-                stable = 1
+                stable_leader, stable = leader, 1
             else:
-                stable = 0
-                stable_leader = ""
+                stable, stable_leader = 0, ""
             self._event(
                 RemediationStage.VERIFYING_REJOIN,
                 "membership_rejoin_poll",
                 "CONNECTED" if valid else (leader_view.error_code or "NOT_READY"),
                 (
                     f"현재 Leader {leader}에서 대상 Controller CONNECTED 상태를 확인했습니다 ({stable}/{self.settings.membership_confirmations})."
-                    if valid
-                    else "현재 Leader에서 전체 구성원 및 대상 Controller 재가입 상태를 대기 중입니다."
+                    if valid else "현재 Leader에서 전체 구성원 및 대상 Controller 재가입 상태를 대기 중입니다."
                 ),
                 endpoint_ip=leader,
                 attempt=attempt,
@@ -496,54 +541,36 @@ class RemediationWorkflow:
             "제한시간 내 현재 Leader에서 대상 Controller CONNECTED 상태를 연속 확인하지 못했습니다.",
         )
 
-    def _connect_leader(self, leader_ip: str):
-        last_error: SshOperationError | None = None
-        for attempt in range(1, self.settings.ssh_max_attempts + 1):
-            self._check_cancelled()
-            started = monotonic()
-            try:
-                adapter = self.backend.open_action_session(leader_ip)
-            except SshOperationError as exc:
-                last_error = exc
-                self._event(
-                    RemediationStage.LEADER_SSH,
-                    "leader_ssh_connect",
-                    exc.code,
-                    exc.user_message,
-                    endpoint_ip=leader_ip,
-                    attempt=attempt,
-                    duration_ms=int((monotonic() - started) * 1000),
-                )
-                if not exc.retryable:
-                    raise _WorkflowAbort(exc.code, exc.user_message)
-                if attempt < self.settings.ssh_max_attempts:
-                    self._wait(self.settings.ssh_retry_interval_seconds)
-                continue
-            except Exception:
-                self._event(
-                    RemediationStage.LEADER_SSH,
-                    "leader_ssh_connect",
-                    "SSH_CONNECT_FAILED",
-                    "Leader Controller SSH 접속에 실패했습니다.",
-                    endpoint_ip=leader_ip,
-                    attempt=attempt,
-                    duration_ms=int((monotonic() - started) * 1000),
-                )
-                if attempt < self.settings.ssh_max_attempts:
-                    self._wait(self.settings.ssh_retry_interval_seconds)
-                continue
-            self._event(
-                RemediationStage.LEADER_SSH,
-                "leader_ssh_connect",
-                "CONNECTED",
-                "현재 Leader Controller SSH 접속에 성공했습니다.",
-                endpoint_ip=leader_ip,
-                attempt=attempt,
-                duration_ms=int((monotonic() - started) * 1000),
+    def _final_rebalance_gate(self, leader_session: Any, leader_ip: str) -> RebalanceGateObservation:
+        gate_method = getattr(self.backend, "final_rebalance_gate", None)
+        if callable(gate_method):
+            return gate_method(
+                leader_session,
+                leader_ip=leader_ip,
+                target_ip=self.candidate.target_ip,
+                expected_ips=self.candidate.expected_member_ips,
             )
-            return adapter
-        message = last_error.user_message if last_error else "Leader Controller SSH 접속에 실패했습니다."
-        raise _WorkflowAbort("LEADER_SSH_ATTEMPTS_EXHAUSTED", message)
+        # Compatibility path for deterministic fake backends in older tests.
+        mm = self.backend.collect_mm()
+        cluster = self.backend.collect_cluster(leader_ip)
+        passed = bool(
+            mm.complete
+            and all(mm.state_for(ip) == "up" for ip in self.candidate.expected_member_ips)
+            and cluster.membership_complete
+            and cluster.source_ip == leader_ip
+            and cluster.leader_ips == (leader_ip,)
+            and cluster.all_expected_connected(self.candidate.expected_member_ips)
+            and self.candidate.target_ip in cluster.members
+            and cluster.members[self.candidate.target_ip].is_connected
+        )
+        return RebalanceGateObservation(
+            leader_ip=leader_ip,
+            mm=mm,
+            cluster=cluster,
+            passed=passed,
+            reason_code="" if passed else "FINAL_REBALANCE_GATE_FAILED",
+            reason_message="" if passed else "재분배 직전 MM 및 Leader Membership 최종 조건을 충족하지 못했습니다.",
+        )
 
     def _post_monitor(self) -> tuple[bool, MmObservation | None, ClusterObservation | None]:
         deadline = monotonic() + self.settings.post_timeout_seconds
@@ -572,20 +599,14 @@ class RemediationWorkflow:
             if valid and leader == stable_leader:
                 stable += 1
             elif valid:
-                stable_leader = leader
-                stable = 1
+                stable_leader, stable = leader, 1
             else:
-                stable = 0
-                stable_leader = ""
+                stable, stable_leader = 0, ""
             self._event(
                 RemediationStage.POST_MONITORING,
                 "post_state_poll",
                 "NORMAL" if valid else "NOT_STABLE",
-                (
-                    f"사후 상태가 정상 조건을 충족했습니다 ({stable}/{self.settings.post_confirmations})."
-                    if valid
-                    else "전체 MM Up, Membership Connected 및 Client 분배 행 정상화를 확인 중입니다."
-                ),
+                f"사후 상태가 정상 조건을 충족했습니다 ({stable}/{self.settings.post_confirmations})." if valid else "전체 MM Up, Membership Connected 및 Client 분배 행 정상화를 확인 중입니다.",
                 endpoint_ip=cluster_last.source_ip,
                 attempt=attempt,
                 evidence={"all_up": all_up, "leaders": list(leaders), "stable": stable},
@@ -611,6 +632,7 @@ class RemediationWorkflow:
         self.run.failure_code = failure_code
         self.run.summary = summary
         self.run.ended_at = self.now()
+        self.run.report_pending = True
         try:
             self._event(
                 stage,
@@ -620,11 +642,13 @@ class RemediationWorkflow:
                 endpoint_ip=self.run.target_ip,
             )
         except Exception:
-            # Preserve final run state even if the append-only event insert is
-            # unavailable; report generation will still include prior evidence.
-            pass
-        self.repository.update_run(self.run)
+            LOGGER.exception("Final remediation transition could not be committed")
+            try:
+                self.repository.update_run(self.run)
+            except Exception:
+                LOGGER.exception("Final remediation run state could not be persisted")
         report_path = ""
+        report_error = ""
         try:
             path = write_report(
                 self.run,
@@ -633,11 +657,30 @@ class RemediationWorkflow:
             )
             report_path = str(path)
             self.run.report_path = report_path
+            self.run.report_error = ""
+            self.run.report_pending = False
             self.repository.update_run(self.run)
-        except Exception:
-            report_path = ""
+        except Exception as exc:
+            report_error = type(exc).__name__
+            self.run.report_error = report_error
+            self.run.report_pending = True
+            LOGGER.exception("Automatic remediation HTML report generation failed")
+            try:
+                self._event(
+                    stage,
+                    "report_write_failed",
+                    "REPORT_WRITE_FAILED",
+                    "장애조치 결과는 저장했으나 HTML 보고서 생성에 실패했습니다. 다음 시작 시 재생성합니다.",
+                    endpoint_ip=self.run.target_ip,
+                    evidence={"error_type": report_error},
+                )
+            except Exception:
+                LOGGER.exception("Report failure event could not be persisted")
         if release_target:
-            self.repository.release_target(self.run.target_ip)
+            try:
+                self.repository.release_target(self.run.target_ip, self.run.run_id)
+            except Exception:
+                LOGGER.exception("Remediation target lock release failed")
         return WorkflowResult(
             run_id=self.run.run_id,
             outcome=outcome,
@@ -646,4 +689,5 @@ class RemediationWorkflow:
             message=summary,
             report_path=report_path,
             leader_ip=self.run.leader_ip,
+            report_error=report_error,
         )

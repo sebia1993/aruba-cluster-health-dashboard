@@ -7,8 +7,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from .timebase import SUPPORTED_REPORT_TIMEZONES
 
-SETTINGS_SCHEMA_VERSION = 1
+
+SETTINGS_SCHEMA_VERSION = 2
 MAX_SETTINGS_BYTES = 32 * 1024
 
 
@@ -26,12 +28,18 @@ class RemediationSettings:
     post_poll_interval_seconds: int = 30
     post_timeout_seconds: int = 10 * 60
     post_confirmations: int = 3
+    recovery_unlock_confirmations: int = 3
+    cluster_cooldown_seconds: int = 30 * 60
+    target_max_actions_per_24h: int = 2
+    pause_after_non_success: bool = True
     report_timezone: str = "Asia/Seoul"
 
     def validate(self) -> None:
         errors: list[str] = []
         if type(self.enabled) is not bool:
             errors.append("enabled must be a boolean")
+        if type(self.pause_after_non_success) is not bool:
+            errors.append("pause_after_non_success must be a boolean")
         if self.schema_version != SETTINGS_SCHEMA_VERSION:
             errors.append("unsupported remediation settings schema")
         if type(self.ssh_max_attempts) is not int or not 1 <= self.ssh_max_attempts <= 3:
@@ -46,13 +54,16 @@ class RemediationSettings:
             "post_poll_interval_seconds": (5, 300),
             "post_timeout_seconds": (60, 1800),
             "post_confirmations": (1, 10),
+            "recovery_unlock_confirmations": (2, 10),
+            "cluster_cooldown_seconds": (60, 24 * 3600),
+            "target_max_actions_per_24h": (1, 10),
         }
         for name, (minimum, maximum) in bounds.items():
             value = getattr(self, name)
             if type(value) is not int or not minimum <= value <= maximum:
                 errors.append(f"{name} must be between {minimum} and {maximum}")
-        if type(self.report_timezone) is not str or not self.report_timezone.strip():
-            errors.append("report_timezone must be non-empty text")
+        if type(self.report_timezone) is not str or self.report_timezone.strip() not in SUPPORTED_REPORT_TIMEZONES:
+            errors.append("report_timezone must identify Korea Standard Time")
         if errors:
             raise ValueError("; ".join(errors))
 
@@ -60,10 +71,16 @@ class RemediationSettings:
     def from_dict(cls, payload: Mapping[str, Any]) -> "RemediationSettings":
         if not isinstance(payload, Mapping):
             raise ValueError("remediation settings root must be an object")
+        raw = dict(payload)
+        version = raw.get("schema_version", 1)
+        if type(version) is not int or version not in {1, SETTINGS_SCHEMA_VERSION}:
+            raise ValueError("unsupported remediation settings schema")
+        if version == 1:
+            raw["schema_version"] = SETTINGS_SCHEMA_VERSION
         allowed = set(cls.__dataclass_fields__)
-        if set(payload) - allowed:
+        if set(raw) - allowed:
             raise ValueError("unsupported remediation settings field")
-        settings = cls(**dict(payload))
+        settings = cls(**raw)
         settings.validate()
         return settings
 

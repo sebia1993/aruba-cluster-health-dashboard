@@ -1,100 +1,107 @@
 # 자동 Controller 장애조치
 
-## 목적과 기본 상태
+## 목적과 기본 경계
 
-자동 장애조치는 기존 Aruba MM/WLC **읽기 전용 자동점검과 분리된 선택 기능**입니다.
-기본값은 `OFF`이며 사용자가 위험 고지를 확인하고 직접 켠 경우에만 다음 두 명령을
-실행할 수 있습니다.
+자동 장애조치는 기존 MM/WLC 읽기 전용 점검과 분리된 선택 기능입니다. 기본값은
+`OFF`이며 사용자가 명시적으로 켠 경우에만 아래 두 변경 명령을 실행합니다.
 
 ```text
 reload force
 cluster-debug bucketmap rebalance
 ```
 
-기존 조회 명령 allowlist에는 위 명령을 추가하지 않습니다. 변경 명령은 별도의 SSH
-경계에서 정확히 두 문자열만 허용하며 설정 모드, 임의 명령, 사용자 입력 명령을
-실행하지 않습니다.
+기존 `READ_ONLY_COMMANDS`에는 변경 명령을 추가하지 않습니다. 자동 장애조치 패키지는
+별도 SSH allowlist, 별도 SQLite 감사 저장소, 별도 HTML 보고서 경계를 사용합니다.
 
-## 자동조치 흐름
+## v0.6.0 실행 흐름
 
-1. 완전하게 수집·파싱된 MM `show switches`에서 등록 Controller 한 대의 명시적인
-   `Down`을 감지합니다.
-2. 실행 직전에 MM 상태를 다시 확인합니다. 대상이 달라졌거나 여러 대가 Down이면
-   조치를 시작하지 않습니다.
-3. Down Controller에 SSH 접속을 최대 3회 시도합니다. 인증·호스트 키·권한 오류는
-   즉시 중단하고, 일시적인 연결 오류만 설정된 간격으로 재시도합니다.
-4. 접속에 성공하면 대상 Controller에서 `reload force`를 한 번만 전송합니다.
-   전송 후 SSH 종료는 정상적인 재부팅 가능성으로 기록합니다. 결과가 불명확해도
-   같은 장애에서 자동 재전송하지 않습니다.
-5. MM `show switches`로 대상 Controller가 `Up`이 될 때까지 제한시간 동안 확인합니다.
-6. Cluster Membership에서 현재 Leader가 정확히 한 대인지 다시 찾고, 그 Leader에
-   직접 접속해 대상 Controller와 모든 등록 구성원이 `CONNECTED`인지 연속 확인합니다.
-7. 현재 Leader에서 `cluster-debug bucketmap rebalance`를 한 번만 실행합니다.
-8. 출력의 독립된 행이 정확히 `Cluster rebalance triggered`일 때 재분배 요청 성공으로
-   기록합니다. 이 문구는 재분배 **완료**가 아니라 정상적인 **요청 시작**의 증거입니다.
-9. 모든 등록 Controller의 MM `Up`, Membership `CONNECTED`, Leader 한 대, Client
-   Distribution 행 복원을 연속 확인한 뒤 종료합니다.
-10. 성공·부분 완료·실패·중단과 관계없이 단계별 타임라인과 전후 상태가 포함된 단일
-    HTML 장애조치 보고서를 생성합니다.
+1. 신뢰 가능한 MM `show switches` 결과에서 등록 Controller 한 대의 명시적 `Down`을 감지합니다.
+2. 로컬 SQLite 무결성·원자적 쓰기, 보고서 폴더 쓰기와 실행 설정 지문을 확인합니다.
+3. 실행 직전 MM 결과를 다시 수집해 최초 Down 대상과 일치하는지 확인합니다.
+4. 대상 Controller SSH를 최대 3회 시도합니다. 인증·Host Key 오류는 즉시 중단합니다.
+5. `reload force` 쓰기 슬롯을 SQLite에 먼저 예약하고 명령을 한 번만 시도합니다.
+6. MM에서 대상이 `Up`이 될 때까지 제한시간 동안 대기합니다.
+7. 현재 Leader를 탐색하고 Leader 출력에서 대상과 전체 구성원의 `CONNECTED`를 연속 확인합니다.
+8. 현재 Leader에 재분배용 SSH 세션을 연결합니다.
+9. **동일 SSH 세션**에서 `show lc-cluster group-membership`을 다시 실행하고, MM 전체
+   Controller가 여전히 `Up`인지 재확인합니다.
+10. 최종 Gate를 통과하면 재분배 쓰기 슬롯을 SQLite에 예약하고
+    `cluster-debug bucketmap rebalance`를 한 번만 실행합니다.
+11. `Cluster rebalance triggered`가 독립 행으로 정확히 나타나는지 확인합니다.
+12. 전체 MM Up, Membership Connected, Leader 1대, Client Distribution 행 존재를 연속 확인합니다.
+13. 모든 단계와 결과를 한국 표준시(KST, UTC+09:00) 타임라인과 HTML 보고서로 생성합니다.
 
-## ON/OFF 동작
+## 쓰기 단계와 중복 방지
 
-- `OFF`: 기존 읽기 전용 점검과 장애 알림만 수행합니다.
-- `ON`: 신뢰 가능한 단일 Controller Down에 대해 자동 장애조치를 수행합니다.
-- 조치 시작 전 `OFF`: 즉시 취소합니다.
-- `reload force` 전송 후 `OFF`: 이미 전송한 명령은 되돌릴 수 없으므로 추가 변경
-  명령을 금지하고 중단 보고서를 생성합니다.
-- 조치 중 기존 자동점검: 예약 점검을 잠시 멈추고 장애조치 상태 머신이 필요한
-  읽기 전용 확인을 전담합니다. 종료 후 이전 자동점검 상태를 복원합니다.
-
-## 중복 실행 방지
-
-별도 SQLite 감사 저장소에 Controller별 잠금과 명령 전송 예약을 먼저 저장합니다.
+각 변경 명령은 다음 단계로 기록합니다.
 
 ```text
-%LOCALAPPDATA%\ArubaMiniDashboard\remediation\remediation.db
+not_attempted
+reserved
+write_attempted
+write_returned
+response_observed
 ```
 
-- 같은 장애에서 `reload force` 최대 1회
-- 같은 장애에서 재분배 최대 1회
-- 명령 전송 직전에 영구 예약을 먼저 저장
-- 프로그램이 비정상 종료되어도 동일 Controller를 자동 재부팅하지 않음
-- 이후 신뢰 가능한 MM 결과에서 대상 Controller가 `Up`이고 활성 작업이 없을 때만
-  대상 잠금을 해제
+`reserved` 이후 프로그램이 종료되거나 SSH 결과가 불명확해도 동일 장애에서 명령을
+자동 재전송하지 않습니다. 실행 상태, 이벤트, 대상 잠금과 스냅샷은 하나의 SQLite
+트랜잭션으로 저장합니다.
 
-## HTML 보고서
+## Circuit Breaker
+
+- Cluster 전체 자동조치 기본 냉각시간: 30분
+- 동일 Controller 기본 24시간 한도: 2회
+- 비정상 종료 또는 결과 불명확 시 대상 잠금 유지
+- 잠금은 신뢰 가능한 MM/Controller 정상 상태가 기본 3회 연속 확인된 뒤에만 해제
+- 실패·부분 완료·운영자 중단 시 자동 장애조치 기본 일시정지
+- 다중 Controller Down에서는 변경 명령 실행 금지
+
+## 보고서
+
+보고서의 모든 시간은 고정 KST로 표시하며 Windows IANA 시간대 데이터 유무에 따라
+UTC로 조용히 변경되지 않습니다. 파일은 임시 파일, `fsync`, 원자적 교체로 생성합니다.
+
+보고서 생성 실패 시 조치 결과는 SQLite에 보존하고 `report_pending`으로 표시합니다.
+다음 프로그램 시작 시 미완료 보고서를 다시 생성합니다.
+
+저장 위치:
 
 ```text
 %LOCALAPPDATA%\ArubaMiniDashboard\remediation\reports
 ```
 
-보고서는 외부 CDN을 사용하지 않는 UTF-8 단일 HTML이며 A4 인쇄에 대응합니다.
+보고서와 SQLite에는 비밀번호, Enable Secret, Credential ID와 전체 SSH 원문을
+저장하지 않습니다.
 
-- 상급보고용 결과와 핵심 소요시간
-- 장애 감지부터 종료까지 단계별 타임라인
-- 조치 전·후 MM, Membership, Active/Standby Client 비교
-- 대상 Controller 및 실제 실행 Leader
-- 실행 명령과 제한된 정형 결과 증거
-- 자동 확인 범위, 확인할 수 없는 근본 원인, 후속 권고
+## 구조
 
-비밀번호, Enable Secret, Credential ID, 전체 SSH 원문은 보고서와 SQLite에 저장하지
-않습니다.
+```text
+remediation/
+├─ backend.py              읽기 전용 증거 수집과 최종 Gate
+├─ controller.py           애플리케이션 서비스 및 Worker 수명주기
+├─ models.py               상태·증거·쓰기 단계 모델
+├─ operation_registry.py   모든 remediation SSH 연결의 취소 권한
+├─ report.py               KST 단일 HTML 보고서
+├─ repository.py           원자적 감사 저장소·잠금·Circuit Breaker
+├─ settings.py             버전형 설정과 v1→v2 마이그레이션
+├─ ssh_actions.py          정확한 두 변경 명령 실행 경계
+├─ timebase.py             고정 KST 시간 기준
+├─ ui_panel.py             UI 표시·입력 전용 컴포넌트
+└─ workflow.py             Fail-closed 상태 머신
+```
 
-## 자동 실행 차단 조건
+`MainWindow` 런타임 교체 방식은 제거했습니다. `main.py`가 기존 `MainWindow`를 생성한
+뒤 `RemediationFeatureController`를 명시적으로 합성하고, 종료 시에도 명시적으로
+정리합니다.
 
-- MM 수집 또는 파싱이 완전하지 않음
-- 등록 Controller 두 대 이상이 동시에 Down
-- Down IP가 설정된 Cluster Member가 아님
-- SSH Host Key 불일치 또는 미승인
-- 인증·Enable·권한 오류
-- 현재 Leader가 없거나 두 대 이상
-- Leader 출력에서 대상 Controller가 `CONNECTED`가 아님
-- 동일 Controller에 이전 자동조치 잠금이 남아 있음
-- 프로그램 종료 또는 사용자가 기능을 끔
+## 현장 검증
 
-## 검증 경계
+자동 테스트는 Fake SSH, 합성 MM/Cluster 출력, 임시 SQLite와 offscreen Qt를 사용합니다.
+실제 Aruba 장비에서는 다음을 확인해야 합니다.
 
-자동 테스트는 가짜 SSH, 비식별 Parser 출력, 임시 SQLite와 HTML을 사용해 명령
-allowlist, 3회 접속 경계, 상태 전이, 중복 실행 방지와 보고서 escaping을 검증합니다.
-실제 Aruba MM/7240XM의 재부팅 시간, 장비별 출력, 서비스 영향과 운영 권한은 승인된
-현장 환경에서 별도로 확인해야 합니다.
+- 장비별 재부팅 소요시간
+- `reload force` 실행 직후 SSH 종료 형태
+- 현재 ArubaOS의 Membership 출력 형식
+- 실제 Leader 변경 시점
+- 재분배 응답과 Client 이동 시간
+- 운영 계정 권한과 사내 변경 절차

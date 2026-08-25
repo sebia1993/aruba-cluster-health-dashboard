@@ -206,3 +206,11 @@ PySide6 UI는 도메인 상태를 다시 계산하지 않고 Correlation/Inciden
 - 알림: Windows 로컬 알림/Tray
 
 실제 운영 데이터의 외부 전송 기능은 현재 설계 범위에 없습니다.
+
+
+## v0.6.0 명시적 장애조치 합성
+
+`main.py`가 `MainWindow`를 만든 뒤 `RemediationFeatureController`를 명시적으로
+합성합니다. 런타임 클래스 교체는 사용하지 않습니다. 장애조치 UI, Workflow, KST,
+SSH Operation Registry와 원자적 SQLite 저장소는 독립 모듈이며 실패해도 기존
+읽기 전용 대시보드 시작을 막지 않습니다.

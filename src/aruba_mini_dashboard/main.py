@@ -2194,6 +2194,18 @@ def main(argv: list[str] | None = None) -> int:
         startup_issue=bool(settings_error or storage_error),
         developer_inspector=developer_inspector,
     )
+    remediation_controller = None
+    try:
+        from .remediation.controller import RemediationFeatureController
+
+        remediation_controller = RemediationFeatureController(window)
+        window.remediation_controller = remediation_controller
+    except Exception:
+        LOGGER.exception("Automatic remediation composition failed")
+        window.statusBar().showMessage(
+            "자동 장애조치 기능을 초기화하지 못했습니다. 기존 읽기 전용 점검은 계속 사용할 수 있습니다.",
+            15_000,
+        )
     window.acknowledge_requested.connect(runtime.acknowledge_ip)
     window.acknowledge_global_requested.connect(runtime.acknowledge_global)
     window.acknowledge_requested.connect(notifications.acknowledge_ip)
@@ -2206,6 +2218,8 @@ def main(argv: list[str] | None = None) -> int:
         nonlocal closed
         if closed:
             return True
+        if remediation_controller is not None:
+            remediation_controller.shutdown()
         if not _try_close_runtime_resources(
             developer_inspector,
             coordinator,

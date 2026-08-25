@@ -3,23 +3,14 @@ from __future__ import annotations
 import copy
 import logging
 import threading
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (
-    QApplication,
-    QCheckBox,
-    QFrame,
-    QHBoxLayout,
-    QLabel,
-    QMessageBox,
-    QPushButton,
-    QSizePolicy,
-    QSystemTrayIcon,
-)
+from PySide6.QtWidgets import QMessageBox, QSystemTrayIcon
 
 from aruba_mini_dashboard import __version__
 from aruba_mini_dashboard.config import AppPaths
@@ -27,8 +18,12 @@ from aruba_mini_dashboard.config import AppPaths
 from .backend import RemediationBackend
 from .models import RemediationCandidate, RemediationOutcome, WorkflowResult
 from .report import write_report
-from .repository import RemediationRepository
+from .repository import (
+    RemediationRepository,
+    RemediationStorageError,
+)
 from .settings import RemediationSettings, RemediationSettingsStore
+from .ui_panel import RemediationPanel
 from .workflow import RemediationWorkflow
 
 
@@ -58,7 +53,7 @@ class _RemediationWorker(QRunnable):
 
 
 class RemediationFeatureController(QObject):
-    """Main-window integration for the independently toggled remediation workflow."""
+    """Explicitly composed, independently toggled remediation application service."""
 
     def __init__(self, window: Any) -> None:
         super().__init__(window)
@@ -72,6 +67,7 @@ class RemediationFeatureController(QObject):
         self._resume_automatic = False
         self._latest_report_path = ""
         self._last_multiple_down: tuple[str, ...] = ()
+        self._last_circuit_breaker_reason: dict[str, str] = {}
         self._workers = QThreadPool(self)
         self._workers.setMaxThreadCount(1)
         self._workers.setExpiryTimeout(30_000)
@@ -90,26 +86,34 @@ class RemediationFeatureController(QObject):
             except RuntimeError as exc:
                 self.settings = RemediationSettings()
                 settings_error = str(exc)
+
+        self._storage_error = ""
         database = ":memory:" if self.demo_mode else self.paths.root / "remediation" / "remediation.db"
-        self.repository = RemediationRepository(database)
+        try:
+            self.repository = RemediationRepository(database)
+        except RemediationStorageError as exc:
+            self.repository = RemediationRepository(":memory:")
+            self._storage_error = str(exc)
+            self.settings.enabled = False
         self.reports_dir = self.paths.root / "remediation" / "reports"
-        interrupted = self._recover_interrupted_runs()
+        recovered = self._recover_and_retry_reports()
         self._latest_report_path = self.repository.latest_report_path()
 
-        self._build_panel()
+        self.panel = RemediationPanel(self.window.central_root)
+        self.window.central_root_layout.insertWidget(0, self.panel)
         self._connect_signals()
-        self._set_toggle_checked(self.settings.enabled)
-        self.report_button.setEnabled(bool(self._latest_report_path))
+        self.panel.set_checked(self.settings.enabled)
+        self.panel.set_report_enabled(bool(self._latest_report_path))
 
         unavailable = self._unavailable_reason()
         if unavailable:
-            self.toggle.setEnabled(False)
+            self.panel.set_feature_enabled(False)
             self._set_status(unavailable)
         elif settings_error:
             self._set_status(settings_error)
-        elif interrupted:
+        elif recovered:
             self._set_status(
-                f"이전 실행 {interrupted}건을 비정상 중단으로 복구했습니다. 최근 보고서를 확인하세요."
+                f"이전 또는 미완료 실행 {recovered}건의 보고서를 복구했습니다. 최근 보고서를 확인하세요."
             )
         elif self.settings.enabled:
             self._set_status("자동 장애조치 활성화 · MM Down 감지 대기")
@@ -117,46 +121,20 @@ class RemediationFeatureController(QObject):
             self._set_status("자동 장애조치 꺼짐")
         self._sync_detection_schedule(immediate=self.settings.enabled)
 
-    def _build_panel(self) -> None:
-        self.panel = QFrame(self.window.central_root)
-        self.panel.setObjectName("automaticRemediationPanel")
-        self.panel.setStyleSheet(
-            "QFrame#automaticRemediationPanel { background:#F6F8FB; border-bottom:1px solid #D9E2EC; }"
-        )
-        layout = QHBoxLayout(self.panel)
-        layout.setContentsMargins(10, 6, 10, 6)
-        layout.setSpacing(8)
-        self.toggle = QCheckBox("자동 장애조치", self.panel)
-        self.toggle.setAccessibleName("자동 장애조치 켜기 또는 끄기")
-        self.toggle.setToolTip(
-            "MM Down Controller에 reload force를 실행하고 복구 후 현재 Leader에서 Cluster 재분배를 수행합니다."
-        )
-        layout.addWidget(self.toggle)
-        self.status_label = QLabel("", self.panel)
-        self.status_label.setStyleSheet("color:#52606D;")
-        self.status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.status_label.setTextInteractionFlags(self.status_label.textInteractionFlags())
-        layout.addWidget(self.status_label, 1)
-        self.report_button = QPushButton("최근 조치 보고서", self.panel)
-        self.report_button.setToolTip("가장 최근에 생성된 HTML 장애조치 보고서를 엽니다.")
-        layout.addWidget(self.report_button)
-        self.window.central_root_layout.insertWidget(0, self.panel)
-
     def _connect_signals(self) -> None:
-        self.toggle.toggled.connect(self._on_toggle)
-        self.report_button.clicked.connect(self.open_latest_report)
+        self.panel.enabled_changed.connect(self._on_toggle)
+        self.panel.report_requested.connect(self.open_latest_report)
         self.coordinator.cycle_finished.connect(self._on_health_cycle)
         self.coordinator.automatic_changed.connect(self._on_automatic_changed)
         quit_signal = getattr(self.window, "quit_requested", None)
         if quit_signal is not None:
             quit_signal.connect(self.request_stop)
-        app = QApplication.instance()
-        if app is not None:
-            app.aboutToQuit.connect(self.shutdown)
 
     def _unavailable_reason(self) -> str:
         if self.demo_mode:
             return "데모 모드에서는 자동 장애조치를 실행하지 않습니다."
+        if self._storage_error:
+            return self._storage_error + " 기존 읽기 전용 점검만 사용하세요."
         if bool(getattr(self.window, "startup_issue", False)):
             return "시작 시 오류가 있어 자동 장애조치를 활성화할 수 없습니다."
         if getattr(self.window, "credential_service", None) is None:
@@ -176,11 +154,10 @@ class RemediationFeatureController(QObject):
 
     @Slot(bool)
     def _on_toggle(self, checked: bool) -> None:
-        self._sync_peer_actions(checked)
         if checked:
             reason = self._unavailable_reason()
             if reason:
-                self._set_toggle_checked(False)
+                self.panel.set_checked(False)
                 QMessageBox.warning(self.window, "자동 장애조치 사용 불가", reason)
                 return
             answer = QMessageBox.warning(
@@ -194,11 +171,11 @@ class RemediationFeatureController(QObject):
                 QMessageBox.No,
             )
             if answer != QMessageBox.Yes:
-                self._set_toggle_checked(False)
+                self.panel.set_checked(False)
                 return
             self.settings.enabled = True
             if not self._save_settings():
-                self._set_toggle_checked(False)
+                self.panel.set_checked(False)
                 return
             self._set_status("자동 장애조치 활성화 · MM Down 감지 대기")
             self._sync_detection_schedule(immediate=True)
@@ -221,20 +198,6 @@ class RemediationFeatureController(QObject):
                 QMessageBox.warning(self.window, "자동 장애조치 설정 저장 실패", str(exc))
             self._set_status(str(exc))
             return False
-
-    def _set_toggle_checked(self, checked: bool) -> None:
-        self.toggle.blockSignals(True)
-        self.toggle.setChecked(bool(checked))
-        self.toggle.blockSignals(False)
-        self._sync_peer_actions(bool(checked))
-
-    def _sync_peer_actions(self, checked: bool) -> None:
-        for name in ("remediation_menu_action", "remediation_tray_action"):
-            action = getattr(self.window, name, None)
-            if action is not None:
-                action.blockSignals(True)
-                action.setChecked(bool(checked))
-                action.blockSignals(False)
 
     @Slot(bool)
     def _on_automatic_changed(self, _enabled: bool) -> None:
@@ -290,6 +253,18 @@ class RemediationFeatureController(QObject):
             for device in devices
         )
 
+    @staticmethod
+    def _device_operationally_healthy(device: Any) -> bool:
+        state = getattr(
+            getattr(device, "controller_state", ""),
+            "value",
+            getattr(device, "controller_state", ""),
+        )
+        return (
+            str(getattr(device, "mm_status", "")).strip().casefold() == "up"
+            and str(state).strip().casefold() == "up"
+        )
+
     @Slot(object)
     def _on_health_cycle(self, snapshot: Any) -> None:
         if not self._trusted_mm_cycle(snapshot):
@@ -303,11 +278,18 @@ class RemediationFeatureController(QObject):
             if bool(getattr(device, "is_registered", True))
         ]
         for device in registered:
-            if str(getattr(device, "mm_status", "")).strip().casefold() == "up":
-                try:
-                    self.repository.release_target(str(getattr(device, "ip", "")))
-                except Exception:
-                    LOGGER.warning("Automatic remediation target release failed", exc_info=True)
+            ip = str(getattr(device, "ip", ""))
+            if not ip:
+                continue
+            try:
+                self.repository.observe_target_recovery(
+                    ip,
+                    self._device_operationally_healthy(device),
+                    self.settings.recovery_unlock_confirmations,
+                )
+            except Exception:
+                LOGGER.warning("Automatic remediation target recovery observation failed", exc_info=True)
+
         if not self.settings.enabled or self._active or self._closing:
             return
         downs = [
@@ -329,8 +311,20 @@ class RemediationFeatureController(QObject):
             return
         target = downs[0]
         target_ip = str(getattr(target, "ip", ""))
-        if not target_ip or self.repository.is_target_claimed(target_ip):
+        if not target_ip:
             return
+        reason = self.repository.circuit_breaker_reason(
+            target_ip,
+            cooldown_seconds=self.settings.cluster_cooldown_seconds,
+            max_actions_24h=self.settings.target_max_actions_per_24h,
+        )
+        if reason:
+            if self._last_circuit_breaker_reason.get(target_ip) != reason:
+                self._last_circuit_breaker_reason[target_ip] = reason
+                self._set_status("자동 장애조치 차단 · " + reason)
+                self._notify("자동 장애조치 Circuit Breaker", reason, critical=True)
+            return
+        self._last_circuit_breaker_reason.pop(target_ip, None)
         candidate = self._candidate(snapshot, target)
         self._start_workflow(candidate)
 
@@ -341,13 +335,15 @@ class RemediationFeatureController(QObject):
             checked_at = datetime.now(timezone.utc)
         target_ip = str(getattr(target, "ip", ""))
         target_alias = str(
-            getattr(target, "alias", "")
-            or getattr(target, "hostname", "")
-            or target_ip
+            getattr(target, "alias", "") or getattr(target, "hostname", "") or target_ip
         )
         incident_key = ""
         for incident in list(getattr(snapshot, "active_incidents", []) or []):
-            incident_type = getattr(getattr(incident, "incident_type", ""), "value", getattr(incident, "incident_type", ""))
+            incident_type = getattr(
+                getattr(incident, "incident_type", ""),
+                "value",
+                getattr(incident, "incident_type", ""),
+            )
             if str(incident_type) == "mm_down" and str(getattr(incident, "ip", "")) == target_ip:
                 incident_key = str(getattr(incident, "incident_id", ""))
                 break
@@ -407,6 +403,10 @@ class RemediationFeatureController(QObject):
             known_hosts_path=self.paths.known_hosts,
             cancel_event=self._cancel_event,
         )
+        candidate = replace(
+            candidate,
+            configuration_fingerprint=backend.configuration_fingerprint,
+        )
         self._backend = backend
         workflow = RemediationWorkflow(
             candidate,
@@ -438,22 +438,28 @@ class RemediationFeatureController(QObject):
         self._set_normal_controls_enabled(True)
         if result.report_path:
             self._latest_report_path = result.report_path
-            self.report_button.setEnabled(True)
+            self.panel.set_report_enabled(True)
         if result.outcome is RemediationOutcome.COMPLETED:
-            label = "정상 완료"
-            critical = False
+            label, critical = "정상 완료", False
         elif result.outcome is RemediationOutcome.PARTIAL:
-            label = "부분 완료"
-            critical = True
+            label, critical = "부분 완료", True
         elif result.outcome is RemediationOutcome.STOPPED:
-            label = "중단"
-            critical = True
+            label, critical = "중단", True
         else:
-            label = "실패"
-            critical = True
-        self._set_status(f"{label} · {result.message}")
+            label, critical = "실패", True
         report_note = f"\n보고서: {result.report_path}" if result.report_path else ""
+        if result.report_error:
+            report_note += f"\n보고서 생성 오류: {result.report_error} (다음 시작 시 재생성)"
+        self._set_status(f"{label} · {result.message}")
         self._notify(f"자동 장애조치 {label}", result.message + report_note, critical=critical)
+        if (
+            self.settings.pause_after_non_success
+            and result.outcome is not RemediationOutcome.COMPLETED
+        ):
+            self.settings.enabled = False
+            self._save_settings(show_error=False)
+            self.panel.set_checked(False)
+            self._set_status(f"{label} · 자동 장애조치가 안전상 일시정지되었습니다. 보고서를 확인 후 다시 켜세요.")
         self._restore_after_workflow()
 
     @Slot(object)
@@ -466,10 +472,13 @@ class RemediationFeatureController(QObject):
         self._backend = None
         self._cancel_event = None
         self._set_normal_controls_enabled(True)
-        self._set_status("예기치 않은 오류로 자동 장애조치 작업이 종료되었습니다.")
+        self.settings.enabled = False
+        self._save_settings(show_error=False)
+        self.panel.set_checked(False)
+        self._set_status("예기치 않은 오류로 자동 장애조치가 종료되어 기능을 일시정지했습니다.")
         self._notify(
             "자동 장애조치 오류",
-            "예기치 않은 오류로 자동 장애조치 작업이 종료되었습니다.",
+            "예기치 않은 오류로 작업이 종료되었습니다. 기능을 일시정지했으며 저장된 보고서와 로그를 확인하세요.",
             critical=True,
         )
         self._restore_after_workflow()
@@ -485,14 +494,9 @@ class RemediationFeatureController(QObject):
 
     def _set_normal_controls_enabled(self, enabled: bool) -> None:
         names = (
-            "check_now_button",
-            "start_button",
-            "pause_button",
-            "compact_check_now_button",
-            "compact_auto_button",
-            "tray_check_now_action",
-            "tray_start_action",
-            "tray_pause_action",
+            "check_now_button", "start_button", "pause_button", "settings_button",
+            "compact_check_now_button", "compact_auto_button", "compact_settings_button",
+            "tray_check_now_action", "tray_start_action", "tray_pause_action", "tray_settings_action",
         )
         for name in names:
             item = getattr(self.window, name, None)
@@ -511,23 +515,22 @@ class RemediationFeatureController(QObject):
         self.window.statusBar().showMessage(message, 15_000)
 
     def _set_status(self, message: str) -> None:
-        self.status_label.setText(str(message))
-        self.status_label.setToolTip(str(message))
+        self.panel.set_status(str(message))
 
     @Slot()
     def open_latest_report(self) -> None:
         path = self._latest_report_path or self.repository.latest_report_path()
         if not path or not Path(path).is_file():
-            QMessageBox.information(
-                self.window,
-                "장애조치 보고서",
-                "열 수 있는 장애조치 보고서가 없습니다.",
-            )
+            QMessageBox.information(self.window, "장애조치 보고서", "열 수 있는 장애조치 보고서가 없습니다.")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).resolve())))
 
-    def _recover_interrupted_runs(self) -> int:
-        run_ids = self.repository.recover_interrupted_runs()
+    def _recover_and_retry_reports(self) -> int:
+        run_ids = list(dict.fromkeys([
+            *self.repository.recover_interrupted_runs(),
+            *self.repository.pending_report_run_ids(),
+        ]))
+        recovered = 0
         for run_id in run_ids:
             try:
                 run = self.repository.load_run(run_id)
@@ -537,11 +540,14 @@ class RemediationFeatureController(QObject):
                     timezone_name=self.settings.report_timezone,
                 )
                 run.report_path = str(path)
+                run.report_error = ""
+                run.report_pending = False
                 self.repository.update_run(run)
                 self._latest_report_path = str(path)
+                recovered += 1
             except Exception:
-                LOGGER.warning("Interrupted remediation report generation failed", exc_info=True)
-        return len(run_ids)
+                LOGGER.warning("Pending remediation report generation failed", exc_info=True)
+        return recovered
 
     @Slot()
     def request_stop(self) -> None:

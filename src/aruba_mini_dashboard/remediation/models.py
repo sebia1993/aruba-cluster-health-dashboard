@@ -12,6 +12,7 @@ def utc_now() -> datetime:
 
 class RemediationStage(str, Enum):
     DETECTED = "detected"
+    LOCAL_PREFLIGHT = "local_preflight"
     PRECHECK = "precheck"
     TARGET_SSH = "target_ssh"
     RELOAD = "reload"
@@ -19,8 +20,10 @@ class RemediationStage(str, Enum):
     FINDING_LEADER = "finding_leader"
     VERIFYING_REJOIN = "verifying_rejoin"
     LEADER_SSH = "leader_ssh"
+    FINAL_GATE = "final_gate"
     REBALANCE = "rebalance"
     POST_MONITORING = "post_monitoring"
+    REPORTING = "reporting"
     COMPLETED = "completed"
     PARTIAL = "partial"
     FAILED = "failed"
@@ -35,6 +38,14 @@ class RemediationOutcome(str, Enum):
     FAILED = "failed"
     STOPPED = "stopped"
     INTERRUPTED = "interrupted"
+
+
+class DispatchPhase(str, Enum):
+    NOT_ATTEMPTED = "not_attempted"
+    RESERVED = "reserved"
+    WRITE_ATTEMPTED = "write_attempted"
+    WRITE_RETURNED = "write_returned"
+    RESPONSE_OBSERVED = "response_observed"
 
 
 class ActionResultCode(str, Enum):
@@ -58,6 +69,7 @@ class ActionCommandResult:
     output_excerpt: str = ""
     duration_ms: int = 0
     message: str = ""
+    dispatch_phase: DispatchPhase = DispatchPhase.NOT_ATTEMPTED
 
 
 @dataclass(slots=True, frozen=True)
@@ -119,6 +131,16 @@ class ClusterObservation:
 
 
 @dataclass(slots=True, frozen=True)
+class RebalanceGateObservation:
+    leader_ip: str
+    mm: MmObservation
+    cluster: ClusterObservation
+    passed: bool
+    reason_code: str = ""
+    reason_message: str = ""
+
+
+@dataclass(slots=True, frozen=True)
 class RemediationCandidate:
     incident_key: str
     target_ip: str
@@ -127,6 +149,7 @@ class RemediationCandidate:
     expected_member_ips: tuple[str, ...]
     detected_at: datetime
     detected_snapshot: Mapping[str, Any] = field(default_factory=dict)
+    configuration_fingerprint: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -161,9 +184,14 @@ class RemediationRun:
     rebalance_reserved: bool = False
     rebalance_sent: bool = False
     rebalance_confirmed: bool = False
+    reload_dispatch_phase: DispatchPhase = DispatchPhase.NOT_ATTEMPTED
+    rebalance_dispatch_phase: DispatchPhase = DispatchPhase.NOT_ATTEMPTED
     failure_code: str = ""
     summary: str = ""
     report_path: str = ""
+    report_error: str = ""
+    report_pending: bool = False
+    configuration_fingerprint: str = ""
     app_version: str = ""
     events: list[RemediationEvent] = field(default_factory=list)
     snapshots: dict[str, Mapping[str, Any]] = field(default_factory=dict)
@@ -183,3 +211,4 @@ class WorkflowResult:
     message: str
     report_path: str = ""
     leader_ip: str = ""
+    report_error: str = ""
