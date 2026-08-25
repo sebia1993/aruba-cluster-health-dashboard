@@ -63,6 +63,10 @@ Paramiko 5.0.0이 구형 장비와 안전한 KEX·호스트 키·서명 알고�
 출력 크기·시간·프롬프트를 제한한 Space 페이저 처리로 전환합니다. 설정 모드
 진입, 구성 저장, 삭제·재부팅·동기화 명령은 구현하지 않았습니다.
 
+## 선택적 자동 장애조치 경계
+
+자동 장애조치는 기본 OFF이며 기존 조회 allowlist와 분리된 `reload force`, `cluster-debug bucketmap rebalance`만 허용합니다. 동일 장애의 각 명령은 한 번으로 제한하고 실행 전 예약과 대상 잠금을 별도 SQLite에 저장합니다. 인증·호스트 키·다중 Down·Leader 불일치·부분 수집은 Fail-closed로 중단하며 보고서에는 자격 증명과 전체 SSH 원문을 저장하지 않습니다.
+
 ## 로컬 저장소
 
 - `settings.json`: 비밀정보가 없는 endpoint, threshold, UI/알림 설정과

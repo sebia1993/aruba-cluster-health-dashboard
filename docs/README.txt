@@ -1,4 +1,4 @@
-Aruba Mini Dashboard 0.4.2
+Aruba Mini Dashboard 0.5.0
 ==========================
 
 용도
