@@ -6,6 +6,7 @@ on:
       - agent/v0.6.1-connection-baseline-acceptance
     paths:
       - scripts/apply_v061_connection_baseline.py
+      - scripts/retry_v061_connection_baseline.txt
 
 permissions:
   contents: write
@@ -32,9 +33,21 @@ jobs:
           set -euo pipefail
           if [[ ! -f scripts/apply_v061_connection_baseline.py ]]; then
             echo "Patch already materialized."
+            rm -f scripts/retry_v061_connection_baseline.txt
             exit 0
           fi
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/apply_v061_connection_baseline.py')
+          text = path.read_text(encoding='utf-8')
+          before = "new_ui_methods = '''"
+          after = "new_ui_methods = r'''"
+          if before not in text and after not in text:
+              raise SystemExit('new_ui_methods declaration not found')
+          path.write_text(text.replace(before, after, 1), encoding='utf-8')
+          PY
           python scripts/apply_v061_connection_baseline.py
+          rm -f scripts/retry_v061_connection_baseline.txt
           python -m compileall -q src tests scripts
 
       - name: Commit materialized implementation
