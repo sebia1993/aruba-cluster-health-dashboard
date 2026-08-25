@@ -127,7 +127,47 @@ class CorrelationEngine:
             change.member_ip: change
             for change in (pending_connection_changes or ())
         }
+        self._resolved_connection_change_members: set[str] = set()
         self._monitoring_scope_ips: tuple[str, ...] = ()
+        self._restore_legacy_auto_promoted_baselines()
+
+    def _restore_legacy_auto_promoted_baselines(self) -> None:
+        """Restore the last operator-accepted value for pre-v0.6.1 state.
+
+        Older releases moved the baseline to the observed changed value before
+        the operator acknowledged the event. A durable pending event contains
+        both the prior accepted value and the current candidate, so it is the
+        authoritative migration source. The repaired baseline is persisted by
+        the existing atomic domain-state flush.
+        """
+
+        for change in self._pending_connection_changes.values():
+            baseline = self.baseline_store.get(change.member_ip)
+            previous_normalized = normalize_connection_type(change.previous_value)
+            current_normalized = normalize_connection_type(change.current_value)
+            if baseline is None:
+                self.baseline_store.set(
+                    ConnectionBaseline(
+                        collector_ip=change.collector_ip,
+                        member_ip=change.member_ip,
+                        display_value=change.previous_value,
+                        normalized_value=previous_normalized,
+                        observed_at=change.first_detected_at,
+                    )
+                )
+                continue
+            if (
+                baseline.normalized_value == current_normalized
+                and previous_normalized != current_normalized
+            ):
+                self.baseline_store.set(
+                    replace(
+                        baseline,
+                        display_value=change.previous_value,
+                        normalized_value=previous_normalized,
+                        observed_at=change.first_detected_at,
+                    )
+                )
 
     def dump_known_mm_devices(self) -> dict[str, str | None]:
         return dict(self._known_mm_devices)
@@ -156,14 +196,40 @@ class CorrelationEngine:
         return self._monitoring_scope_ips
 
     def acknowledge_connection_change(self, ip: str, collector_ip: str | None = None) -> bool:
+        """Accept the currently observed Connection-Type as the new normal."""
+
         change = self._pending_connection_changes.get(ip)
         if change is None or (collector_ip is not None and change.collector_ip != collector_ip):
             return False
+        existing = self.baseline_store.get(ip)
+        accepted_collector = (
+            collector_ip
+            or (existing.collector_ip if existing is not None else "")
+            or change.collector_ip
+        )
+        self.baseline_store.set(
+            ConnectionBaseline(
+                collector_ip=accepted_collector,
+                member_ip=ip,
+                display_value=change.current_value,
+                normalized_value=normalize_connection_type(change.current_value),
+                observed_at=change.last_confirmed_at,
+            )
+        )
         del self._pending_connection_changes[ip]
+        self._resolved_connection_change_members.discard(ip)
         return True
 
     def acknowledge_all_connection_changes(self) -> None:
-        self._pending_connection_changes.clear()
+        for member_ip in tuple(self._pending_connection_changes):
+            self.acknowledge_connection_change(member_ip)
+
+    def drain_connection_change_resolutions(self) -> set[str]:
+        """Return members whose unaccepted change returned to the baseline."""
+
+        resolved = set(self._resolved_connection_change_members)
+        self._resolved_connection_change_members.clear()
+        return resolved
 
     def reconcile_monitoring_scope(self, expected_ips: Iterable[str]) -> set[str]:
         """Drop health state for IPs outside the authoritative configured scope.
@@ -179,6 +245,7 @@ class CorrelationEngine:
             if member_ip not in allowed:
                 removed.add(member_ip)
                 del self._pending_connection_changes[member_ip]
+                self._resolved_connection_change_members.discard(member_ip)
 
         prune = getattr(self.baseline_store, "prune", None)
         if callable(prune):
@@ -586,26 +653,13 @@ class CorrelationEngine:
                         observed_at=cycle.checked_at,
                     )
                 )
-            elif baseline.normalized_value != normalized:
-                change = ConnectionChange(
-                    collector_ip=collector_ip,
-                    member_ip=ip,
-                    previous_value=baseline.display_value,
-                    current_value=row.connection_type,
-                    first_detected_at=cycle.checked_at,
-                    last_confirmed_at=cycle.checked_at,
-                )
-                self._pending_connection_changes[ip] = change
-                self.baseline_store.set(
-                    ConnectionBaseline(
-                        collector_ip=collector_ip,
-                        member_ip=ip,
-                        display_value=row.connection_type,
-                        normalized_value=normalized,
-                        observed_at=cycle.checked_at,
-                    )
-                )
-            else:
+                continue
+
+            pending = self._pending_connection_changes.get(ip)
+            if baseline.normalized_value == normalized:
+                # Refresh harmless formatting/source metadata without changing
+                # the accepted semantic value. Returning to the accepted value
+                # is trusted recovery of an unacknowledged change.
                 self.baseline_store.set(
                     replace(
                         baseline,
@@ -615,12 +669,37 @@ class CorrelationEngine:
                         observed_at=cycle.checked_at,
                     )
                 )
-                pending = self._pending_connection_changes.get(ip)
-                if pending is not None and normalize_connection_type(pending.current_value) == normalized:
-                    self._pending_connection_changes[ip] = replace(
-                        pending,
-                        last_confirmed_at=cycle.checked_at,
-                    )
+                if pending is not None:
+                    del self._pending_connection_changes[ip]
+                    self._resolved_connection_change_members.add(ip)
+                continue
+
+            # Keep the accepted baseline value stable. Only source metadata is
+            # refreshed while the operator decides whether the new value is
+            # normal. A third value supersedes the prior pending event.
+            self.baseline_store.set(
+                replace(
+                    baseline,
+                    collector_ip=collector_ip,
+                )
+            )
+            if (
+                pending is not None
+                and normalize_connection_type(pending.current_value) == normalized
+            ):
+                self._pending_connection_changes[ip] = replace(
+                    pending,
+                    last_confirmed_at=cycle.checked_at,
+                )
+                continue
+            self._pending_connection_changes[ip] = ConnectionChange(
+                collector_ip=collector_ip,
+                member_ip=ip,
+                previous_value=baseline.display_value,
+                current_value=row.connection_type,
+                first_detected_at=cycle.checked_at,
+                last_confirmed_at=cycle.checked_at,
+            )
 
         for change in self._pending_connection_changes.values():
             ip = change.member_ip

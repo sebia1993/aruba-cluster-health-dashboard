@@ -67,7 +67,7 @@ Actions에서 재현 가능하게 빌드하고, 검증된 자산만 GitHub Prere
   승인·재시도, 잘못된 출력, 설정 transaction과 자격 증명 부분 저장을 반복하는
   결정적 1,000회 reliability suite를 Windows CI와 Release 경로에 추가한 patch
   Prerelease입니다. 장비 명령과 판단 규칙은 변경하지 않습니다.
-- `v0.6.0`: 7240XM Membership 표의 `Connection-Type`과 동적 `STATUS` 열을
+- `v0.6.1`: 7240XM Membership 표의 `Connection-Type`과 동적 `STATUS` 열을
   분리해 heartbeat·RTD 변동 오탐을 제거하고, SQLite v5 마이그레이션으로 기존
   오탐만 자동 종료하면서 실제 타입 변화와 과거 이력을 보존하는 patch
   Prerelease입니다. 장비 명령과 SSH 연결 방식은 변경하지 않습니다.
@@ -79,21 +79,21 @@ CPython 3.13.15 x64 표준 GIL 빌드와 Windows PowerShell 5.1 환경에서 실
 
 ```powershell
 .\scripts\run_tests.ps1
-.\scripts\package_release.ps1 -Version 0.6.0
+.\scripts\package_release.ps1 -Version 0.6.1
 ```
 
 성공하면 `dist\release`에는 다음 두 파일만 생성됩니다.
 
 ```text
-ArubaMiniDashboard-v0.6.0-windows-x64.zip
-ArubaMiniDashboard-v0.6.0-windows-x64.zip.sha256
+ArubaMiniDashboard-v0.6.1-windows-x64.zip
+ArubaMiniDashboard-v0.6.1-windows-x64.zip.sha256
 ```
 
 다른 위치로 전달된 자산은 다시 빌드하지 않고 다음과 같이 검증할 수 있습니다.
 
 ```powershell
 .\scripts\package_release.ps1 `
-  -Version 0.6.0 `
+  -Version 0.6.1 `
   -OutputDirectory artifacts\release `
   -VerifyOnly
 ```
@@ -113,8 +113,8 @@ Qt exact inventory와 한국어 번역 2개, PySide6/shiboken6/Paramiko/scp 외�
 ```powershell
 git switch main
 git pull --ff-only
-git tag -a v0.6.0 -m "Aruba Mini Dashboard v0.6.0"
-git push origin v0.6.0
+git tag -a v0.6.1 -m "Aruba Mini Dashboard v0.6.1"
+git push origin v0.6.1
 ```
 
 태그가 잘못된 커밋을 가리키면 Release workflow를 실행하지 않습니다. 게시된
@@ -130,7 +130,7 @@ Workflow가 사용하는 공식 Actions는 Node.js 24 기반 버전의 검토된
 사용하려면 runner `2.327.1` 이상이 필요합니다. 구형 Node 런타임을 강제로 허용하는
 환경 변수로 우회하지 않습니다.
 
-- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.6.0`
+- `tag`: 이미 origin에 존재하는 annotated tag. 예: `v0.6.1`
 - `release_mode`:
   - `build-only`: 빌드·검증 후 Actions artifact만 생성
   - `draft-prerelease`: 검증된 두 자산을 새 Prerelease Draft에 업로드하고 정지

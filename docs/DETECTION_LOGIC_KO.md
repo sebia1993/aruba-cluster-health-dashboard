@@ -73,17 +73,31 @@ WLC-A Active 5 / Peer 8 / Cluster 전체 사용량 매우 낮음
 show lc-cluster group-membership
 ```
 
-표의 `Connection-Type` 열만 첫 정상 baseline으로 사용하고 이후 값이 달라지면
-변화 사건을 생성합니다. 다음 `STATUS` 열의 `CONNECTED`, `last HBT_RSP`, `RTD`는
-실시간 상태 정보이므로 Connection-Type 비교에 포함하지 않습니다.
+표의 `Connection-Type` 열만 정상 baseline과 비교합니다. 다음 `STATUS` 열의
+`CONNECTED`, `last HBT_RSP`, `RTD`는 실시간 상태 정보이므로 비교에 포함하지 않습니다.
+
+최초로 완전하게 수집한 값은 자동으로 정상 baseline이 됩니다. 이후 값이 달라지면
+변화 사건을 생성하지만, **운영자가 정상으로 확정하기 전에는 baseline을 새 값으로
+자동 이동시키지 않습니다.**
 
 ```text
-기존: L2-Connected
+확정 baseline: L2-Connected
 현재: L3-Connected
-→ Connection-Type 변화 사건
+→ Connection-Type 변화 주의
+
+운영자가 현재 값을 정상 기준으로 설정
+→ 새 baseline: L3-Connected
+→ 이후 L3-Connected가 아닌 값으로 바뀔 때만 다시 주의
 ```
 
-운영자가 변화를 확인하면 반복 알림 대상에서는 제외할 수 있지만, 확인 자체가 원래 baseline으로 자동 복귀시키는 것은 아닙니다.
+운영자는 해당 장비 행을 선택하고 `현재 Connection-Type 정상 기준 설정`을 눌러
+최신 완료 점검의 현재 값을 새 정상 baseline으로 확정할 수 있습니다. 이 작업은
+Connection-Type 사건만 확인 처리하며 같은 IP의 Client 분배 등 다른 장애 사건은
+그대로 유지합니다.
+
+확인하지 않은 변화가 기존 정상 baseline으로 되돌아오면 변화 사건은 자동 복구됩니다.
+v0.6.0 이하에서 변화값이 이미 baseline으로 자동 저장된 상태는 pending 변화 사건의
+이전값을 이용해 원래 정상 baseline을 복원한 뒤 운영자 확인을 기다립니다.
 
 v0.4.2로 처음 실행할 때 이전 버전이 STATUS까지 붙여 저장한 값은 로컬 SQLite
 v5 마이그레이션에서 분리합니다. 분리 후 이전값과 현재값이 같은 오탐만 자동으로
