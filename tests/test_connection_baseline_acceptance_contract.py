@@ -20,3 +20,12 @@ def test_runtime_connects_the_explicit_baseline_action() -> None:
     assert "def accept_connection_type_baseline" in source
     assert "runtime.accept_connection_type_baseline" in source
     assert "drain_connection_change_resolutions" in source
+
+
+def test_generic_acknowledgement_does_not_accept_connection_baseline() -> None:
+    source = (ROOT / "src/aruba_mini_dashboard/main.py").read_text(encoding="utf-8")
+    start = source.index("    def acknowledge_ip(self, ip: str) -> None:")
+    end = source.index("    def acknowledge_global(self) -> None:", start)
+    body = source[start:end]
+    assert "acknowledge_connection_change" not in body
+    assert "IncidentType.CONNECTION_TYPE_CHANGED" in body

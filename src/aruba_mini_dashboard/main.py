@@ -1816,9 +1816,19 @@ class RuntimePoller:
 
     def acknowledge_ip(self, ip: str) -> None:
         with self._lock:
-            transitions = self.incident_manager.acknowledge_ip(ip)
-            if self.engine.acknowledge_connection_change(ip):
-                self._pending_connection_acknowledgements.add(ip)
+            transitions: list[Any] = []
+            for incident in self.incident_manager.active_incidents():
+                if (
+                    incident.ip != ip
+                    or incident.incident_type is IncidentType.CONNECTION_TYPE_CHANGED
+                ):
+                    continue
+                transition = self.incident_manager.acknowledge(
+                    incident.incident_id,
+                    now=datetime.now(timezone.utc),
+                )
+                if transition is not None:
+                    transitions.append(transition)
             self._persist_incidents(transitions)
 
     def acknowledge_global(self) -> None:

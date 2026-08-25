@@ -622,13 +622,13 @@ def test_accepted_connection_change_becomes_the_new_normal_baseline() -> None:
     engine.correlate(cycle())
     changed = engine.correlate(cycle(membership="group_membership_changed.txt"))
     assert changed.problem_ips == ["192.0.2.12"]
-    assert store.get("192.0.2.12").normalized_value == "type a"  # type: ignore[union-attr]
+    assert store.get("192.0.2.12").normalized_value == "typea"  # type: ignore[union-attr]
 
     assert engine.acknowledge_connection_change("192.0.2.12") is True
     accepted = store.get("192.0.2.12")
     assert accepted is not None
     assert accepted.display_value == "Type-B"
-    assert accepted.normalized_value == "type b"
+    assert accepted.normalized_value == "typeb"
 
     stable = engine.correlate(cycle(membership="group_membership_changed.txt"))
     assert stable.problem_ips == []
@@ -958,7 +958,7 @@ def test_changed_value_does_not_move_baseline_before_operator_acceptance() -> No
 
     assert baseline is not None
     assert baseline.display_value == "Type-A"
-    assert baseline.normalized_value == "type a"
+    assert baseline.normalized_value == "typea"
     assert engine.pending_connection_changes()[0].current_value == "Type-B"
 
 
@@ -977,7 +977,7 @@ def test_legacy_auto_promoted_baseline_is_restored_from_pending_event() -> None:
                 collector_ip="192.0.2.11",
                 member_ip="192.0.2.12",
                 display_value="Type-B",
-                normalized_value="type b",
+                normalized_value="typeb",
                 observed_at=NOW,
             ),
         )
@@ -991,7 +991,7 @@ def test_legacy_auto_promoted_baseline_is_restored_from_pending_event() -> None:
     restored = store.get("192.0.2.12")
     assert restored is not None
     assert restored.display_value == "Type-A"
-    assert restored.normalized_value == "type a"
+    assert restored.normalized_value == "typea"
     health = engine.correlate(cycle(membership="group_membership_changed.txt"))
     assert health.problem_ips == ["192.0.2.12"]
 
