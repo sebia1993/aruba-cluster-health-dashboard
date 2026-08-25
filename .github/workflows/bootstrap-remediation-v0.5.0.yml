@@ -46,8 +46,7 @@ jobs:
                       raise SystemExit(f'unsupported bundle member: {member.name}')
               archive.extractall('.', members=members, filter='data')
 
-          # This file is written separately by the connected GitHub app because a
-          # workflow token cannot create workflow definitions.
+          # Workflow files are written separately by the connected GitHub app.
           Path('.github/workflows/auto-release-on-version.yml').unlink(missing_ok=True)
 
           version, old = '0.5.0', '0.4.2'
@@ -64,7 +63,6 @@ jobs:
 
           replace('README.md', f'.\\scripts\\package_release.ps1 -Version {old}', f'.\\scripts\\package_release.ps1 -Version {version}')
           replace('docs/RELEASE_PROCESS_KO.md', old, version)
-          replace('.github/workflows/release-windows.yml', f'for example v{old}"', f'for example v{version}"')
           replace('docs/README.txt', f'Aruba Mini Dashboard {old}\n', f'Aruba Mini Dashboard {version}\n')
           replace('docs/README.txt', f'.\\scripts\\package_release.ps1 -Version {old}', f'.\\scripts\\package_release.ps1 -Version {version}', required=False)
 
