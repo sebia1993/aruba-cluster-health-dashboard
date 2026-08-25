@@ -167,11 +167,20 @@ class NotificationService(QObject):
 
     @Slot(str)
     def acknowledge_ip(self, ip: str) -> None:
-        """Suppress repeats for every currently known reason on one device."""
+        """Suppress non-Connection-Type reasons currently known for a device.
 
-        for key in self._last_shown:
-            if key[0] == ip:
-                self._remember_acknowledgement(key)
+        Connection-Type is deliberately excluded because accepting it changes
+        the durable normal baseline and therefore requires the explicit
+        confirmation path.
+        """
+
+        prefix = "connection_type_changed:"
+        for key in tuple(self._last_shown):
+            if key[0] != ip:
+                continue
+            if key[1] == "connection_type_changed" or key[1].startswith(prefix):
+                continue
+            self._remember_acknowledgement(key)
 
     @Slot(str)
     def acknowledge_connection_type(self, ip: str) -> None:
