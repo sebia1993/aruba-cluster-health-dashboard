@@ -12,7 +12,7 @@ from aruba_mini_dashboard.collectors.aruba_ssh import (
 )
 from aruba_mini_dashboard.collectors.base import SshOperationError
 
-from .models import ActionCommandResult, ActionResultCode
+from .models import ActionCommandResult, ActionResultCode, DispatchPhase
 
 
 RELOAD_FORCE_COMMAND = "reload force"
@@ -74,7 +74,7 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
         self._check_cancelled()
         connection = self._require_connection()
         started = monotonic()
-        sent = False
+        phase = DispatchPhase.NOT_ATTEMPTED
         output_parts: list[str] = []
         try:
             normalize_cmd = getattr(connection, "normalize_cmd", None)
@@ -82,9 +82,6 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
             channel = getattr(connection, "channel", None)
             read_buffer = getattr(channel, "read_buffer", None) if channel is not None else None
             if not callable(write_channel):
-                # Fake/alternate connection factories used by tests may expose
-                # only send_command_timing.  It still represents a single
-                # dispatch attempt and is never retried after returning/raising.
                 timing = getattr(connection, "send_command_timing", None)
                 if not callable(timing):
                     raise SshOperationError(
@@ -93,7 +90,7 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
                         retryable=False,
                         operation="action",
                     )
-                sent = True
+                phase = DispatchPhase.WRITE_ATTEMPTED
                 try:
                     output = timing(
                         command_string=command,
@@ -102,6 +99,7 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
                         cmd_verify=False,
                         read_timeout=min(5, self.options.command_timeout_seconds),
                     )
+                    phase = DispatchPhase.WRITE_RETURNED
                 except Exception:
                     return ActionCommandResult(
                         command=command,
@@ -109,9 +107,12 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
                         sent=True,
                         accepted=None,
                         duration_ms=int((monotonic() - started) * 1000),
-                        message="재부팅 명령 전송 후 SSH 응답이 종료되어 수락 여부를 상태 관찰로 확인합니다.",
+                        message="재부팅 명령 쓰기를 시도한 뒤 SSH 결과가 불명확하여 재전송하지 않고 상태를 관찰합니다.",
+                        dispatch_phase=phase,
                     )
                 output = validate_bounded_output(output, allow_empty=True)
+                if output:
+                    phase = DispatchPhase.RESPONSE_OBSERVED
                 if command_was_rejected(output):
                     return ActionCommandResult(
                         command=command,
@@ -121,6 +122,7 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
                         output_excerpt=_excerpt(output),
                         duration_ms=int((monotonic() - started) * 1000),
                         message="장비가 reload force 명령을 거부했습니다.",
+                        dispatch_phase=phase,
                     )
                 return ActionCommandResult(
                     command=command,
@@ -129,12 +131,14 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
                     accepted=None,
                     output_excerpt=_excerpt(output),
                     duration_ms=int((monotonic() - started) * 1000),
-                    message="reload force 명령을 전송했습니다. MM 상태로 복구를 확인합니다.",
+                    message="reload force 명령 쓰기가 완료되었습니다. MM 상태로 복구를 확인합니다.",
+                    dispatch_phase=phase,
                 )
 
             normalized = normalize_cmd(command) if callable(normalize_cmd) else command + "\n"
+            phase = DispatchPhase.WRITE_ATTEMPTED
             write_channel(normalized)
-            sent = True
+            phase = DispatchPhase.WRITE_RETURNED
             deadline = monotonic() + min(5.0, float(self.options.command_timeout_seconds))
             while monotonic() < deadline:
                 if self._is_cancelled():
@@ -145,7 +149,8 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
                         accepted=None,
                         output_excerpt=_excerpt("".join(output_parts)),
                         duration_ms=int((monotonic() - started) * 1000),
-                        message="재부팅 명령 전송 후 조치 중단 요청을 받아 추가 확인을 중단했습니다.",
+                        message="재부팅 명령 쓰기 후 중단 요청을 받아 추가 확인을 중단했습니다.",
+                        dispatch_phase=phase,
                     )
                 chunk = ""
                 try:
@@ -160,12 +165,14 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
                         command=command,
                         code=ActionResultCode.EXPECTED_DISCONNECT,
                         sent=True,
-                        accepted=True,
+                        accepted=None,
                         output_excerpt=_excerpt("".join(output_parts)),
                         duration_ms=int((monotonic() - started) * 1000),
-                        message="reload force 전송 후 SSH 연결 종료를 확인했습니다.",
+                        message="reload force 쓰기 후 SSH 연결 종료를 확인했습니다. 최종 수락 여부는 MM 복구로 판정합니다.",
+                        dispatch_phase=phase,
                     )
                 if chunk:
+                    phase = DispatchPhase.RESPONSE_OBSERVED
                     output_parts.append(str(chunk))
                     joined = "".join(output_parts)
                     validate_bounded_output(joined, allow_empty=True)
@@ -178,17 +185,18 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
                             output_excerpt=_excerpt(joined),
                             duration_ms=int((monotonic() - started) * 1000),
                             message="장비가 reload force 명령을 거부했습니다.",
+                            dispatch_phase=phase,
                         )
-                alive = _connection_is_alive(connection)
-                if alive is False:
+                if _connection_is_alive(connection) is False:
                     return ActionCommandResult(
                         command=command,
                         code=ActionResultCode.EXPECTED_DISCONNECT,
                         sent=True,
-                        accepted=True,
+                        accepted=None,
                         output_excerpt=_excerpt("".join(output_parts)),
                         duration_ms=int((monotonic() - started) * 1000),
-                        message="reload force 전송 후 SSH 연결 종료를 확인했습니다.",
+                        message="reload force 쓰기 후 SSH 연결 종료를 확인했습니다. 최종 수락 여부는 MM 복구로 판정합니다.",
+                        dispatch_phase=phase,
                     )
                 sleep(0.1)
             return ActionCommandResult(
@@ -198,12 +206,13 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
                 accepted=None,
                 output_excerpt=_excerpt("".join(output_parts)),
                 duration_ms=int((monotonic() - started) * 1000),
-                message="reload force 명령은 전송했으나 즉시 수락 여부는 확인되지 않아 MM 상태로 복구를 확인합니다.",
+                message="reload force 쓰기는 완료했으나 즉시 응답은 확인되지 않아 MM 상태로 복구를 확인합니다.",
+                dispatch_phase=phase,
             )
         except SshOperationError:
             raise
         except Exception as exc:
-            if sent:
+            if phase is not DispatchPhase.NOT_ATTEMPTED:
                 return ActionCommandResult(
                     command=command,
                     code=ActionResultCode.RESULT_UNKNOWN_AFTER_SEND,
@@ -211,11 +220,12 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
                     accepted=None,
                     output_excerpt=_excerpt("".join(output_parts)),
                     duration_ms=int((monotonic() - started) * 1000),
-                    message="재부팅 명령 전송 후 SSH 결과를 확인하지 못했습니다. 명령을 재전송하지 않습니다.",
+                    message="재부팅 명령 쓰기 시도 후 결과를 확인하지 못했습니다. 명령을 재전송하지 않습니다.",
+                    dispatch_phase=phase,
                 )
             raise SshOperationError(
                 "ACTION_NOT_SENT",
-                "재부팅 명령을 장비에 전송하지 못했습니다.",
+                "재부팅 명령 쓰기를 시작하지 못했습니다.",
                 retryable=False,
                 operation="action",
             ) from exc
@@ -225,10 +235,21 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
         self._check_cancelled()
         connection = self._require_connection()
         started = monotonic()
+        phase = DispatchPhase.NOT_ATTEMPTED
         try:
             if _is_netmiko_connection(connection):
-                output = self._run_bounded_netmiko_prompt(connection, command)
+                def mark_written() -> None:
+                    nonlocal phase
+                    phase = DispatchPhase.WRITE_RETURNED
+
+                phase = DispatchPhase.WRITE_ATTEMPTED
+                output = self._run_bounded_netmiko_prompt(
+                    connection,
+                    command,
+                    on_write=mark_written,
+                )
             elif self._paging_disabled:
+                phase = DispatchPhase.WRITE_ATTEMPTED
                 output = connection.send_command(
                     command_string=command,
                     strip_prompt=False,
@@ -237,7 +258,9 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
                     auto_find_prompt=False,
                     read_timeout=self.options.command_timeout_seconds,
                 )
+                phase = DispatchPhase.WRITE_RETURNED
             else:
+                phase = DispatchPhase.WRITE_ATTEMPTED
                 output = connection.send_command_timing(
                     command_string=command,
                     strip_prompt=False,
@@ -245,8 +268,11 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
                     cmd_verify=False,
                     read_timeout=self.options.command_timeout_seconds,
                 )
+                phase = DispatchPhase.WRITE_RETURNED
             self._check_cancelled()
             output = validate_bounded_output(output, allow_empty=True)
+            if output:
+                phase = DispatchPhase.RESPONSE_OBSERVED
             if contains_paging_marker(output):
                 return ActionCommandResult(
                     command=command,
@@ -256,6 +282,7 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
                     output_excerpt=_excerpt(output),
                     duration_ms=int((monotonic() - started) * 1000),
                     message="재분배 출력에 미처리된 페이징 표시가 있어 정상 응답을 확인하지 못했습니다.",
+                    dispatch_phase=phase,
                 )
             if command_was_rejected(output):
                 return ActionCommandResult(
@@ -266,6 +293,7 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
                     output_excerpt=_excerpt(output),
                     duration_ms=int((monotonic() - started) * 1000),
                     message="장비가 클러스터 재분배 명령을 거부했습니다.",
+                    dispatch_phase=phase,
                 )
             if rebalance_output_confirmed(output):
                 return ActionCommandResult(
@@ -276,6 +304,7 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
                     output_excerpt=_excerpt(output),
                     duration_ms=int((monotonic() - started) * 1000),
                     message="Cluster rebalance triggered 정상 메시지를 확인했습니다.",
+                    dispatch_phase=phase,
                 )
             return ActionCommandResult(
                 command=command,
@@ -285,24 +314,45 @@ class ArubaActionSshAdapter(ArubaSshAdapter):
                 output_excerpt=_excerpt(output),
                 duration_ms=int((monotonic() - started) * 1000),
                 message="재분배 명령 출력에서 정확한 정상 메시지를 확인하지 못했습니다.",
+                dispatch_phase=phase,
             )
         except SshOperationError as exc:
             if exc.code == "CANCELLED":
                 raise
+            if phase is DispatchPhase.NOT_ATTEMPTED:
+                return ActionCommandResult(
+                    command=command,
+                    code=ActionResultCode.ACTION_NOT_SENT,
+                    sent=False,
+                    accepted=False,
+                    duration_ms=int((monotonic() - started) * 1000),
+                    message="재분배 명령 쓰기를 시작하지 못했습니다.",
+                    dispatch_phase=phase,
+                )
             return ActionCommandResult(
                 command=command,
                 code=ActionResultCode.REBALANCE_RESULT_UNKNOWN,
                 sent=True,
                 accepted=None,
                 duration_ms=int((monotonic() - started) * 1000),
-                message="재분배 명령 전송 후 결과를 확인하지 못했습니다. 자동 재실행하지 않습니다.",
+                message="재분배 명령 쓰기 시도 후 결과를 확인하지 못했습니다. 자동 재실행하지 않습니다.",
+                dispatch_phase=phase,
             )
         except Exception:
             return ActionCommandResult(
                 command=command,
-                code=ActionResultCode.REBALANCE_RESULT_UNKNOWN,
-                sent=True,
-                accepted=None,
+                code=(
+                    ActionResultCode.ACTION_NOT_SENT
+                    if phase is DispatchPhase.NOT_ATTEMPTED
+                    else ActionResultCode.REBALANCE_RESULT_UNKNOWN
+                ),
+                sent=phase is not DispatchPhase.NOT_ATTEMPTED,
+                accepted=False if phase is DispatchPhase.NOT_ATTEMPTED else None,
                 duration_ms=int((monotonic() - started) * 1000),
-                message="재분배 명령 전송 후 SSH 결과를 확인하지 못했습니다. 자동 재실행하지 않습니다.",
+                message=(
+                    "재분배 명령 쓰기를 시작하지 못했습니다."
+                    if phase is DispatchPhase.NOT_ATTEMPTED
+                    else "재분배 명령 쓰기 시도 후 SSH 결과를 확인하지 못했습니다. 자동 재실행하지 않습니다."
+                ),
+                dispatch_phase=phase,
             )

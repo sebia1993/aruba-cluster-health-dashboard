@@ -417,7 +417,13 @@ class ArubaSshAdapter:
                 ) from None
             raise classify_ssh_exception(exc, operation="command") from exc
 
-    def _run_bounded_netmiko_prompt(self, connection: object, command: str) -> str:
+    def _run_bounded_netmiko_prompt(
+        self,
+        connection: object,
+        command: str,
+        *,
+        on_write: Callable[[], None] | None = None,
+    ) -> str:
         """Stream one Netmiko buffer at a time under prompt/size/deadline gates."""
 
         channel = _stored_attribute(connection, "channel")
@@ -457,6 +463,8 @@ class ArubaSshAdapter:
                     operation="command",
                 )
             write_channel(normalize_cmd(command))
+            if on_write is not None:
+                on_write()
         except SshOperationError:
             self._abort_netmiko_transport(connection)
             raise

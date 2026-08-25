@@ -214,6 +214,16 @@ F12 개발자 UI 식별 모드는 일반 운영 기능과 분리된 개발 보�
 
 `v0.5.0`부터 기존 읽기 전용 점검과 별도로 켜고 끌 수 있는 기본 OFF 자동 장애조치를 제공합니다. 등록 Controller 한 대의 명시적 Down을 확인하면 대상 SSH 최대 3회, `reload force`, MM Up 대기, 현재 Leader 재탐색, 대상 `CONNECTED` 확인, `cluster-debug bucketmap rebalance`, 사후 점검을 순서대로 수행합니다. 모든 결과는 별도 SQLite 타임라인과 상급보고용 단일 HTML로 기록합니다. 상세 내용은 [자동 Controller 장애조치](docs/AUTOMATIC_REMEDIATION_KO.md)를 참고하십시오.
 
+### v0.6.0 구조·안정성 개선
+
+- 보고서와 조치 시각은 항상 KST(UTC+09:00)입니다.
+- 재분배 직전 동일 Leader SSH 세션에서 Membership과 MM 전체 Up을 최종 확인합니다.
+- SQLite 원자적 상태 전이, 3회 연속 정상 잠금 해제, Cluster 냉각시간과 24시간
+  Controller별 실행 한도를 적용합니다.
+- MainWindow monkey patch를 제거하고 UI·Workflow·Persistence·시간·SSH 수명주기를
+  명시적 컴포넌트로 분리했습니다.
+- HTML 보고서 실패는 다음 실행에서 재생성하며 실행 설정 지문과 명령 쓰기 단계를 기록합니다.
+
 ## 개발 및 패키지 검증
 
 개발 기준은 CPython 3.13.15 x64 표준 GIL 빌드입니다.
@@ -242,7 +252,7 @@ Windows onedir 패키지:
 버전 ZIP과 SHA-256:
 
 ```powershell
-.\scripts\package_release.ps1 -Version 0.5.0
+.\scripts\package_release.ps1 -Version 0.6.0
 ```
 
 개발 구조와 변경 원칙은 [`DEVELOPMENT.md`](DEVELOPMENT.md), Release 검증·배포 절차는 [Windows 배포 절차](docs/RELEASE_PROCESS_KO.md)를 참고하십시오.
