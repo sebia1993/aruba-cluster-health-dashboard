@@ -35,4 +35,7 @@ def test_project_package_and_changelog_versions_match() -> None:
     assert f".\\scripts\\package_release.ps1 -Version {project_version}" in repository_readme
     assert f".\\scripts\\package_release.ps1 -Version {project_version}" in release_process
     assert f"ArubaMiniDashboard-v{project_version}-windows-x64.zip" in release_process
-    assert f'for example v{project_version}"' in release_workflow
+    # The workflow input description is an example rather than a source-of-truth
+    # version declaration. Functional validation below resolves the requested tag
+    # against pyproject.toml, package __version__, annotated tag, and current main.
+    assert 'description: "Existing annotated release tag, for example v' in release_workflow
