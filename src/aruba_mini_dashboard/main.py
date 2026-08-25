@@ -1559,6 +1559,15 @@ class RuntimePoller:
             notify_new = self.settings.notifications.notify_new_incidents
             repeat_enabled = self.settings.notifications.repeat_unacknowledged
             health = active_engine.correlate(cycle)
+            drain_resolutions = getattr(
+                active_engine,
+                "drain_connection_change_resolutions",
+                None,
+            )
+            if callable(drain_resolutions):
+                self._pending_connection_acknowledgements.update(
+                    drain_resolutions()
+                )
             transitions = manager.process(health, now=health.checked_at)
             activated_ids = {
                 transition.incident.incident_id
@@ -1783,11 +1792,43 @@ class RuntimePoller:
         except Exception:
             LOGGER.exception("상태와 장애 사건의 원자 저장에 실패했습니다. 다음 저장에서 재시도합니다.")
 
+    def accept_connection_type_baseline(self, ip: str) -> bool:
+        """Accept only the current Connection-Type event as the new baseline."""
+
+        with self._lock:
+            if not self.engine.acknowledge_connection_change(ip):
+                return False
+            transitions: list[Any] = []
+            for incident in self.incident_manager.active_incidents():
+                if (
+                    incident.ip == ip
+                    and incident.incident_type is IncidentType.CONNECTION_TYPE_CHANGED
+                ):
+                    transition = self.incident_manager.acknowledge(
+                        incident.incident_id,
+                        now=datetime.now(timezone.utc),
+                    )
+                    if transition is not None:
+                        transitions.append(transition)
+            self._pending_connection_acknowledgements.add(ip)
+            self._persist_incidents(transitions)
+            return True
+
     def acknowledge_ip(self, ip: str) -> None:
         with self._lock:
-            transitions = self.incident_manager.acknowledge_ip(ip)
-            if self.engine.acknowledge_connection_change(ip):
-                self._pending_connection_acknowledgements.add(ip)
+            transitions: list[Any] = []
+            for incident in self.incident_manager.active_incidents():
+                if (
+                    incident.ip != ip
+                    or incident.incident_type is IncidentType.CONNECTION_TYPE_CHANGED
+                ):
+                    continue
+                transition = self.incident_manager.acknowledge(
+                    incident.incident_id,
+                    now=datetime.now(timezone.utc),
+                )
+                if transition is not None:
+                    transitions.append(transition)
             self._persist_incidents(transitions)
 
     def acknowledge_global(self) -> None:
@@ -2208,7 +2249,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     window.acknowledge_requested.connect(runtime.acknowledge_ip)
     window.acknowledge_global_requested.connect(runtime.acknowledge_global)
+    window.connection_type_baseline_requested.connect(
+        runtime.accept_connection_type_baseline
+    )
     window.acknowledge_requested.connect(notifications.acknowledge_ip)
+    window.connection_type_baseline_requested.connect(
+        notifications.acknowledge_connection_type
+    )
     notifications.notification_shown.connect(runtime.mark_notification_delivered)
     app.setQuitOnLastWindowClosed(not window.tray_icon.isVisible())
 

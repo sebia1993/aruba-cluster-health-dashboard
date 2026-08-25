@@ -89,15 +89,20 @@ class DemoPoller:
         expected = {
             row.ip: f"WLC-{position:02d}" for position, row in enumerate(load_result.rows, start=1)
         }
-        # The demo represents the operator acknowledging the one-time
-        # Connection-Type event before the following MM-down stage. This keeps
-        # the final recovery stage visibly normal without changing production
-        # acknowledgement semantics.
-        if stage_position == 5 and hasattr(self.engine, "acknowledge_ip"):
-            pending_engine = getattr(self.engine, "engine", None)
-            pending = pending_engine.pending_connection_changes() if pending_engine is not None else ()
-            for change in pending:
-                self.engine.acknowledge_ip(change.member_ip)
+        # The demo represents the operator explicitly accepting the
+        # one-time Connection-Type event as the new normal before the following
+        # MM-down stage. Generic incident acknowledgement must not change a
+        # Connection-Type baseline.
+        if stage_position == 5:
+            pending_engine = getattr(self.engine, "engine", self.engine)
+            pending_reader = getattr(pending_engine, "pending_connection_changes", None)
+            pending = pending_reader() if callable(pending_reader) else ()
+            acceptor = getattr(self.engine, "accept_connection_type_baseline", None)
+            if not callable(acceptor):
+                acceptor = getattr(pending_engine, "acknowledge_connection_change", None)
+            if callable(acceptor):
+                for change in pending:
+                    acceptor(change.member_ip)
         collector_ip = next(iter(expected), None)
         cycle = PollCycleResult(
             checked_at=datetime.now(timezone.utc),

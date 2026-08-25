@@ -153,6 +153,7 @@ class HostKeyApprovalDialog(QDialog):
 class MainWindow(QMainWindow):
     acknowledge_requested = Signal(str)
     acknowledge_global_requested = Signal()
+    connection_type_baseline_requested = Signal(str)
     quit_requested = Signal()
     settings_saved = Signal(object)
 
@@ -2069,18 +2070,44 @@ class MainWindow(QMainWindow):
                 previous_device=self._previous_devices.get(ip),
             )
 
+    def _device_for_ip(self, ip: str) -> DeviceView | None:
+        if self._current_view is None:
+            return None
+        return next(
+            (device for device in self._current_view.devices if device.ip == ip),
+            None,
+        )
+
+    def _connection_type_change_device(self, ip: str) -> DeviceView | None:
+        device = self._device_for_ip(ip)
+        if device is None:
+            return None
+        return (
+            device
+            if bool(value(device.source, "connection_type_changed", False))
+            else None
+        )
+
+    def _set_acknowledgement_mode(self, connection_type_change: bool) -> None:
+        text = (
+            "현재 Connection-Type 정상 기준 설정"
+            if connection_type_change
+            else "알림 확인"
+        )
+        self.ack_button.setText(text)
+        self.compact_ack_action.setText(text)
+
     @Slot()
     def _selection_changed(self) -> None:
+        self._set_acknowledgement_mode(False)
         if self._current_view is None or self.coordinator.busy:
             self.ack_button.setEnabled(False)
             self.compact_ack_action.setEnabled(False)
             return
         selected_ip = self._selected_ip()
+        target_ip = selected_ip
         if selected_ip:
-            selected_device = next(
-                (device for device in self._current_view.devices if device.ip == selected_ip),
-                None,
-            )
+            selected_device = self._device_for_ip(selected_ip)
             enabled = bool(
                 selected_device is not None
                 and self._device_is_registered(selected_device)
@@ -2094,8 +2121,41 @@ class MainWindow(QMainWindow):
                 len(self._current_view.problem_ips) == 1
                 or self._has_active_collection_incident()
             )
+            if len(self._current_view.problem_ips) == 1:
+                target_ip = self._current_view.problem_ips[0]
+        if enabled and target_ip and self._connection_type_change_device(target_ip):
+            self._set_acknowledgement_mode(True)
         self.ack_button.setEnabled(enabled)
         self.compact_ack_action.setEnabled(enabled)
+
+    def _confirm_connection_type_baseline(
+        self,
+        ip: str,
+        device: DeviceView,
+    ) -> bool:
+        current = device.connection_type
+        previous = display(
+            value(device.source, "previous_connection_type", ""),
+            "",
+        )
+        name = device.alias or device.hostname or ip
+        message = (
+            f"{name} ({ip})의 현재 Connection-Type을 정상 기준으로 저장합니다.\n\n"
+            f"기존 기준: {previous or '-'}\n"
+            f"새 기준: {current or '-'}\n\n"
+            "이후 새 기준에서 다른 값으로 바뀔 때만 다시 주의 알림을 표시합니다. "
+            "같은 IP의 Client 분배 등 다른 장애 알림은 확인 처리하지 않습니다."
+        )
+        return (
+            QMessageBox.question(
+                self,
+                "현재 Connection-Type 정상 기준 설정",
+                message,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            == QMessageBox.Yes
+        )
 
     @Slot()
     def _acknowledge_selected(self) -> None:
@@ -2103,21 +2163,41 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("점검이 끝난 뒤 알림을 확인 처리하세요.", 5000)
             return
         ip = self._selected_ip()
-        if ip:
-            selected_device = next(
-                (device for device in self._current_view.devices if device.ip == ip),
-                None,
-            ) if self._current_view else None
-            if self._current_view and selected_device is not None and self._device_is_registered(
-                selected_device
-            ) and (ip in self._current_view.problem_ips or self._has_active_incident_for_ip(ip)):
-                self.acknowledge_requested.emit(ip)
-                self.statusBar().showMessage(f"{ip}의 현재 알림을 확인 처리했습니다.", 5000)
-                return
-            self.statusBar().showMessage("선택한 행에는 확인 처리할 활성 문제가 없습니다.", 5000)
-            return
-        if self._current_view and len(self._current_view.problem_ips) == 1:
+        if not ip and self._current_view and len(self._current_view.problem_ips) == 1:
             ip = self._current_view.problem_ips[0]
+        if ip:
+            selected_device = self._device_for_ip(ip)
+            actionable = bool(
+                self._current_view
+                and selected_device is not None
+                and self._device_is_registered(selected_device)
+                and (
+                    ip in self._current_view.problem_ips
+                    or self._has_active_incident_for_ip(ip)
+                )
+            )
+            if not actionable or selected_device is None:
+                self.statusBar().showMessage(
+                    "선택한 행에는 확인 처리할 활성 문제가 없습니다.",
+                    5000,
+                )
+                return
+            connection_change = self._connection_type_change_device(ip)
+            if connection_change is not None:
+                if not self._confirm_connection_type_baseline(ip, connection_change):
+                    self.statusBar().showMessage(
+                        "Connection-Type 정상 기준 설정을 취소했습니다.",
+                        5000,
+                    )
+                    return
+                self.connection_type_baseline_requested.emit(ip)
+                self.statusBar().showMessage(
+                    f"{ip}의 현재 Connection-Type을 새 정상 기준으로 저장했습니다. "
+                    "최신 상태를 다시 확인합니다.",
+                    8000,
+                )
+                QTimer.singleShot(0, self.coordinator.check_now)
+                return
             self.acknowledge_requested.emit(ip)
             self.statusBar().showMessage(f"{ip}의 현재 알림을 확인 처리했습니다.", 5000)
             return

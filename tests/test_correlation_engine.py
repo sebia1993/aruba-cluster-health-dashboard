@@ -589,17 +589,18 @@ def test_same_connection_change_is_retained_without_creating_a_new_event() -> No
     assert len(engine.pending_connection_changes()) == 1
 
 
-def test_connection_return_to_previous_value_creates_a_new_change_event() -> None:
+def test_connection_return_to_accepted_baseline_recovers_pending_change() -> None:
     engine = CorrelationEngine()
     engine.correlate(cycle())
-    first = engine.correlate(cycle(membership="group_membership_changed.txt"))
-    first_token = next(signal.event_token for signal in first.signals if signal.event_token)
+    changed = engine.correlate(cycle(membership="group_membership_changed.txt"))
+    assert changed.problem_ips == ["192.0.2.12"]
+    assert len(engine.pending_connection_changes()) == 1
+
     returned = engine.correlate(cycle(membership="group_membership_initial.txt"))
-    returned_signal = next(
-        signal for signal in returned.signals if signal.ip == "192.0.2.12" and signal.event_token
-    )
-    assert returned_signal.event_token != first_token
-    assert "Type-B" in returned_signal.reason and "Type-A" in returned_signal.reason
+
+    assert returned.problem_ips == []
+    assert engine.pending_connection_changes() == ()
+    assert engine.drain_connection_change_resolutions() == {"192.0.2.12"}
 
 
 def test_pending_connection_change_can_be_restored_after_restart() -> None:
@@ -615,14 +616,29 @@ def test_pending_connection_change_can_be_restored_after_restart() -> None:
     assert health.device_by_ip("192.0.2.12").connection_type_changed is True  # type: ignore[union-attr]
 
 
-def test_acknowledged_connection_change_leaves_monitoring_active_but_clears_warning() -> None:
-    engine = CorrelationEngine()
+def test_accepted_connection_change_becomes_the_new_normal_baseline() -> None:
+    store = InMemoryConnectionBaselineStore()
+    engine = CorrelationEngine(baseline_store=store)
     engine.correlate(cycle())
-    engine.correlate(cycle(membership="group_membership_changed.txt"))
+    changed = engine.correlate(cycle(membership="group_membership_changed.txt"))
+    assert changed.problem_ips == ["192.0.2.12"]
+    assert store.get("192.0.2.12").normalized_value == "typea"  # type: ignore[union-attr]
+
     assert engine.acknowledge_connection_change("192.0.2.12") is True
-    health = engine.correlate(cycle(membership="group_membership_changed.txt"))
-    assert health.problem_ips == []
-    assert health.device_by_ip("192.0.2.12").connection_type == "Type-B"  # type: ignore[union-attr]
+    accepted = store.get("192.0.2.12")
+    assert accepted is not None
+    assert accepted.display_value == "Type-B"
+    assert accepted.normalized_value == "typeb"
+
+    stable = engine.correlate(cycle(membership="group_membership_changed.txt"))
+    assert stable.problem_ips == []
+    returned = engine.correlate(cycle(membership="group_membership_initial.txt"))
+    signal = next(
+        item
+        for item in returned.signals
+        if item.incident_type is IncidentType.CONNECTION_TYPE_CHANGED
+    )
+    assert "Type-B" in signal.reason and "Type-A" in signal.reason
 
 
 def test_connection_format_only_difference_is_not_a_change() -> None:
@@ -930,3 +946,52 @@ def test_partial_primary_collection_is_not_described_as_failover() -> None:
     health = CorrelationEngine().correlate(poll)
     assert health.actual_cluster_controller_ip == health.requested_cluster_controller_ip
     assert not any("Primary 수집 실패 후" in note for note in health.notes)
+
+
+def test_changed_value_does_not_move_baseline_before_operator_acceptance() -> None:
+    store = InMemoryConnectionBaselineStore()
+    engine = CorrelationEngine(baseline_store=store)
+    engine.correlate(cycle())
+
+    engine.correlate(cycle(membership="group_membership_changed.txt"))
+    baseline = store.get("192.0.2.12")
+
+    assert baseline is not None
+    assert baseline.display_value == "Type-A"
+    assert baseline.normalized_value == "typea"
+    assert engine.pending_connection_changes()[0].current_value == "Type-B"
+
+
+def test_legacy_auto_promoted_baseline_is_restored_from_pending_event() -> None:
+    change = ConnectionChange(
+        collector_ip="192.0.2.13",
+        member_ip="192.0.2.12",
+        previous_value="Type-A",
+        current_value="Type-B",
+        first_detected_at=NOW,
+        last_confirmed_at=NOW + timedelta(minutes=1),
+    )
+    store = InMemoryConnectionBaselineStore(
+        (
+            ConnectionBaseline(
+                collector_ip="192.0.2.11",
+                member_ip="192.0.2.12",
+                display_value="Type-B",
+                normalized_value="typeb",
+                observed_at=NOW,
+            ),
+        )
+    )
+
+    engine = CorrelationEngine(
+        baseline_store=store,
+        pending_connection_changes=(change,),
+    )
+
+    restored = store.get("192.0.2.12")
+    assert restored is not None
+    assert restored.display_value == "Type-A"
+    assert restored.normalized_value == "typea"
+    health = engine.correlate(cycle(membership="group_membership_changed.txt"))
+    assert health.problem_ips == ["192.0.2.12"]
+
