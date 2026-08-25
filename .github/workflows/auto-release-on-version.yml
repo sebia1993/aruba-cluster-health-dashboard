@@ -50,7 +50,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Create one annotated tag for the current main commit
+      - name: Create or verify one annotated tag for the current main commit
         id: tag
         shell: bash
         env:
@@ -59,8 +59,13 @@ jobs:
           set -euo pipefail
           git fetch --force --tags origin
           if git show-ref --tags --verify --quiet "refs/tags/$AMD_TAG"; then
+            tag_type="$(git cat-file -t "refs/tags/$AMD_TAG")"
             existing="$(git rev-parse "refs/tags/$AMD_TAG^{}")"
             current="$(git rev-parse HEAD)"
+            if [[ "$tag_type" != "tag" ]]; then
+              echo "Tag $AMD_TAG exists but is not annotated." >&2
+              exit 1
+            fi
             if [[ "$existing" != "$current" ]]; then
               echo "Tag $AMD_TAG already identifies a different commit." >&2
               exit 1
@@ -74,8 +79,22 @@ jobs:
           git push origin "refs/tags/$AMD_TAG"
           echo "created=true" >> "$GITHUB_OUTPUT"
 
+      - name: Check whether the GitHub Release is missing
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AMD_TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$AMD_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release_missing=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release_missing=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Dispatch the existing verified Windows release workflow
-        if: steps.tag.outputs.created == 'true'
+        if: steps.release.outputs.release_missing == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
