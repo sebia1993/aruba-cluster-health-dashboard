@@ -1,0 +1,179 @@
+name: "Bootstrap automatic remediation v0.5.0 branch"
+
+on:
+  push:
+    branches:
+      - feat/automatic-controller-remediation
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bootstrap-automatic-remediation-v0.5.0
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    name: Materialize reviewed source bundle and version documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feat/automatic-controller-remediation
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Extract the reviewed source bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from __future__ import annotations
+
+          import base64
+          import io
+          import tarfile
+          from pathlib import Path, PurePosixPath
+
+          parts = sorted(Path('.github').glob('remediation-v0.5.0.tar.gz.b64.part*'))
+          if not parts:
+              raise SystemExit('remediation source bundle parts are missing')
+          encoded = ''.join(part.read_text(encoding='ascii') for part in parts)
+          raw = base64.b64decode(encoded, validate=True)
+          with tarfile.open(fileobj=io.BytesIO(raw), mode='r:gz') as archive:
+              members = archive.getmembers()
+              for member in members:
+                  path = PurePosixPath(member.name)
+                  if path.is_absolute() or '..' in path.parts or member.issym() or member.islnk():
+                      raise SystemExit(f'unsafe bundle path: {member.name}')
+                  if member.isdir():
+                      continue
+                  if not member.isfile():
+                      raise SystemExit(f'unsupported bundle member: {member.name}')
+              archive.extractall('.', members=members, filter='data')
+          PY
+
+      - name: Update existing versioned documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          version = '0.5.0'
+          old = '0.4.2'
+
+          def replace_required(path: str, before: str, after: str) -> None:
+              file = Path(path)
+              text = file.read_text(encoding='utf-8')
+              if after in text:
+                  return
+              if before not in text:
+                  raise SystemExit(f'required text not found in {path}: {before!r}')
+              file.write_text(text.replace(before, after), encoding='utf-8')
+
+          replace_required(
+              'README.md',
+              f'.\\scripts\\package_release.ps1 -Version {old}',
+              f'.\\scripts\\package_release.ps1 -Version {version}',
+          )
+          replace_required(
+              'docs/RELEASE_PROCESS_KO.md',
+              f'.\\scripts\\package_release.ps1 -Version {old}',
+              f'.\\scripts\\package_release.ps1 -Version {version}',
+          )
+          replace_required(
+              'docs/RELEASE_PROCESS_KO.md',
+              f'ArubaMiniDashboard-v{old}-windows-x64.zip',
+              f'ArubaMiniDashboard-v{version}-windows-x64.zip',
+          )
+          replace_required(
+              '.github/workflows/release-windows.yml',
+              f'for example v{old}"',
+              f'for example v{version}"',
+          )
+
+          packaged = Path('docs/README.txt')
+          text = packaged.read_text(encoding='utf-8')
+          prefix = f'Aruba Mini Dashboard {old}\n'
+          if text.startswith(prefix):
+              text = f'Aruba Mini Dashboard {version}\n' + text[len(prefix):]
+          text = text.replace(
+              f'.\\scripts\\package_release.ps1 -Version {old}',
+              f'.\\scripts\\package_release.ps1 -Version {version}',
+          )
+          packaged.write_text(text, encoding='utf-8')
+
+          changelog = Path('CHANGELOG.md')
+          text = changelog.read_text(encoding='utf-8')
+          heading = f'## {version} - 2026-08-25'
+          if heading not in text:
+              section = f'''# 변경 이력\n\n{heading}\n\n### 자동 Controller 장애조치\n\n- 기존 읽기 전용 자동점검과 독립적인 기본 OFF 자동 장애조치 토글을 추가했습니다.\n- 신뢰 가능한 MM 단일 Down을 실행 직전에 재검증하고 대상 Controller SSH를 최대\n  3회 시도한 뒤 `reload force`를 동일 장애에서 한 번만 전송합니다.\n- MM Up, 현재 Leader 재탐색, 대상 및 전체 구성원 `CONNECTED`를 확인한 뒤 현재\n  Leader에서 `cluster-debug bucketmap rebalance`를 한 번만 실행합니다.\n- `Cluster rebalance triggered` 독립 행을 정확히 확인하고 전체 MM Up, Membership,\n  Client Distribution을 사후 연속 점검합니다.\n\n### 안전·감사·보고\n\n- 기존 `READ_ONLY_COMMANDS`는 변경하지 않고 두 변경 명령을 별도 SSH allowlist와\n  상태 머신으로 분리했습니다. 명령 전송 예약과 대상 잠금을 SQLite에 먼저 기록해\n  프로그램 재시작과 결과 불명확 상황에서도 중복 재부팅·재분배를 차단합니다.\n- 성공, 부분 완료, 실패, 중단 및 비정상 종료마다 상급보고용 단일 HTML 장애조치\n  보고서를 생성합니다. 보고서에는 타임라인과 전후 상태를 포함하지만 자격 증명과\n  전체 SSH 원문은 저장하지 않습니다.\n- main 버전 변경을 annotated tag와 기존 검증 release workflow에 연결하는 자동\n  prerelease 배포 경로를 추가했습니다. 실제 장비 변경 명령은 승인된 현장 환경에서\n  별도 검증해야 합니다.\n\n'''
+              if not text.startswith('# 변경 이력\n\n'):
+                  raise SystemExit('unexpected changelog header')
+              changelog.write_text(section + text[len('# 변경 이력\n\n'):], encoding='utf-8')
+
+          readme = Path('README.md')
+          text = readme.read_text(encoding='utf-8')
+          text = text.replace(
+              '**Aruba Mobility Master(MM)와 7240XM 클러스터의 여러 상태 정보를 읽기 전용 SSH로 수집하고, 장비 IP 기준으로 상관분석해 `정상 / 주의 / 장애 / 확인 불가`를 판단하는 Windows 네트워크 모니터링 도구입니다.**',
+              '**Aruba Mobility Master(MM)와 7240XM 클러스터 상태를 읽기 전용 SSH로 수집·상관분석하고, 필요할 때만 별도로 켜는 자동 Controller 장애조치를 제공하는 Windows 네트워크 운영 도구입니다.**',
+          )
+          text = text.replace(
+              '| 운영 변경 | **없음 — 설정 모드와 구성 변경 명령을 사용하지 않음** |',
+              '| 운영 변경 | 기본 OFF 자동 장애조치에서 검토된 재부팅·재분배 명령만 별도 실행 |',
+          )
+          text = text.replace(
+              '- 구성 변경 명령을 허용하지 않습니다.',
+              '- 기본 읽기 전용 점검에서는 구성 변경 명령을 허용하지 않습니다. 자동 장애조치는 별도 ON/OFF·별도 allowlist·감사 저장소를 사용합니다.',
+          )
+          text = text.replace(
+              '- WLC 설정 변경 또는 자동 복구 명령 실행',
+              '- 자동 장애조치 두 명령 이외의 WLC 설정 변경 또는 임의 복구 명령',
+          )
+          marker = '## 자동 Controller 장애조치\n'
+          if marker not in text:
+              insertion = '''\n## 자동 Controller 장애조치\n\n`v0.5.0`부터 기존 읽기 전용 점검과 별도로 켜고 끌 수 있는 기본 OFF 자동 장애조치\n기능을 제공합니다. MM에서 등록 Controller 한 대의 명시적 Down을 확인하면 최대\n3회의 직접 SSH 접속, `reload force`, MM Up 대기, 현재 Leader 재탐색과 대상\n`CONNECTED` 확인, `cluster-debug bucketmap rebalance`, 사후 상태 점검을 순서대로\n수행합니다. 모든 결과는 별도 SQLite 타임라인과 상급보고용 단일 HTML 보고서로\n기록합니다. 상세 안전 경계는 [자동 Controller 장애조치](docs/AUTOMATIC_REMEDIATION_KO.md)를\n참고하십시오.\n\n'''
+              anchor = '## 개발 및 패키지 검증\n'
+              if anchor not in text:
+                  raise SystemExit('README insertion anchor not found')
+              text = text.replace(anchor, insertion + anchor, 1)
+          readme.write_text(text, encoding='utf-8')
+
+          security = Path('docs/SECURITY_KO.md')
+          text = security.read_text(encoding='utf-8')
+          text = text.replace(
+              'Aruba Mini Dashboard는 사용자가 등록한 MM/WLC에 읽기 전용 상태 명령을\n실행하는 로컬 Windows 프로그램입니다.',
+              'Aruba Mini Dashboard는 기본적으로 등록된 MM/WLC에 읽기 전용 상태 명령을\n실행하며, 사용자가 별도로 켠 경우에만 검토된 Controller 재부팅·재분배 명령을\n실행하는 로컬 Windows 프로그램입니다.',
+          )
+          text = text.replace(
+              '설정 모드 진입, 구성 저장, 삭제·재부팅·동기화 명령은 구현하지 않았습니다.',
+              '설정 모드 진입, 구성 저장, 삭제·임의 동기화 명령은 구현하지 않았습니다. 기본 OFF 자동 장애조치는 별도 경계에서 `reload force`와 `cluster-debug bucketmap rebalance`만 정확히 허용합니다.',
+          )
+          if '## 선택적 자동 장애조치 경계' not in text:
+              anchor = '## 로컬 저장소\n'
+              addition = '''## 선택적 자동 장애조치 경계\n\n자동 장애조치는 기본 OFF이며 기존 조회 allowlist와 분리된 정확한 두 명령만 허용합니다.\n동일 장애의 재부팅·재분배는 각각 한 번으로 제한하고, 실행 전 예약과 대상 잠금을 별도\nSQLite에 먼저 기록합니다. 인증·호스트 키·다중 Down·Leader 불일치·부분 수집은\nFail-closed로 중단합니다. 보고서와 감사 저장소에는 비밀번호, Enable Secret,\nCredential ID와 전체 SSH 원문을 저장하지 않습니다. 상세 흐름은\n`docs/AUTOMATIC_REMEDIATION_KO.md`를 참고하십시오.\n\n'''
+              if anchor not in text:
+                  raise SystemExit('security insertion anchor not found')
+              text = text.replace(anchor, addition + anchor, 1)
+          security.write_text(text, encoding='utf-8')
+
+          Path('.github/workflows/bootstrap-remediation-v0.5.0.yml').unlink(missing_ok=True)
+          for part in Path('.github').glob('remediation-v0.5.0.tar.gz.b64.part*'):
+              part.unlink(missing_ok=True)
+          PY
+
+      - name: Commit materialized implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Implementation is already materialized."
+            exit 0
+          fi
+          git commit -m "feat: add automatic controller remediation and reports"
+          git push origin HEAD:feat/automatic-controller-remediation
