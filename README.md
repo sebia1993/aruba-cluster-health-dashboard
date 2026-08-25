@@ -3,7 +3,7 @@
 [![Windows CI](https://github.com/sebia1993/aruba-cluster-health-dashboard/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/sebia1993/aruba-cluster-health-dashboard/actions/workflows/ci-windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Aruba Mobility Master(MM)와 7240XM 클러스터의 여러 상태 정보를 읽기 전용 SSH로 수집하고, 장비 IP 기준으로 상관분석해 `정상 / 주의 / 장애 / 확인 불가`를 판단하는 Windows 네트워크 모니터링 도구입니다.**
+**Aruba Mobility Master(MM)와 7240XM 클러스터 상태를 읽기 전용 SSH로 수집·상관분석하고, 필요할 때만 별도로 켜는 자동 Controller 장애조치를 제공하는 Windows 네트워크 운영 도구입니다.**
 
 단순 Ping 또는 SSH 접속 성공 여부가 아니라 **MM 보고 상태, Active/Standby Client 분배, Cluster Connection-Type을 함께 비교**하고, 일시적인 수집 실패나 순간적인 Client 감소를 실제 WLC 장애로 오인하지 않는 것을 핵심 설계 목표로 삼았습니다.
 
@@ -33,7 +33,7 @@
 | 수집 가용성 | Primary Controller 실패 시 등록된 Fallback 순서로 조회 시도 |
 | 자격 증명 | Windows Credential Manager 또는 세션 메모리 |
 | 로컬 상태 | SQLite + 비밀정보 없는 JSON 설정 |
-| 운영 변경 | **없음 — 설정 모드와 구성 변경 명령을 사용하지 않음** |
+| 운영 변경 | 기본 OFF 자동 장애조치에서 검토된 재부팅·재분배 명령만 별도 실행 |
 | 실행 환경 | Windows 11 x64, PyInstaller onedir 배포 |
 
 ## 해결하려 한 운영 문제
@@ -154,7 +154,7 @@ show lc-cluster group-membership
 접속 환경에 따라 privileged EXEC 진입용 `enable`과 페이징 비활성화용 `no paging`만 세션에서 추가할 수 있습니다.
 
 - 설정 모드에 진입하지 않습니다.
-- 구성 변경 명령을 허용하지 않습니다.
+- 기본 점검에서는 구성 변경 명령을 허용하지 않습니다. 자동 장애조치는 별도 ON/OFF·allowlist·감사 저장소를 사용합니다.
 - SSH 호스트 키는 자격 증명을 보내기 전에 확인합니다.
 - 최초 호스트 키는 저장 과정의 한 화면에서 일괄 승인하며 변경된 키는 자동 교체하지 않습니다.
 - 비밀번호와 Enable Secret은 JSON, SQLite, 일반 로그, 배포물에 저장하지 않습니다.
@@ -209,6 +209,11 @@ F12 개발자 UI 식별 모드는 일반 운영 기능과 분리된 개발 보�
 
 상세 개발 규칙은 [`DEVELOPMENT.md`](DEVELOPMENT.md)에 정리되어 있습니다.
 
+
+## 자동 Controller 장애조치
+
+`v0.5.0`부터 기존 읽기 전용 점검과 별도로 켜고 끌 수 있는 기본 OFF 자동 장애조치를 제공합니다. 등록 Controller 한 대의 명시적 Down을 확인하면 대상 SSH 최대 3회, `reload force`, MM Up 대기, 현재 Leader 재탐색, 대상 `CONNECTED` 확인, `cluster-debug bucketmap rebalance`, 사후 점검을 순서대로 수행합니다. 모든 결과는 별도 SQLite 타임라인과 상급보고용 단일 HTML로 기록합니다. 상세 내용은 [자동 Controller 장애조치](docs/AUTOMATIC_REMEDIATION_KO.md)를 참고하십시오.
+
 ## 개발 및 패키지 검증
 
 개발 기준은 CPython 3.13.15 x64 표준 GIL 빌드입니다.
@@ -237,7 +242,7 @@ Windows onedir 패키지:
 버전 ZIP과 SHA-256:
 
 ```powershell
-.\scripts\package_release.ps1 -Version 0.4.2
+.\scripts\package_release.ps1 -Version 0.5.0
 ```
 
 개발 구조와 변경 원칙은 [`DEVELOPMENT.md`](DEVELOPMENT.md), Release 검증·배포 절차는 [Windows 배포 절차](docs/RELEASE_PROCESS_KO.md)를 참고하십시오.
@@ -261,7 +266,7 @@ Windows onedir 패키지:
 
 다음은 현재 범위가 아닙니다.
 
-- WLC 설정 변경 또는 자동 복구 명령 실행
+- 자동 장애조치 두 명령 이외의 WLC 설정 변경 또는 임의 복구 명령
 - ClearPass/RADIUS 정책 조회
 - SNMP/Streaming Telemetry 기반 장기 시계열 수집
 - 중앙 서버 또는 클라우드 텔레메트리 전송

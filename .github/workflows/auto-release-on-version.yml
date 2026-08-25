@@ -1,0 +1,90 @@
+name: "Tag and publish versioned Windows prerelease"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - pyproject.toml
+      - src/aruba_mini_dashboard/__init__.py
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: aruba-mini-dashboard-version-release
+  cancel-in-progress: false
+
+jobs:
+  tag-and-dispatch:
+    name: Create annotated tag and dispatch verified release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact main commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Resolve and verify source version
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python - <<'PY'
+          import pathlib, re, tomllib
+          project = tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version']
+          source = pathlib.Path('src/aruba_mini_dashboard/__init__.py').read_text(encoding='utf-8')
+          match = re.search(r'^__version__\s*=\s*"([^"]+)"$', source, re.MULTILINE)
+          if match is None or match.group(1) != project:
+              raise SystemExit('project and package versions differ')
+          print(project)
+          PY
+          )"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Unsupported source version: $version" >&2
+            exit 1
+          fi
+          tag="v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Create one annotated tag for the current main commit
+        id: tag
+        shell: bash
+        env:
+          AMD_TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          if git show-ref --tags --verify --quiet "refs/tags/$AMD_TAG"; then
+            existing="$(git rev-parse "refs/tags/$AMD_TAG^{}")"
+            current="$(git rev-parse HEAD)"
+            if [[ "$existing" != "$current" ]]; then
+              echo "Tag $AMD_TAG already identifies a different commit." >&2
+              exit 1
+            fi
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$AMD_TAG" -m "Aruba Mini Dashboard $AMD_TAG"
+          git push origin "refs/tags/$AMD_TAG"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch the existing verified Windows release workflow
+        if: steps.tag.outputs.created == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AMD_TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run release-windows.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f "tag=$AMD_TAG" \
+            -f "release_mode=publish-prerelease" \
+            -f "confirmation=$AMD_TAG"
