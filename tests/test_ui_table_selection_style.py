@@ -25,6 +25,7 @@ from aruba_mini_dashboard.models import (
     Severity,
 )
 from aruba_mini_dashboard.ui.main_window import MainWindow
+from aruba_mini_dashboard.ui.device_table_view import DeviceTableView
 from aruba_mini_dashboard.ui.resources import status_icon
 from aruba_mini_dashboard.ui.widgets import (
     SubtleSelectionTableWidget,
@@ -116,10 +117,13 @@ def test_dashboard_uses_subtle_selection_for_full_and_compact_tables() -> None:
     _app()
     window = MainWindow(FakeCoordinator(), _settings())
 
+    assert isinstance(window.table, DeviceTableView)
+    assert isinstance(window.compact_table, SubtleSelectionTableWidget)
     for table in (window.table, window.compact_table):
-        assert isinstance(table, SubtleSelectionTableWidget)
         assert table.selectionBehavior() == QTableWidget.SelectRows
         assert table.selectionMode() == QTableWidget.SingleSelection
+        assert table.selection_style_revision > 0
+        assert table.selection_style_colors["active_background"]
 
     window._quitting = True
     window.close()

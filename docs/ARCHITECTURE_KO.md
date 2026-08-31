@@ -131,6 +131,7 @@ load distribution      → Active Client 이상
 - Connection-Type baseline
 - anomaly/recovery streak
 - 사건/확인/복구 상태
+- 사건 전이 이벤트 이력
 - 일부 UI/운영 설정 미러
 
 원본 명령 출력과 비밀번호는 SQLite에 저장하지 않습니다.
@@ -195,6 +196,58 @@ PySide6 UI는 도메인 상태를 다시 계산하지 않고 Correlation/Inciden
 - 마지막 점검 시각
 
 폭이 작은 창은 등록된 Controller의 핵심 상태에 집중하고, 넓은 창은 전체 장비 정보를 표시합니다.
+
+### 장비표 Model/View 흐름
+
+넓은 화면의 전체 장비표는 다음 파이프라인을 사용합니다.
+
+```mermaid
+flowchart LR
+    RS["RuntimeSnapshot"] --> VM["DashboardView / DeviceView"]
+    VM --> TM["DeviceTableModel<br/>snapshot 교체"]
+    TM --> FM["DeviceFilterModel<br/>검색·상태·Incident·감시 범위"]
+    FM --> SORT["전역 정렬"]
+    SORT --> PM["DevicePageModel<br/>저사양 모드 250대 slice"]
+    PM --> TV["DeviceTableView"]
+```
+
+- `DeviceTableModel` 은 `DeviceView` snapshot, 활성 Incident IP, 감시 범위 IP를
+  한 번에 교체하며 Qt role로 표시·정렬·접근성 데이터를 제공합니다.
+- `DeviceFilterModel` 이 검색·상태·문제만 보기·감시 대상만 보기와 정렬을
+  전체 결과에 먼저 적용합니다.
+- `DevicePageModel` 은 정렬된 필터 결과를 나중에 페이지로 잘라냅니다.
+  따라서 페이지 내부만 정렬되는 오류를 만들지 않습니다.
+- 선택은 표 행 번호가 아닌 장비 IP role을 식별자로 복원합니다. 필터,
+  정렬, 페이지, compact/full 반응형 전환으로 행 위치가 바뀌어도 선택
+  대상을 행 위치와 혼동하지 않습니다.
+
+### 운영 개요와 세션 추세
+
+`OverviewPage` 는 이미 만들어진 `DashboardView`/`DeviceView`와 Incident lifecycle
+상태를 요약해 전체 상태, Controller Up, Active Client, 활성 Incident를
+표시합니다. ACK는 알림 확인이지 복구가 아니므로 Incident 건수는
+`active` lifecycle 값만 기준으로 계산합니다. 대규모 inventory에서도 QWidget을
+장비 수만큼 만들지 않도록 Controller 카드는 앞의 8대까지만 만들고 나머지는
+전체 장비표로 안내합니다.
+
+`CompactPage` 는 작은 창의 위젯 구성과 이미 파생된 `DeviceView` 행 표현만
+소유합니다. `MainWindow` 는 두 page의 합성, PollCoordinator 신호, system tray,
+전역 메뉴와 기존 900/1000px 반응형 전환을 계속 소유합니다.
+
+Active Client sparkline은 `OverviewPage` 내부의 최대 60개 `deque`에만
+유지됩니다. 이 값은 표현용 세션 데이터이며 `AppSettings`, JSON, SQLite 및
+사건 저장소에 쓰지 않습니다. 프로세스를 종료하면 사라지므로 장기
+시계열 데이터로 해석하면 안 됩니다.
+
+### 최근 이벤트 조회
+
+`MainWindow` 는 최근 이벤트 표시를 위해 SQLite 연결이나 SQL에 직접
+접근하지 않습니다. 주입된 저장소의 기존 공개
+`SQLiteStorage.list_events(limit=10)`을 호출하면 저장소가 새 이벤트부터
+내림차순으로 반환합니다. UI는 이 결과를 운영용 요약으로 변환하고 최대
+5개를 표시합니다. 이벤트 조회나 표현이 실패해도 보조 UI만
+`불러오기 지연`으로 표시하고 PollCoordinator·Incident Manager·저장 처리에
+영향을 주지 않습니다.
 
 ## 6. 외부 전송 경계
 

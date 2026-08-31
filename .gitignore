@@ -30,6 +30,10 @@ settings
 settings.json
 settings.*
 .settings.*
+# Source package for the SettingsDialog presentation split is not runtime data.
+!src/aruba_mini_dashboard/ui/settings/
+!src/aruba_mini_dashboard/ui/settings/**
+src/aruba_mini_dashboard/ui/settings/__pycache__/
 .aruba-mini-dashboard.lock
 known_hosts
 known_hosts.*

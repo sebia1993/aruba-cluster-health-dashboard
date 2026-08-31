@@ -3,16 +3,18 @@ from __future__ import annotations
 import logging
 import time
 import weakref
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime
 from typing import Any, Callable
 
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QCloseEvent, QIcon, QKeySequence, QShowEvent
+from PySide6.QtGui import QAction, QCloseEvent, QIcon, QKeySequence, QShowEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFrame,
@@ -20,6 +22,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -40,32 +43,21 @@ from aruba_mini_dashboard.config import AppSettings, settings_fingerprint
 
 from .developer_inspector import DeveloperInspectorController, UiElementMetadata
 from .detail_dialog import DetailDialog
+from .device_table_view import DeviceTableView
+from .models import DeviceFilterModel, DevicePageModel, DeviceTableModel
+from .pages import CompactPage, OverviewPage
 from .resources import status_icon
 from .settings_dialog import SettingsDialog
+from .theme import normalize_status_key, status_colors
 from .view_models import DashboardView, DeviceView, display, sequence, severity_key, value
 from .widgets import (
     NoWheelSlider,
-    SubtleSelectionTableWidget,
     fit_window_to_available_screen,
 )
 
 
 LOGGER = logging.getLogger(__name__)
 PERFORMANCE_LOGGER = logging.getLogger("aruba_mini_dashboard.performance")
-
-
-STATUS_STYLES = {
-    "normal": ("#176B42", "#E8F7EF", "#2AA56A"),
-    "ok": ("#176B42", "#E8F7EF", "#2AA56A"),
-    "healthy": ("#176B42", "#E8F7EF", "#2AA56A"),
-    "attention": ("#805500", "#FFF5D8", "#E7A900"),
-    "warning": ("#805500", "#FFF5D8", "#E7A900"),
-    "degraded": ("#805500", "#FFF5D8", "#E7A900"),
-    "failure": ("#8A1C1C", "#FDECEC", "#D33A3A"),
-    "critical": ("#8A1C1C", "#FDECEC", "#D33A3A"),
-    "down": ("#8A1C1C", "#FDECEC", "#D33A3A"),
-    "unknown": ("#374151", "#F1F3F5", "#77808D"),
-}
 
 
 class HostKeyApprovalDialog(QDialog):
@@ -159,19 +151,8 @@ class MainWindow(QMainWindow):
 
     # Keep the long-standing first eight columns stable for operators, tests,
     # and assistive tooling, then add the explicit monitoring-scope fields.
-    COLUMNS = (
-        "IP",
-        "장비명",
-        "MM 보고 상태",
-        "Active",
-        "Standby",
-        "Connection-Type",
-        "종합 상태",
-        "마지막 확인",
-        "감시 범위",
-        "분배 상태",
-    )
-    COMPACT_COLUMNS = ("컨트롤러", "상태", "클러스터 분배")
+    COLUMNS = DeviceTableModel.COLUMNS
+    COMPACT_COLUMNS = CompactPage.COLUMNS
     COMPACT_MODE = "compact"
     FULL_MODE = "full"
     FULL_ENTER_WIDTH = 1000
@@ -222,13 +203,20 @@ class MainWindow(QMainWindow):
         self._dashboard_mode: str | None = None
         self._latest_display_devices: list[DeviceView] = []
         self._table_dirty = {self.COMPACT_MODE: True, self.FULL_MODE: True}
-        self._full_row_signatures: dict[str, tuple[Any, ...]] = {}
-        self._compact_row_signatures: dict[str, tuple[Any, ...]] = {}
+        self.device_table_model = DeviceTableModel(parent=self)
+        self.device_filter_model = DeviceFilterModel(self.device_table_model, self)
+        self.device_page_model = DevicePageModel(
+            self.device_filter_model,
+            self,
+            page_size=self.LOW_SPEC_FULL_PAGE_SIZE,
+        )
         self._full_page_index = 0
         self._full_sort_column = 0
         self._full_sort_order = Qt.AscendingOrder
         self._updating_full_sort = False
         self._pending_full_selection_ip = ""
+        self._selected_device_ip = ""
+        self._selection_reconcile_scheduled = False
         self._hidden_to_tray = False
         self._initial_setup_offer_scheduled = False
         self._initial_setup_offered = False
@@ -314,6 +302,9 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self.reason_label)
         root.addWidget(self.status_card)
 
+        self.overview_page = OverviewPage(page)
+        root.addWidget(self.overview_page)
+
         time_row = QHBoxLayout()
         self.last_check_label = QLabel("마지막 점검: -")
         self.next_check_label = QLabel("다음 점검: 일시정지")
@@ -347,6 +338,36 @@ class MainWindow(QMainWindow):
             controls.setColumnStretch(column, 1)
         root.addLayout(controls)
 
+        self.device_filter_bar = QWidget(page)
+        self.device_filter_bar.setAccessibleName("장비 검색 및 필터")
+        filter_layout = QHBoxLayout(self.device_filter_bar)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(5)
+        self.search_input = QLineEdit(self.device_filter_bar)
+        self.search_input.setPlaceholderText("IP, alias, hostname 검색")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setAccessibleName("장비 검색")
+        self.search_input.setAccessibleDescription("IP, alias 또는 hostname으로 장비를 검색합니다.")
+        filter_layout.addWidget(self.search_input, 1)
+        self.status_filter_combo = QComboBox(self.device_filter_bar)
+        self.status_filter_combo.setAccessibleName("상태 필터")
+        for label, key in (
+            ("전체 상태", "all"),
+            ("정상", "normal"),
+            ("주의", "attention"),
+            ("장애", "failure"),
+            ("확인 불가", "unknown"),
+        ):
+            self.status_filter_combo.addItem(label, key)
+        filter_layout.addWidget(self.status_filter_combo)
+        self.problem_only_toggle = QCheckBox("문제만 보기", self.device_filter_bar)
+        self.problem_only_toggle.setAccessibleDescription("활성 Incident가 있는 장비만 표시합니다.")
+        filter_layout.addWidget(self.problem_only_toggle)
+        self.monitoring_only_toggle = QCheckBox("감시 대상만", self.device_filter_bar)
+        self.monitoring_only_toggle.setAccessibleDescription("현재 등록된 감시 대상만 표시합니다.")
+        filter_layout.addWidget(self.monitoring_only_toggle)
+        root.addWidget(self.device_filter_bar)
+
         self.full_page_bar = QWidget(page)
         self.full_page_bar.setAccessibleName("전체 장비 페이지 이동")
         page_layout = QHBoxLayout(self.full_page_bar)
@@ -371,93 +392,47 @@ class MainWindow(QMainWindow):
         self.full_page_bar.hide()
         root.addWidget(self.full_page_bar)
 
-        self.table = SubtleSelectionTableWidget(0, len(self.COLUMNS), page)
-        self.table.setHorizontalHeaderLabels(self.COLUMNS)
-        self._configure_table(self.table)
+        self.table = DeviceTableView(page)
+        self.table.setModel(self.device_page_model)
+        self.table.configure_for_dashboard()
+        self.table.setAlternatingRowColors(True)
+        # ResizeToContents otherwise scans every row and defeats Model/View
+        # virtualization on large inventories. Fifty representative rows keep
+        # useful automatic widths without O(n) icon/style work.
+        self.table.horizontalHeader().setResizeContentsPrecision(50)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setStretchLastSection(True)
-        # The complete DeviceView list is sorted before a page slice is taken.
-        # Native QTableWidget sorting would only reorder the visible page.
-        self.table.setSortingEnabled(False)
+        # DevicePageModel delegates sort requests to the full filtered model,
+        # then slices the globally sorted rows for low-spec pagination.
+        self.table.setSortingEnabled(True)
         self.table.horizontalHeader().setSectionsClickable(True)
         self.table.horizontalHeader().setSortIndicatorShown(True)
         self.table.horizontalHeader().setSortIndicator(0, Qt.AscendingOrder)
         self.table.horizontalHeader().sortIndicatorChanged.connect(self._full_sort_changed)
+        self.search_input.textChanged.connect(self._search_filter_changed)
+        self.status_filter_combo.currentIndexChanged.connect(self._status_filter_changed)
+        self.problem_only_toggle.toggled.connect(self._incident_filter_changed)
+        self.monitoring_only_toggle.toggled.connect(self._monitoring_filter_changed)
         self.full_previous_button.clicked.connect(lambda: self._change_full_page(-1))
         self.full_next_button.clicked.connect(lambda: self._change_full_page(1))
         root.addWidget(self.table, 1)
         return page
 
     def _build_compact_page(self) -> QWidget:
-        page = QWidget(self)
-        root = QVBoxLayout(page)
-        root.setContentsMargins(8, 7, 8, 7)
-        root.setSpacing(5)
-
-        self.compact_status_card = QFrame(page)
-        self.compact_status_card.setObjectName("compactStatusCard")
-        status_layout = QHBoxLayout(self.compact_status_card)
-        status_layout.setContentsMargins(10, 6, 10, 6)
-        status_layout.setSpacing(6)
-        self.compact_status_label = QLabel("확인 불가", self.compact_status_card)
-        font = self.compact_status_label.font()
-        font.setPointSize(max(font.pointSize() + 4, 13))
-        font.setBold(True)
-        self.compact_status_label.setFont(font)
-        self.compact_status_label.setAccessibleName("전체 상태")
-        status_layout.addWidget(self.compact_status_label)
-        self.compact_busy_label = QLabel("", self.compact_status_card)
-        self.compact_busy_label.setStyleSheet("color: #52606D;")
-        status_layout.addWidget(self.compact_busy_label)
-        status_layout.addStretch(1)
-        self.compact_last_check_label = QLabel("마지막: -", self.compact_status_card)
-        self.compact_last_check_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.compact_last_check_label.setAccessibleName("마지막 점검 시각")
-        status_layout.addWidget(self.compact_last_check_label)
-        root.addWidget(self.compact_status_card)
-
-        controls = QHBoxLayout()
-        controls.setSpacing(5)
-        self.compact_check_now_button = QPushButton("지금 점검", page)
-        self.compact_auto_button = QPushButton("자동 시작", page)
-        self.compact_more_button = QToolButton(page)
-        self.compact_more_button.setText("더보기")
-        self.compact_more_button.setPopupMode(QToolButton.InstantPopup)
+        page = CompactPage(self)
+        # Keep the long-standing MainWindow attributes as compatibility aliases
+        # while presentation construction and compact row rendering live on the
+        # page component.
+        self.compact_status_card = page.status_card
+        self.compact_status_label = page.status_label
+        self.compact_busy_label = page.busy_label
+        self.compact_last_check_label = page.last_check_label
+        self.compact_check_now_button = page.check_now_button
+        self.compact_auto_button = page.auto_button
+        self.compact_more_button = page.more_button
+        self.compact_table = page.table
         self._build_compact_more_menu()
-        for button in (
-            self.compact_check_now_button,
-            self.compact_auto_button,
-            self.compact_more_button,
-        ):
-            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            controls.addWidget(button, 1)
-        root.addLayout(controls)
-
-        self.compact_table = SubtleSelectionTableWidget(0, len(self.COMPACT_COLUMNS), page)
-        self.compact_table.setHorizontalHeaderLabels(self.COMPACT_COLUMNS)
-        self._configure_table(self.compact_table)
-        self.compact_table.setSortingEnabled(False)
-        self.compact_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.compact_table.setTextElideMode(Qt.ElideMiddle)
-        self.compact_table.verticalHeader().setDefaultSectionSize(27)
-        header = self.compact_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.Fixed)
-        header.setSectionResizeMode(2, QHeaderView.Fixed)
-        header.resizeSection(1, 78)
-        header.resizeSection(2, 126)
-        root.addWidget(self.compact_table, 1)
         return page
-
-    @staticmethod
-    def _configure_table(table: QTableWidget) -> None:
-        table.setAlternatingRowColors(True)
-        table.setSelectionBehavior(QTableWidget.SelectRows)
-        table.setSelectionMode(QTableWidget.SingleSelection)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
-        table.verticalHeader().setVisible(False)
-        table.setHorizontalScrollMode(QTableWidget.ScrollPerPixel)
-        table.setVerticalScrollMode(QTableWidget.ScrollPerPixel)
 
     def _build_compact_more_menu(self) -> None:
         self.compact_more_menu = QMenu(self)
@@ -521,7 +496,7 @@ class MainWindow(QMainWindow):
         else:
             self.coordinator.start_automatic()
 
-    def _active_table(self) -> QTableWidget:
+    def _active_table(self) -> QTableWidget | DeviceTableView:
         if self._dashboard_mode == self.FULL_MODE:
             return self.table
         return self.compact_table
@@ -552,6 +527,7 @@ class MainWindow(QMainWindow):
             if target == self.COMPACT_MODE and not selected:
                 # An unregistered full-view inventory row must not remain an
                 # actionable hidden selection after entering compact mode.
+                self._selected_device_ip = ""
                 self.table.clearSelection()
                 self.compact_table.clearSelection()
                 self._selection_changed()
@@ -1081,6 +1057,17 @@ class MainWindow(QMainWindow):
     def _populate_table(self, devices: list[DeviceView]) -> None:
         selected_ip = self._selected_ip()
         display_devices = self._scope_adjusted_devices(devices)
+        compact_devices = self._compact_devices(display_devices)
+        selectable_ips = {device.ip for device in display_devices}
+        if self._dashboard_mode == self.COMPACT_MODE:
+            selectable_ips = {device.ip for device in compact_devices}
+        if selected_ip and selected_ip not in selectable_ips:
+            # A vanished or newly out-of-scope controller must not survive as
+            # a hidden actionable selection after a snapshot refresh.
+            self._selected_device_ip = ""
+            self.table.clearSelection()
+            self.compact_table.clearSelection()
+            selected_ip = ""
         self._latest_display_devices = display_devices
         for device in display_devices:
             self._devices_by_ip.setdefault(device.ip, device.source)
@@ -1094,6 +1081,72 @@ class MainWindow(QMainWindow):
             self._render_active_table_if_needed()
         if selected_ip:
             self._select_ip(self._active_table(), selected_ip)
+        if self._current_view is not None:
+            try:
+                self.overview_page.update_dashboard(
+                    self._current_view,
+                    compact_devices,
+                    self._active_incidents,
+                )
+            except Exception as exc:  # supplementary UI must not affect polling
+                LOGGER.warning("OVERVIEW_PRESENTATION_UNAVAILABLE: %s", type(exc).__name__)
+        self._refresh_recent_events()
+
+    def _refresh_recent_events(self) -> None:
+        loader = getattr(self.storage, "list_events", None)
+        if not callable(loader):
+            self.overview_page.set_recent_events(())
+            return
+        try:
+            stored = loader(limit=10)
+            events = [self._present_recent_event(item) for item in stored]
+            self.overview_page.set_recent_events(
+                [event for event in events if event is not None]
+            )
+        except Exception as exc:
+            LOGGER.warning("RECENT_EVENTS_UNAVAILABLE: %s", type(exc).__name__)
+            self.overview_page.set_recent_events((), stale=True)
+
+    def _present_recent_event(self, source: Any) -> dict[str, str] | None:
+        if not isinstance(source, Mapping):
+            return None
+        event_type = display(source.get("event_type", ""), "").casefold()
+        occurred_at = display(source.get("occurred_at", ""), "")
+        ip = display(source.get("ip", ""), "")
+        payload = source.get("payload", {})
+        if not isinstance(payload, Mapping):
+            payload = {}
+        incident_type = display(payload.get("incident_type", ""), "")
+        reason = display(payload.get("reason", ""), "")[:240]
+        severity = normalize_status_key(payload.get("severity", "unknown"))
+        device = next(
+            (item for item in self._latest_display_devices if item.ip == ip),
+            None,
+        )
+        name = (
+            (device.alias or device.hostname or device.ip)
+            if device is not None
+            else (ip or "전체 수집")
+        )
+        if event_type == "recovered":
+            summary = f"{name} 복구"
+            severity = "normal"
+        elif event_type == "acknowledged":
+            summary = f"{name} 알림 확인"
+            severity = "unknown"
+        elif event_type == "superseded":
+            summary = f"{name} 이벤트 종료/감시 범위 변경"
+            severity = "unknown"
+        elif event_type in {"activated", "updated"}:
+            summary = f"{name} {reason or incident_type or '상태 변경'}"
+        else:
+            summary = f"{name} {reason or incident_type or event_type or '이벤트'}"
+        return {
+            "occurred_at": occurred_at,
+            "summary": summary,
+            "status": severity,
+            "detail": incident_type,
+        }
 
     def _render_active_table_if_needed(self) -> None:
         mode = self._dashboard_mode
@@ -1117,114 +1170,55 @@ class MainWindow(QMainWindow):
             )
 
     def _populate_full_table(self, devices: list[DeviceView]) -> None:
-        rows: list[tuple[DeviceView, bool, str, str, tuple[str, ...]]] = []
-        for device in devices:
-            registered = self._device_is_registered(device)
-            display_status = device.status if registered else "감시 제외"
-            display_status_key = device.status_key if registered else "unknown"
-            values = (
-                device.ip,
-                device.alias or device.hostname or "-",
-                device.controller_status,
-                device.active_clients,
-                device.standby_clients,
-                device.connection_type,
-                display_status,
-                device.last_seen,
-                "등록" if registered else "미등록 · 감시 제외",
-                device.distribution_status,
-            )
-            rows.append((device, registered, display_status, display_status_key, values))
-
-        rows = self._sort_full_rows(rows)
-        total = len(rows)
-        if self._pending_full_selection_ip and self._full_paging_enabled(total):
-            selected_index = next(
-                (
-                    index
-                    for index, row in enumerate(rows)
-                    if row[0].ip == self._pending_full_selection_ip
-                ),
-                None,
-            )
-            if selected_index is not None:
-                self._full_page_index = selected_index // self.LOW_SPEC_FULL_PAGE_SIZE
-        self._pending_full_selection_ip = ""
-        page_count = self._full_page_count(total)
-        self._full_page_index = min(self._full_page_index, max(0, page_count - 1))
-        paged = self._full_paging_enabled(total)
-        if paged:
-            start = self._full_page_index * self.LOW_SPEC_FULL_PAGE_SIZE
-            visible_rows = rows[start : start + self.LOW_SPEC_FULL_PAGE_SIZE]
-        else:
-            start = 0
-            visible_rows = rows
-        self._update_full_page_bar(total, start, len(visible_rows), page_count, paged)
-
-        signatures = {
-            device.ip: (*values, registered, display_status_key)
-            for device, registered, _display_status, display_status_key, values in visible_rows
+        selected_ip = self._pending_full_selection_ip or self._selected_ip()
+        active_incident_ips = {
+            display(value(incident, "ip", ""), "")
+            for incident in self._active_incidents
+            if bool(value(incident, "active", True))
+            and display(value(incident, "ip", ""), "")
         }
-        identities = [device.ip for device, *_rest in visible_rows]
-        shape_changed = self._ensure_table_shape(self.table, identities, len(self.COLUMNS))
-        if not shape_changed and signatures == self._full_row_signatures:
-            return
-        self.table.setUpdatesEnabled(False)
+        monitoring_scope_ips = {
+            device.ip for device in devices if self._device_is_registered(device)
+        }
+        self.device_table_model.set_devices(
+            devices,
+            active_incident_ips=active_incident_ips,
+            monitoring_scope_ips=monitoring_scope_ips,
+        )
+        self.device_filter_model.sort(self._full_sort_column, self._full_sort_order)
+
+        total = self.device_filter_model.rowCount()
+        paged = self._full_paging_enabled(total)
+        self.device_page_model.set_paging(paged, self.LOW_SPEC_FULL_PAGE_SIZE)
+        if selected_ip:
+            page_index = self.device_page_model.page_for_ip(selected_ip)
+            if page_index >= 0:
+                self.device_page_model.set_page(page_index)
+            else:
+                self._selected_device_ip = ""
+                self.table.clearSelection()
+                self.compact_table.clearSelection()
+                self.device_page_model.set_page(0)
+        else:
+            self.device_page_model.set_page(self._full_page_index)
+        self._pending_full_selection_ip = ""
+        self._sync_full_page_bar()
         self._updating_full_sort = True
         try:
-            for row, (device, registered, _display_status, display_status_key, values) in enumerate(
-                visible_rows
-            ):
-                if (
-                    not shape_changed
-                    and self._full_row_signatures.get(device.ip) == signatures[device.ip]
-                ):
-                    continue
-                foreground, _background, _accent = STATUS_STYLES.get(
-                    display_status_key, STATUS_STYLES["unknown"]
-                )
-                for column, text in enumerate(values):
-                    item = self.table.item(row, column) or QTableWidgetItem()
-                    if item.text() != text:
-                        item.setText(text)
-                    item.setData(Qt.UserRole, device.ip)
-                    item.setToolTip(str(text))
-                    if column == 6:
-                        item.setForeground(QColor(foreground))
-                        font = item.font()
-                        font.setBold(True)
-                        item.setFont(font)
-                        item.setIcon(status_icon(display_status_key))
-                    elif column == 8 and not registered:
-                        item.setForeground(QColor(STATUS_STYLES["unknown"][0]))
-                    if self.table.item(row, column) is None:
-                        self.table.setItem(row, column, item)
             self.table.horizontalHeader().setSortIndicator(
                 self._full_sort_column,
                 self._full_sort_order,
             )
         finally:
             self._updating_full_sort = False
-            self.table.setUpdatesEnabled(True)
-        self._full_row_signatures = signatures
-
-    def _sort_full_rows(
-        self,
-        rows: list[tuple[DeviceView, bool, str, str, tuple[str, ...]]],
-    ) -> list[tuple[DeviceView, bool, str, str, tuple[str, ...]]]:
-        """Sort the complete device set before applying a low-spec page slice."""
-
-        column = min(max(self._full_sort_column, 0), len(self.COLUMNS) - 1)
-        ordered = sorted(rows, key=lambda row: row[0].ip.casefold())
-        ordered.sort(
-            key=lambda row: str(row[4][column]).casefold(),
-            reverse=self._full_sort_order == Qt.DescendingOrder,
-        )
-        return ordered
 
     def _full_paging_enabled(self, total: int | None = None) -> bool:
         if total is None:
-            total = len(self._latest_display_devices)
+            total = (
+                self.device_filter_model.rowCount()
+                if self.device_table_model.rowCount()
+                else len(self._latest_display_devices)
+            )
         performance = getattr(self.settings, "performance", None)
         return bool(
             getattr(performance, "low_spec_mode", False)
@@ -1232,6 +1226,8 @@ class MainWindow(QMainWindow):
         )
 
     def _full_page_count(self, total: int | None = None) -> int:
+        if total is None and self.device_table_model.rowCount():
+            return self.device_page_model.page_count()
         if total is None:
             total = len(self._latest_display_devices)
         if not self._full_paging_enabled(total):
@@ -1243,6 +1239,8 @@ class MainWindow(QMainWindow):
             max(0, self._full_page_index),
             self._full_page_count() - 1,
         )
+        if self.device_table_model.rowCount():
+            self.device_page_model.set_page(self._full_page_index)
 
     def _update_full_page_bar(
         self,
@@ -1268,15 +1266,17 @@ class MainWindow(QMainWindow):
 
     @Slot(int)
     def _change_full_page(self, offset: int) -> None:
-        page_count = self._full_page_count()
-        target = min(max(0, self._full_page_index + offset), page_count - 1)
+        target = min(
+            max(0, self.device_page_model.current_page + offset),
+            self.device_page_model.page_count() - 1,
+        )
         if target == self._full_page_index:
             return
+        self._selected_device_ip = ""
         self.table.clearSelection()
         self.compact_table.clearSelection()
-        self._full_page_index = target
-        self._table_dirty[self.FULL_MODE] = True
-        self._render_active_table_if_needed()
+        self.device_page_model.set_page(target)
+        self._sync_full_page_bar()
         self._selection_changed()
 
     @Slot(int, Qt.SortOrder)
@@ -1286,95 +1286,90 @@ class MainWindow(QMainWindow):
         selected_ip = self._selected_ip()
         self._full_sort_column = column
         self._full_sort_order = order
-        if selected_ip:
-            self._move_full_page_to_ip(selected_ip)
+        # QTableView has already delegated this request through
+        # DevicePageModel to the global filter model before the header signal.
+        if selected_ip and self.device_filter_model.row_for_ip(selected_ip) >= 0:
+            self.device_page_model.set_page(self.device_page_model.page_for_ip(selected_ip))
         else:
-            self._clamp_full_page()
-        self._table_dirty[self.FULL_MODE] = True
-        self._render_active_table_if_needed()
+            self.device_page_model.set_page(0)
+        self._sync_full_page_bar()
         if selected_ip:
             self._select_ip(self.table, selected_ip)
 
     def _move_full_page_to_ip(self, ip: str) -> None:
-        if not self._full_paging_enabled():
+        if self.device_table_model.rowCount():
+            page_index = self.device_page_model.page_for_ip(ip)
+            if page_index >= 0:
+                self.device_page_model.set_page(page_index)
+                self._sync_full_page_bar()
+                self._pending_full_selection_ip = ""
+                return
+        if not getattr(getattr(self.settings, "performance", None), "low_spec_mode", False):
             self._full_page_index = 0
             self._pending_full_selection_ip = ""
             return
-        # Resolve the selected IP while the already-required full render sorts
-        # the complete dataset. Hidden/tray snapshot updates therefore avoid a
-        # second full-device transformation merely to calculate a page.
+        # Resolve against the latest globally filtered/sorted model when the
+        # hidden full page is rendered.
         self._pending_full_selection_ip = ip
         self._table_dirty[self.FULL_MODE] = True
 
-    def _populate_compact_table(self, devices: list[DeviceView]) -> None:
-        rows: list[tuple[DeviceView, str, tuple[str, ...], str, str]] = []
-        signatures: dict[str, tuple[Any, ...]] = {}
-        for device in devices:
-            name = device.alias or device.hostname or "컨트롤러"
-            values = (
-                f"{name} · {device.ip}",
-                device.controller_status,
-                device.distribution_status,
-            )
-            controller_key = {
-                "up": "normal",
-                "down": "failure",
-                "missing": "attention",
-            }.get(device.controller_state, "unknown")
-            distribution_key = {
-                "normal": "normal",
-                "observing": "attention",
-                "anomalous": "attention",
-                "recovering": "attention",
-                "low_usage": "attention",
-                "missing": "attention",
-            }.get(device.distribution_state, "unknown")
-            signatures[device.ip] = (*values, controller_key, distribution_key)
-            rows.append((device, name, values, controller_key, distribution_key))
-        identities = [device.ip for device in devices]
-        shape_changed = self._ensure_table_shape(
-            self.compact_table,
-            identities,
-            len(self.COMPACT_COLUMNS),
+    def _sync_full_page_bar(self) -> None:
+        total = self.device_filter_model.rowCount()
+        paged = self.device_page_model.paging_enabled and total > self.LOW_SPEC_FULL_PAGE_SIZE
+        self._full_page_index = self.device_page_model.current_page
+        start = self.device_page_model.page_start() if paged else 0
+        visible_count = self.device_page_model.rowCount()
+        self._update_full_page_bar(
+            total,
+            start,
+            visible_count,
+            self.device_page_model.page_count(),
+            paged,
         )
-        if not shape_changed and signatures == self._compact_row_signatures:
-            return
-        self.compact_table.setUpdatesEnabled(False)
-        for row, (device, name, values, controller_key, distribution_key) in enumerate(rows):
-            if not shape_changed and self._compact_row_signatures.get(device.ip) == signatures[device.ip]:
-                continue
-            for column, text in enumerate(values):
-                item = self.compact_table.item(row, column) or QTableWidgetItem()
-                if item.text() != text:
-                    item.setText(text)
-                item.setData(Qt.UserRole, device.ip)
-                item.setToolTip(f"{name}\nIP: {device.ip}" if column == 0 else str(text))
-                if column in {1, 2}:
-                    style_key = controller_key if column == 1 else distribution_key
-                    foreground = STATUS_STYLES.get(style_key, STATUS_STYLES["unknown"])[0]
-                    item.setForeground(QColor(foreground))
-                    font = item.font()
-                    font.setBold(True)
-                    item.setFont(font)
-                    item.setIcon(status_icon(style_key))
-                if self.compact_table.item(row, column) is None:
-                    self.compact_table.setItem(row, column, item)
-        self.compact_table.setUpdatesEnabled(True)
-        self._compact_row_signatures = signatures
 
-    @staticmethod
-    def _ensure_table_shape(table: QTableWidget, identities: list[str], columns: int) -> bool:
-        existing = [
-            display(table.item(row, 0).data(Qt.UserRole), "")
-            if table.item(row, 0) is not None
-            else ""
-            for row in range(table.rowCount())
-        ]
-        if existing != identities or table.columnCount() != columns:
-            table.clearContents()
-            table.setRowCount(len(identities))
-            return True
-        return False
+    def _apply_full_filter_change(self, selected_ip: str) -> None:
+        total = self.device_filter_model.rowCount()
+        self.device_page_model.set_paging(
+            self._full_paging_enabled(total),
+            self.LOW_SPEC_FULL_PAGE_SIZE,
+        )
+        if selected_ip and self.device_filter_model.row_for_ip(selected_ip) >= 0:
+            self.device_page_model.set_page(self.device_page_model.page_for_ip(selected_ip))
+            self._select_ip(self.table, selected_ip)
+        else:
+            self.device_page_model.set_page(0)
+            self._selected_device_ip = ""
+            self.table.clearSelection()
+            self.compact_table.clearSelection()
+        self._sync_full_page_bar()
+        self._selection_changed()
+
+    @Slot(str)
+    def _search_filter_changed(self, text: str) -> None:
+        selected_ip = self._selected_ip()
+        self.device_filter_model.set_search_text(text)
+        self._apply_full_filter_change(selected_ip)
+
+    @Slot(int)
+    def _status_filter_changed(self, index: int) -> None:
+        selected_ip = self._selected_ip()
+        self.device_filter_model.set_status_filter(self.status_filter_combo.itemData(index))
+        self._apply_full_filter_change(selected_ip)
+
+    @Slot(bool)
+    def _incident_filter_changed(self, enabled: bool) -> None:
+        selected_ip = self._selected_ip()
+        self.device_filter_model.set_incident_only(enabled)
+        self._apply_full_filter_change(selected_ip)
+
+    @Slot(bool)
+    def _monitoring_filter_changed(self, enabled: bool) -> None:
+        selected_ip = self._selected_ip()
+        self.device_filter_model.set_monitoring_only(enabled)
+        self._apply_full_filter_change(selected_ip)
+
+    def _populate_compact_table(self, devices: list[DeviceView]) -> None:
+        self.compact_page.populate_devices(devices)
 
     def _compact_devices(self, devices: list[DeviceView]) -> list[DeviceView]:
         by_ip = {device.ip: device for device in devices}
@@ -1455,7 +1450,7 @@ class MainWindow(QMainWindow):
         return device.is_registered
 
     @staticmethod
-    def _select_ip(table: QTableWidget, ip: str) -> bool:
+    def _select_ip(table: QTableWidget | DeviceTableView, ip: str) -> bool:
         for row in range(table.rowCount()):
             item = table.item(row, 0)
             if item is not None and display(item.data(Qt.UserRole), "") == ip:
@@ -1464,7 +1459,10 @@ class MainWindow(QMainWindow):
         return False
 
     def _apply_status_style(self, key: str) -> None:
-        foreground, background, accent = STATUS_STYLES.get(key, STATUS_STYLES["unknown"])
+        colors = status_colors(key, self.palette())
+        foreground = colors.foreground.name()
+        background = colors.background.name()
+        accent = colors.accent.name()
         self.status_card.setStyleSheet(
             "QFrame#statusCard {"
             f"background: {background}; border: 1px solid {accent}; border-left: 5px solid {accent};"
@@ -2100,11 +2098,21 @@ class MainWindow(QMainWindow):
     @Slot()
     def _selection_changed(self) -> None:
         self._set_acknowledgement_mode(False)
+        selected_ip = self._actual_selected_ip()
+        if selected_ip:
+            self._selected_device_ip = selected_ip
+        else:
+            if self._selected_device_ip and not self._selection_reconcile_scheduled:
+                # Proxy resets briefly clear Qt selection before this event
+                # stack restores it by IP. Reconcile on the next turn so a
+                # deliberate user deselection still clears the action target.
+                self._selection_reconcile_scheduled = True
+                QTimer.singleShot(0, self._reconcile_selection_anchor)
+            selected_ip = self._selected_device_ip
         if self._current_view is None or self.coordinator.busy:
             self.ack_button.setEnabled(False)
             self.compact_ack_action.setEnabled(False)
             return
-        selected_ip = self._selected_ip()
         target_ip = selected_ip
         if selected_ip:
             selected_device = self._device_for_ip(selected_ip)
@@ -2127,6 +2135,18 @@ class MainWindow(QMainWindow):
             self._set_acknowledgement_mode(True)
         self.ack_button.setEnabled(enabled)
         self.compact_ack_action.setEnabled(enabled)
+
+    @Slot()
+    def _reconcile_selection_anchor(self) -> None:
+        self._selection_reconcile_scheduled = False
+        selected_ip = self._actual_selected_ip()
+        if selected_ip:
+            self._selected_device_ip = selected_ip
+            return
+        if not self._selected_device_ip:
+            return
+        self._selected_device_ip = ""
+        self._selection_changed()
 
     def _confirm_connection_type_baseline(
         self,
@@ -2207,7 +2227,7 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage("확인 처리할 문제 IP를 선택하세요.", 5000)
 
-    def _selected_ip(self) -> str:
+    def _actual_selected_ip(self) -> str:
         tables = (self._active_table(), self.table, self.compact_table)
         seen: set[int] = set()
         for table in tables:
@@ -2218,6 +2238,9 @@ class MainWindow(QMainWindow):
             if selected:
                 return display(selected[0].data(Qt.UserRole), "")
         return ""
+
+    def _selected_ip(self) -> str:
+        return self._actual_selected_ip() or self._selected_device_ip
 
     @staticmethod
     def _incident_is_active(incident: Any) -> bool:

@@ -62,9 +62,30 @@ no paging
 | `services/poll_coordinator.py` | Worker Thread와 수동/자동 점검 조정 |
 | `storage.py` | SQLite 상태·baseline·사건 저장 |
 | `credentials.py` | Credential Manager / 세션 자격 증명 경계 |
-| `ui/` | 표시와 운영자 조작, 도메인 판단은 수행하지 않음 |
+| `ui/view_models.py` | 도메인 결과를 안전한 `DashboardView`/`DeviceView`로 변환 |
+| `ui/models/` | 전체 장비표 snapshot, 필터·전역 정렬·페이지 Model/View 흐름 |
+| `ui/pages/`, `ui/widgets/` | 운영 개요·compact 행 표현 및 palette·접근성 기반 재사용 컴포넌트 |
+| `ui/settings/` | 장비·운영·알림 설정의 표현 구성; 저장 lifecycle은 다이얼로그가 소유 |
+| 나머지 `ui/` | 표시와 운영자 조작, 도메인 판단은 수행하지 않음 |
 
 UI에서 새로운 장애 기준을 직접 계산하지 말고 도메인 계층의 결과를 표시하도록 유지합니다.
+
+### UI Model/View 규약
+
+- `DeviceTableModel` snapshot은 장비 보기, 활성 Incident IP, 감시 범위 IP를
+  함께 교체합니다.
+- 파이프라인 순서는 원본 모델 → 검색/상태/활성 Incident/감시 범위
+  필터 및 전역 정렬 → 페이지 slice입니다. 페이지별 부분 정렬을
+  만들지 않습니다.
+- 장비 선택은 row index가 아닌 `IpRole`을 식별자로 저장·복원합니다.
+  필터·정렬·페이지·compact/full 전환 테스트에서 이 계약을 같이
+  검증합니다.
+- sparkline 샘플은 최대 60개만 세션 메모리에 유지하고 `AppSettings`,
+  JSON, SQLite에 저장하지 않습니다. 장기 시계열 요구가 추가되면 별도
+  저장 계약·보존 정책·마이그레이션을 먼저 설계합니다.
+- 최근 이벤트는 UI에서 사유 SQL이나 SQLite 연결을 추가하지 말고
+  주입된 storage의 공개 `list_events(limit=...)` API로만 조회합니다.
+  조회·표현 실패는 모니터링 상태를 바꾸지 않는 보조 UI 오류로 격리합니다.
 
 ## 5. 개발 환경
 
@@ -107,7 +128,16 @@ Windows 배포물까지 영향을 주는 변경은 다음도 확인합니다.
 .\scripts\package_release.ps1 -Version <버전>
 ```
 
-CI는 정확한 CPython 3.13.15 x64 환경에서 onedir 패키지와 추출 후 EXE smoke를 검증합니다.
+Windows 전용 회귀와 패키지 검증은 로컬 Windows VM에서 수행하지 않고,
+GitHub Actions의 `.github/workflows/ci-windows.yml`을 권위 있는 검증 경로로
+사용합니다. 해당 workflow는 `windows-latest`의 정확한 CPython 3.13.15 x64
+환경에서 전체 테스트, onedir 빌드, archive 검증과 추출 EXE smoke를
+실행합니다. GitHub Actions run이 성공하기 전에는 Windows 검증 완료로
+표현하지 않습니다.
+
+macOS에서는 적용 가능한 pytest와 `QT_QPA_PLATFORM=offscreen` UI 회귀를 빠르게
+실행할 수 있지만, 이 결과를 Windows 플랫폼·Credential Manager·패키지
+증거로 대체하지 않습니다.
 
 ## 7. 테스트 설계 원칙
 

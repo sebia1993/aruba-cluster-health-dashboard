@@ -190,9 +190,15 @@ show lc-cluster group-membership
 | Worker Thread / 중복 점검 제어 | ✅ 자동 검증 |
 | Timeout·연결 끊김·잘못된 출력·저장 실패 반복 | ✅ 결정적 fault-injection / soak |
 | Offscreen PySide6 UI | ✅ 자동 검증 |
+| 장비표 Model/View·필터·전역 정렬·페이지 | ✅ 자동 검증 |
 | Windows onedir 패키지 / smoke | ✅ GitHub Actions |
 | 실제 Aruba MM / 7240XM 읽기 전용 동작 | ⚠️ 별도 현장 증거 필요 |
 | Python 미설치 Windows 11 실사용 환경 | ⚠️ 별도 현장 증거 필요 |
+
+로컬 Windows VM은 검증 경로로 사용하지 않습니다. Windows 전용 회귀, onedir 빌드와
+추출 EXE smoke는 `windows-latest`에서 실행되는 GitHub Actions 결과를 기준으로
+판단합니다. macOS offscreen 결과는 빠른 UI 회귀 검사이며 Windows 검증을
+대체하지 않습니다.
 
 구체적인 검증 범위와 공개 가능한 증거 수준은 [검증 보고서](docs/VALIDATION_REPORT_KO.md)에 정리되어 있습니다.
 
@@ -230,6 +236,25 @@ F12 개발자 UI 식별 모드는 일반 운영 기능과 분리된 개발 보�
 - 장비 행을 선택한 뒤 `현재 Connection-Type 정상 기준 설정`을 누르면 현재 값을 새 정상
   기준으로 확정하고 이후 그 값에서 다시 달라질 때만 주의합니다.
 - 확인하지 않은 변화가 기존 baseline으로 되돌아오면 변화 주의는 자동 복구됩니다.
+
+### v0.7.0 운영 개요·Model/View UI
+
+- 넓은 화면에서 전체 상태, Controller Up, 전체 Active Client, ACK 여부와
+  관계없이 아직 활성인 Incident를 요약하고 Controller별 상태와 최근
+  이벤트를 함께 표시합니다.
+- Active Client sparkline은 실행 중 최근 60회만 보여 주는 **세션 전용
+  표현 데이터**입니다. JSON·SQLite에 영구 저장하지 않고 재시작 시
+  초기화됩니다.
+- 최근 이벤트는 새 저장 경로를 만들지 않고 기존 SQLite 이벤트를
+  공개 `list_events(limit=...)` API로 읽습니다. 이 부가 표시가 실패해도
+  점검·상태 판단은 영향받지 않습니다.
+- 전체 장비표는 `DeviceTableModel` 원본에 검색·상태·활성 Incident·감시
+  범위 필터와 전역 정렬을 적용한 뒤, 저사양 모드에서만 250대씩
+  페이지로 잘라 표시합니다. 필터·정렬·페이지·반응형 화면 전환
+  후에도 IP를 기준으로 선택 장비를 복원합니다.
+- 설정 화면은 장비·운영·알림 표현 구성을 모듈로 분리했지만 기존
+  탭 순서, 저장 검증, 연결 확인과 자격 증명 commit/rollback 동작은
+  변경하지 않았습니다.
 
 ## 개발 및 패키지 검증
 

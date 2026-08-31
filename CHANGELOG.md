@@ -1,5 +1,39 @@
 # 변경 이력
 
+## 0.7.0 - 출시 예정
+
+### 운영 개요와 장비표
+
+- 전체 상태, Controller Up, 전체 Active Client, 활성 Incident를 한눈에
+  볼 수 있는 운영 개요 카드와 Controller별 상태 카드를 추가했습니다.
+- Active Client 추세는 현재 프로세스의 최근 60개 운영 개요 갱신값만
+  메모리에 유지하는 세션 전용 sparkline입니다. JSON과 SQLite에 저장하지 않으며
+  애플리케이션을 다시 시작하면 초기화됩니다.
+- 최근 이벤트는 UI에서 SQLite를 직접 조회하지 않고 기존 공개
+  `SQLiteStorage.list_events(limit=...)` API로 읽어 표시합니다. 조회가 실패해도
+  수집과 장애 판단은 계속합니다.
+- 전체 장비표를 `DeviceTableModel` → `DeviceFilterModel` → `DevicePageModel`
+  Model/View 흐름으로 전환했습니다. 검색·상태·활성 Incident·감시 범위
+  필터와 전역 정렬을 먼저 적용한 뒤, 저사양 모드에서만 250대씩 페이지를
+  표시합니다. 화면 모드·정렬·필터·페이지 전환 후에도 IP를 기준으로
+  선택 장비를 복원합니다.
+
+### UI 구조
+
+- palette 기반 Status/Metric/Badge, sparkline, 최근 이벤트와 empty-state
+  widget을 재사용 가능한 표현 컴포넌트로 분리했습니다.
+- 설정 다이얼로그의 장비·운영·알림 표현 구성을 `ui/settings/`로
+  분리했습니다. 기존 탭 순서와 문구, 검증, 연결 확인, 자격 증명
+  staging·rollback·commit 및 개발자 Inspector 식별자는 유지합니다.
+
+### 검증 경계
+
+- macOS에서는 offscreen Qt로 표현·모델 회귀를 빠르게 확인하고, Windows 전용
+  회귀·onedir 빌드·추출 EXE smoke는 로컬 Windows VM 대신 GitHub Actions의
+  `ci-windows.yml`을 권위 있는 검증 경로로 사용합니다.
+- 자동 검증은 비식별 fixture와 가짜 SSH/SQLite를 사용하며 실제 Aruba 장비와
+  조직 정책이 적용된 Windows 현장 검수를 대체하지 않습니다.
+
 ## 0.6.1 - 2026-08-25
 
 ### Connection-Type 정상 기준 확정
