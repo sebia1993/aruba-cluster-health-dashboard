@@ -20,6 +20,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..theme import (
+    blend_colors as _blend_colors,
+    contrast_ratio as _contrast_ratio,
+    ensure_minimum_contrast as _ensure_minimum_contrast,
+)
+
 
 CLICK_TO_ENABLE_WHEEL_TOOLTIP = (
     "항목을 클릭한 후에만 마우스 휠로 변경할 수 있습니다."
@@ -132,67 +138,6 @@ def fit_window_to_available_screen(
     )
     widget.setGeometry(bounded)
     return bounded
-
-
-def _blend_colors(first: QColor, second: QColor, second_weight: float) -> QColor:
-    """Return a stable palette-derived color without introducing a theme dependency."""
-
-    first_weight = 1.0 - second_weight
-    return QColor(
-        round(first.red() * first_weight + second.red() * second_weight),
-        round(first.green() * first_weight + second.green() * second_weight),
-        round(first.blue() * first_weight + second.blue() * second_weight),
-    )
-
-
-def _relative_luminance(color: QColor) -> float:
-    """Return WCAG relative luminance for an opaque sRGB color."""
-
-    def linear(channel: int) -> float:
-        value = channel / 255.0
-        return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
-
-    return (
-        0.2126 * linear(color.red())
-        + 0.7152 * linear(color.green())
-        + 0.0722 * linear(color.blue())
-    )
-
-
-def _contrast_ratio(first: QColor, second: QColor) -> float:
-    lighter, darker = sorted(
-        (_relative_luminance(first), _relative_luminance(second)),
-        reverse=True,
-    )
-    return (lighter + 0.05) / (darker + 0.05)
-
-
-def _ensure_minimum_contrast(
-    foreground: QColor,
-    background: QColor,
-    fallback: QColor,
-    minimum: float = 3.0,
-) -> QColor:
-    """Move a palette color toward readable text until it reaches the target."""
-
-    if _contrast_ratio(foreground, background) >= minimum:
-        return foreground
-    if _contrast_ratio(fallback, background) < minimum:
-        black = QColor("#000000")
-        white = QColor("#ffffff")
-        fallback = max((black, white), key=lambda color: _contrast_ratio(color, background))
-
-    best = QColor(fallback)
-    low, high = 0.0, 1.0
-    for _ in range(16):
-        weight = (low + high) / 2.0
-        candidate = _blend_colors(foreground, fallback, weight)
-        if _contrast_ratio(candidate, background) >= minimum:
-            best = candidate
-            high = weight
-        else:
-            low = weight
-    return best
 
 
 class SubtleTabWidget(QTabWidget):

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt, Signal
+from PySide6.QtTest import QSignalSpy
 from PySide6.QtWidgets import QApplication, QDialog, QLabel, QWidget
 
 from aruba_mini_dashboard.config import AppSettings, ClusterMemberSettings
@@ -137,28 +138,34 @@ def test_unchanged_large_full_table_skips_per_cell_icon_and_style_work(monkeypat
         ],
     )
     calls = 0
-    from aruba_mini_dashboard.ui import main_window as main_window_module
+    from aruba_mini_dashboard.ui.models import device_table_model as model_module
 
-    real_status_icon = main_window_module.status_icon
+    real_status_icon = model_module.status_icon
 
     def counted_status_icon(key: str):
         nonlocal calls
         calls += 1
         return real_status_icon(key)
 
-    monkeypatch.setattr(main_window_module, "status_icon", counted_status_icon)
+    monkeypatch.setattr(model_module, "status_icon", counted_status_icon)
     window = MainWindow(Coordinator(), AppSettings.default())
     window.resize(1100, 600)
     window.show()
     app.processEvents()
 
+    reset_spy = QSignalSpy(window.device_table_model.modelReset)
     window.update_snapshot(health)
+    app.processEvents()
     first_calls = calls
+    first_resets = reset_spy.count()
     window.update_snapshot(health)
+    app.processEvents()
 
     assert window.table.rowCount() == 500
-    assert first_calls >= 501  # one status cell per row plus window/tray icon
-    assert calls - first_calls == 1  # only the overall window/tray icon remains
+    assert first_resets == 1
+    assert reset_spy.count() == first_resets
+    assert 0 < first_calls < window.table.rowCount()  # only visible rows are painted
+    assert calls - first_calls < window.table.rowCount()
     window._quitting = True
     window.close()
 
