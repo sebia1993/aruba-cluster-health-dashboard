@@ -1,4 +1,4 @@
-Aruba Mini Dashboard 0.6.1
+Aruba Mini Dashboard 0.7.0
 ==========================
 
 용도
@@ -41,6 +41,11 @@ Python을 별도로 설치할 필요가 없으며 실험적 free-threaded runtim
 - 창을 최대화하거나 충분히 넓히면 등록·미등록 장비의 Active/Standby,
   Connection-Type과 전체 상태가 표시됩니다. 미등록 장비는 감시 제외 정보로만
   표시되며 장애 판단과 알림에 포함되지 않습니다.
+- 전체 보기 상단은 전체 상태, Controller Up, 전체 Active Client, 활성 Incident와
+  최근 사건을 요약합니다. Active Client 추세는 현재 실행의 최근 60회만 메모리에
+  유지하며 JSON이나 SQLite에 저장하지 않습니다.
+- 전체 장비표는 IP·별칭·Hostname 검색과 상태·활성 Incident·감시 대상 필터를
+  함께 적용할 수 있습니다. 필터와 정렬 뒤에도 선택 장비는 IP로 복원합니다.
 - 감시 대상은 항상 설정의 Cluster 구성원 4개 IP입니다. MM에서 발견한 다른
   장비가 감시 대상으로 자동 승격되지 않습니다.
 - IP 행을 선택하면 현재·이전 값, streak, 사건 시각, 파싱 결과와 최근 원본을

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aruba-mini-dashboard"
-version = "0.6.1"
+version = "0.7.0"
 description = "Offline Windows dashboard for Aruba MM and 7240XM cluster health."
 license = { file = "LICENSE" }
 requires-python = ">=3.13,<3.14"

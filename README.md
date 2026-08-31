@@ -284,7 +284,7 @@ Windows onedir 패키지:
 버전 ZIP과 SHA-256:
 
 ```powershell
-.\scripts\package_release.ps1 -Version 0.6.1
+.\scripts\package_release.ps1 -Version 0.7.0
 ```
 
 개발 구조와 변경 원칙은 [`DEVELOPMENT.md`](DEVELOPMENT.md), Release 검증·배포 절차는 [Windows 배포 절차](docs/RELEASE_PROCESS_KO.md)를 참고하십시오.
