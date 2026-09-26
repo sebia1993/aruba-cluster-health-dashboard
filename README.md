@@ -1,5 +1,9 @@
 # Aruba MM / WLC 상태 모니터링
 
+**[공개 Streamlit 체험판 실행 안내](portfolio_demo/README.md)** · [GitHub Source](https://github.com/sebia1993/aruba-cluster-health-dashboard)
+
+장비 없이 합성 시나리오를 선택하고 기존 Python 분석 결과와 Raw 근거를 확인할 수 있습니다.
+
 [![Windows CI](https://github.com/sebia1993/aruba-cluster-health-dashboard/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/sebia1993/aruba-cluster-health-dashboard/actions/workflows/ci-windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
