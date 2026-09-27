@@ -99,9 +99,20 @@ else:
             "MD 선택", list(TOPOLOGY), format_func=lambda v: f"{TOPOLOGY[v]} · {v}"
         )
         d = h.device_by_ip(ip)
-        st.json(asdict(d))
+        st.write(
+            f"{d.alias} · {d.severity} · Client {d.active_clients} · Connection {d.connection_type}"
+        )
+        with st.expander("관측 상세 / Raw state"):
+            st.json(asdict(d))
         st.caption("연속 이상·복구 카운터는 production detector 상태입니다.")
-        st.json(r.engine.detector.dump_state())
+        st.dataframe(
+            [
+                dict(Signal=key, **value)
+                for key, value in r.engine.detector.dump_state().items()
+                if key.endswith("|" + ip)
+            ],
+            hide_index=True,
+        )
         c = st.columns(2)
         if c[0].button("알림 확인 · ACK"):
             r.acknowledge(ip)

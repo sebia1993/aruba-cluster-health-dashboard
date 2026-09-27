@@ -18,9 +18,8 @@ entrypoint `portfolio_demo/app.py`, Python 3.13.
 의존성은 entrypoint 옆 `portfolio_demo/requirements.txt`를 사용합니다.
 기존 Windows 앱의 런타임 잠금 파일과 패키징 경로는 유지합니다.
 
-시나리오 선택 → 분석 실행 → Summary → 상세 결과 → Raw/Evidence 흐름입니다.
-입력을 변경하면 기존 결과의 시나리오를 표시하며 다시 실행해야 갱신합니다.
-각 실행은 독립된 분석 상태로 시작하고 결과는 브라우저 세션별로 분리합니다.
+v2는 Poll 상태를 누적하며 ACK와 기준 수용을 별도로 실행합니다.
+브라우저 세션별 엔진을 사용하고 Reset으로 초기화합니다.
 Fixture·AppTest·Windows CI는 실제 장비/운영망 검증이 아닙니다.
 
 ## Public Demo v2 (review branch)
