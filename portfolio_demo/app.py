@@ -45,6 +45,7 @@ if cols[2].button("다음 Poll", disabled=not r.running):
     step = True
 if cols[3].button("일시정지", disabled=not r.running):
     r.running = False
+    st.rerun()
 failure = st.checkbox("다음 Poll에 CLI Timeout 주입")
 if step:
     try:
