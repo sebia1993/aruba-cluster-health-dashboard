@@ -22,3 +22,16 @@ entrypoint `portfolio_demo/app.py`, Python 3.13.
 입력을 변경하면 기존 결과의 시나리오를 표시하며 다시 실행해야 갱신합니다.
 각 실행은 독립된 분석 상태로 시작하고 결과는 브라우저 세션별로 분리합니다.
 Fixture·AppTest·Windows CI는 실제 장비/운영망 검증이 아닙니다.
+
+## Public Demo v2 (review branch)
+
+`codex/public-demo-v2` provides a session-owned operations console: inspect Demo Lab,
+run one poll or start the controlled Next Poll playback, inspect incidents, ACK,
+explicitly accept a Connection-Type baseline, and observe recovery. The production
+DemoPoller, parsers, CorrelationEngine and IncidentManager are reused. An adapter
+prevents the desktop scripted demo from automatically accepting a baseline.
+Timeout injection pauses the stage and preserves unconfirmed incidents. Playback
+holds the final stage and is bounded to 100 polls; Reset clears all engine state.
+
+The existing main Live Demo remains unchanged until review. No SSH, credentials,
+background daemon, shared database or production device connections are used.
