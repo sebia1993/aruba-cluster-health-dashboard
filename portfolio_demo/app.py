@@ -158,7 +158,6 @@ def render_window_header() -> None:
         )
 
 
-
 def render_reviewer_summary() -> None:
     st.markdown("### 이 프로젝트는 무엇을 해결하나요?")
     left, right = st.columns(2)
