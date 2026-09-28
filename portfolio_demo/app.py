@@ -300,6 +300,70 @@ st.markdown(
     .scenario-current {border:2px solid #62b9ff;background:#62b9ff12;}
     .scenario-card h4 {margin:0 0 .6rem;font-size:1.05rem;}
     .scenario-card p {margin:.45rem 0;font-size:.9rem;}
+    .scenario-launch {
+        border: 2px solid rgba(86, 176, 235, .70);
+        border-radius: 16px;
+        padding: 1rem 1rem .85rem;
+        margin: .85rem 0 .7rem;
+        background:
+            linear-gradient(135deg, rgba(19, 42, 65, .92), rgba(12, 24, 38, .90));
+        box-shadow: 0 10px 28px rgba(17, 88, 145, .10);
+    }
+    .scenario-launch-kicker {
+        color: #78c7ff;
+        font-size: .70rem;
+        font-weight: 900;
+        letter-spacing: .09em;
+        margin-bottom: .3rem;
+    }
+    .scenario-launch-title {
+        color: #eef7ff;
+        font-size: 1.15rem;
+        font-weight: 900;
+        margin: 0 0 .35rem;
+    }
+    .scenario-launch-copy {
+        color: #9fb3c9;
+        font-size: .82rem;
+        line-height: 1.5;
+        margin: 0;
+    }
+    .scenario-choice-detail {
+        border-left: 4px solid #5bb8ef;
+        border-radius: 8px;
+        padding: .65rem .75rem;
+        margin: .55rem 0 .7rem;
+        background: rgba(65, 139, 194, .08);
+        color: #cbd9e7;
+        font-size: .79rem;
+        line-height: 1.5;
+    }
+    .scenario-choice-detail b {
+        color: #7ecbff;
+    }
+    div[data-testid="stRadio"] {
+        border: 1px solid rgba(104, 143, 180, .30);
+        border-radius: 12px;
+        padding: .75rem .85rem .45rem;
+        background: rgba(12, 22, 35, .55);
+        margin: .45rem 0 .55rem;
+    }
+    div[data-testid="stRadio"] > label {
+        font-weight: 850;
+        color: #dceaf7;
+        margin-bottom: .35rem;
+    }
+    div[data-testid="stRadio"] [role="radiogroup"] label {
+        border: 1px solid rgba(120, 147, 177, .22);
+        border-radius: 9px;
+        padding: .42rem .55rem;
+        margin-bottom: .28rem;
+        background: rgba(255,255,255,.025);
+    }
+    div[data-testid="stRadio"] [role="radiogroup"] label:hover {
+        border-color: rgba(92, 182, 235, .55);
+        background: rgba(92, 182, 235, .055);
+    }
     @media(max-width:700px) {.scenario-grid {grid-template-columns:1fr;}}
     [data-testid="stMetricValue"] {white-space: normal; overflow-wrap: anywhere; font-size: clamp(1rem, 2.2vw, 2rem);}
     </style>
@@ -972,14 +1036,34 @@ with st.expander("실제 처리 기록 / Execution Trace", expanded=False):
     trace_selector = st.container()
     trace_slot = st.empty()
 with scenario_controls:
-    st.markdown("### 대표 흐름 체험")
-    st.caption(
-        "예시 상황을 하나 고르면 필요한 점검을 모두 자동 실행합니다. "
-        "세부 버튼을 직접 조작할 필요가 없습니다."
+    st.markdown(
+        '<div class="scenario-launch">'
+        '<div class="scenario-launch-kicker">START HERE · 대표 시나리오 체험</div>'
+        '<div class="scenario-launch-title">① 먼저 체험할 상황을 선택하세요</div>'
+        '<p class="scenario-launch-copy">4가지 대표 상황이 항상 보이도록 펼쳐두었습니다. '
+        '하나를 선택한 뒤 아래 실행 버튼만 누르면 관측부터 판단·복구까지 자동으로 진행됩니다.</p>'
+        '</div>',
+        unsafe_allow_html=True,
     )
-    chosen = st.selectbox("예시 상황", list(SCENARIOS), format_func=SCENARIOS.get)
-    st.info(SCENARIO_DESCRIPTIONS[chosen])
-    if st.button("시나리오 자동 실행", type="primary", use_container_width=True):
+    chosen = st.radio(
+        "체험할 상황",
+        list(SCENARIOS),
+        format_func=SCENARIOS.get,
+        key="scenario_choice",
+    )
+    st.markdown(
+        '<div class="scenario-choice-detail">'
+        f'<b>선택된 시나리오 · {escape(SCENARIOS[chosen])}</b><br>'
+        f'{escape(SCENARIO_DESCRIPTIONS[chosen])}'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("#### ② 선택한 시나리오를 자동 실행")
+    if st.button(
+        "▶ 시나리오 자동 실행",
+        type="primary",
+        use_container_width=True,
+    ):
         start_scenario(chosen)
 
 runner = st.session_state.get("scenario_runner")
