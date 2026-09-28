@@ -88,6 +88,7 @@ st.markdown(
         color: #8392a4;
         font-size: .78rem;
     }
+    [data-testid="stMetricValue"] {white-space: normal; overflow-wrap: anywhere; font-size: clamp(1rem, 2.2vw, 2rem);}
     </style>
     """,
     unsafe_allow_html=True,
@@ -110,6 +111,10 @@ def ko_status(value: str) -> str:
         "critical": "장애",
         "unknown": "확인 불가",
     }.get(value, value)
+
+
+def client_value(value) -> str:
+    return "확인 불가" if value is None else str(value)
 
 
 def distribution_status(device) -> str:
@@ -181,16 +186,18 @@ def render_overview() -> None:
         incident_count = 0
     else:
         overall = ko_status(r.health.severity.value)
+        unknown = sum(d.mm_status is None for d in r.health.devices)
+        up = sum((d.mm_status or '').lower() == 'up' for d in r.health.devices)
         controller_up = (
-            f"{sum((d.mm_status or '').lower() == 'up' for d in r.health.devices)}"
-            f" / {len(r.health.devices)}"
+            f"확인 불가 {unknown} / {len(r.health.devices)}"
+            if unknown else f"{up} / {len(r.health.devices)}"
         )
         known = [
             d.active_clients
             for d in r.health.devices
             if d.active_clients is not None
         ]
-        active_total = sum(known) if known else "확인 불가"
+        active_total = sum(known) if len(known) == len(r.health.devices) else "확인 불가"
         incident_count = len(r.incidents.active_incidents())
 
     cols = st.columns(4)
@@ -211,8 +218,8 @@ def render_overview() -> None:
                         '<div class="controller-card">'
                         f'<div class="controller-name">{device.display_name}</div>'
                         f'<div class="controller-meta">{device.ip}<br>'
-                        f'{ko_status(device.severity.value)} · Active {device.active_clients} · '
-                        f'Standby {device.standby_clients}<br>'
+                        f'{ko_status(device.severity.value)} · Active {client_value(device.active_clients)} · '
+                        f'Standby {client_value(device.standby_clients)}<br>'
                         f'Connection {device.connection_type or "확인 불가"}</div>'
                         '</div>',
                         unsafe_allow_html=True,
@@ -360,8 +367,8 @@ def render_device_table() -> str | None:
                 "IP": device.ip,
                 "장비명": device.display_name,
                 "MM 보고 상태": device.mm_status or "확인 불가",
-                "Active": device.active_clients,
-                "Standby": device.standby_clients,
+                "Active": client_value(device.active_clients),
+                "Standby": client_value(device.standby_clients),
                 "Connection-Type": device.connection_type or "확인 불가",
                 "종합 상태": ko_status(device.severity.value),
                 "마지막 확인": f"Poll {r.poll_count}",
@@ -431,8 +438,8 @@ def render_detail(ip: str | None) -> None:
         c[0].write(f"**IP**  {device.ip}")
         c[0].write(f"**MM 보고 상태**  {device.mm_status or '확인 불가'}")
         c[0].write(f"**종합 상태**  {ko_status(device.severity.value)}")
-        c[1].write(f"**Active Client**  {device.active_clients}")
-        c[1].write(f"**Standby Client**  {device.standby_clients}")
+        c[1].write(f"**Active Client**  {client_value(device.active_clients)}")
+        c[1].write(f"**Standby Client**  {client_value(device.standby_clients)}")
         c[1].write(
             f"**Connection-Type**  {device.connection_type or '확인 불가'}"
         )
