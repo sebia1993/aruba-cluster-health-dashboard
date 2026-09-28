@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from html import escape
 from pathlib import Path
 import sys
 
@@ -13,6 +12,7 @@ from portfolio_demo.runtime import DemoRuntime, TOPOLOGY
 from portfolio_demo.execution_trace import render_trace
 from portfolio_demo.guided_flow import GuidedSlot, begin
 from portfolio_demo.scenario_runner import ScenarioRunner, SCENARIOS
+from portfolio_demo.story_view import render_story
 
 st.set_page_config(
     page_title="Aruba 네트워크 상태 미니보드 · Public Web Edition",
@@ -144,7 +144,7 @@ def render_window_header() -> None:
         st.markdown(
             '<div class="desktop-shell">'
             '<div class="window-title">Aruba Cluster Health Dashboard</div>'
-            '<div class="window-meta">여러 무선 Controller를 반복 관측하고, 순간적인 이상과 실제 장애를 구분해 Incident를 생성하는 모니터링 도구입니다.</div>'
+            '<div class="window-meta">무선 네트워크 관리 장비의 상태를 반복 확인해, 지속되는 이상을 감지하고 복구까지 추적하는 헬스체크 도구입니다.</div>'
             "</div>",
             unsafe_allow_html=True,
         )
@@ -176,7 +176,7 @@ def render_reviewer_summary() -> None:
     with right, st.container(border=True):
         st.markdown("**이 데모에서 보여주는 것**")
         st.write(
-            "정상 상태 → 이상 징후 누적 → 장애 확정 → 복구까지의 흐름을 자동 재생하고, "
+            "정상 상태 → 이상 징후 누적 → 주의 판정 → 복구까지의 흐름을 자동 재생하고, "
             "정보를 가져오지 못한 상황을 실제 장애로 잘못 판단하지 않는 과정을 보여줍니다."
         )
         st.caption(
@@ -531,69 +531,7 @@ def render_scenario_timeline(runner, slot):
     if runner is None or runner.run is None:
         slot.empty()
         return
-    run = runner.run
-    settings = runner.runtime.engine.detector.settings
-    cards = []
-    for index, snap in enumerate(run.snapshots):
-        incidents = (
-            ", ".join(
-                f"{i.incident_type.value}: "
-                + (
-                    "ACK"
-                    if i.active and i.acknowledged
-                    else "Open"
-                    if i.active
-                    else "Resolved"
-                    if i.recovered_at
-                    else "ACK"
-                    if i.acknowledged
-                    else "종료"
-                )
-                for i in snap.incidents
-            )
-            or "없음"
-        )
-        focus = (
-            ", ".join(
-                f"{d['alias']} · Active {client_value(d['active'])} / Standby {client_value(d['standby'])}"
-                for d in snap.focus
-            )
-            or "특정 Controller 이상 확정 없음"
-        )
-        current = " scenario-current" if index == run.current_index else ""
-        cards.append(
-            f'<article class="scenario-card{current}"><h4>Poll #{snap.poll} · {escape(snap.title)}</h4>'
-            f"<p><b>종합(확정 판정): {ko_status(snap.health.severity.value)}</b> · Controller Up: {client_value(snap.up)} / {len(snap.health.devices)}"
-            f" · 전체 Active: {client_value(snap.active_total)}</p>"
-            f"<p>{escape(focus)}</p>"
-            f"<p>연속 이상 {snap.anomaly_count}/{settings.anomaly_confirmations} · 복구 관측 {snap.recovery_count}/{settings.recovery_confirmations}</p>"
-            f"<p>Incident: {escape(incidents)}</p><p>{escape(snap.explanation)}</p></article>"
-        )
-    if not run.completed and not run.error and len(run.snapshots) <= run.current_index:
-        cards.append(
-            f'<article class="scenario-card scenario-current">Poll #{run.current_index + 1} · 실제 관측 처리 중</article>'
-        )
-    status = (
-        "시나리오 완료"
-        if run.completed
-        else "실행 중단"
-        if run.error
-        else "시나리오 실행 중"
-    )
-    slot.markdown(
-        '<section aria-label="Scenario Timeline"><h3>Scenario Timeline · '
-        + escape(run.name)
-        + "</h3><p>"
-        + status
-        + " · "
-        + str(len(run.snapshots))
-        + "/"
-        + str(len(run.steps))
-        + ' Poll</p><div class="scenario-grid">'
-        + "".join(cards)
-        + "</div></section>",
-        unsafe_allow_html=True,
-    )
+    slot.markdown(render_story(runner.run), unsafe_allow_html=True)
 
 
 def start_scenario(key):
@@ -608,8 +546,9 @@ def start_scenario(key):
         st.session_state.pop(widget_key, None)
 
     def update(current):
-        render_scenario_timeline(current, timeline_slot)
-        render_trace(current.runtime.execution, trace_slot)
+        # Do not replay partial records while the analysis is still running.
+        if not current.run.snapshots or current.run.completed or current.run.error:
+            render_scenario_timeline(current, timeline_slot)
 
     try:
         runner.play(key, update)
@@ -669,30 +608,15 @@ scenario_controls = st.container()
 timeline_slot = GuidedSlot(
     st.empty(), lambda: getattr(st.session_state.get("scenario_runner"), "run", None)
 )
-result_summary = st.container()
 with st.expander("실제 처리 기록 / Execution Trace", expanded=False):
     trace_selector = st.container()
     trace_slot = st.empty()
 with scenario_controls:
     st.caption(
-        "한 번 실행하면 정상 → 이상 누적 → 장애 확정 → 복구를 자동으로 확인합니다. 실제 장비 접속 없이 합성 CLI를 production 분석 코어에 공급합니다."
+        "시나리오를 선택하고 시작하면, 관측부터 판단까지 약 4초씩 자동으로 보여줍니다."
     )
-    st.caption(
-        "Controller는 무선 네트워크 관리 장비, Client는 연결 단말입니다. Incident는 확인된 이상을 추적하는 기록이며, Open은 진행 중, Resolved는 복구 완료를 뜻합니다."
-    )
-    chosen = None
-    if st.button(
-        "대표 장애 → 복구 시나리오 실행", type="primary", use_container_width=True
-    ):
-        chosen = "incident_recovery"
-    st.caption("다른 시나리오")
-    columns = st.columns(3)
-    for column, key in zip(
-        columns, ("normal", "collection_failure", "connection_change")
-    ):
-        if column.button(SCENARIOS[key], use_container_width=True):
-            chosen = key
-    if chosen:
+    chosen = st.selectbox("체험 시나리오", list(SCENARIOS), format_func=SCENARIOS.get)
+    if st.button("체험 시작", type="primary", use_container_width=True):
         start_scenario(chosen)
 
 runner = st.session_state.get("scenario_runner")
@@ -709,23 +633,23 @@ if runner and runner.run and runner.run.snapshots:
             key="trace_poll",
         )
         st.caption(
-            "Timeline은 운영 상황의 변화, Trace는 선택한 Poll의 실제 처리 근거입니다. 아래 Dashboard는 마지막 Poll 결과입니다."
+            "Timeline은 운영 상황의 변화, Trace는 선택한 Poll의 실제 처리 근거입니다. 상세 결과는 마지막 점검 시점이며, 해설 속 장비 카드는 각 장면의 관측값입니다."
         )
     render_trace(runner.run.snapshots[selected_poll].trace, trace_slot)
-    if runner.run.completed:
-        result_summary.success(runner.run.summary)
-    elif runner.run.error:
-        result_summary.error(runner.run.error)
 else:
     render_trace(r.execution, trace_slot)
 
-render_status_card()
-render_overview()
-render_time_row()
-selected = render_device_table()
-with st.expander("판단 근거 / 장비 상세 및 이력", expanded=False):
+with st.expander("상세 결과 / 마지막 점검의 대시보드", expanded=False):
+    st.caption(
+        "마지막 점검 시점의 상세 결과입니다. 해설 중의 장면과 시점이 다를 수 있습니다."
+    )
+    render_status_card()
+    render_overview()
+    render_time_row()
+    selected = render_device_table()
     render_detail(selected)
     render_incident_history()
+
 with st.expander("고급 운영 / 수동 점검", expanded=False):
     st.caption(
         "수동 점검을 실행하면 시나리오 기록을 닫고 현재 Runtime의 관측을 이어갑니다."
