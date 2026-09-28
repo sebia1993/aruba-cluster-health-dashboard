@@ -248,6 +248,13 @@ class ScenarioTests(unittest.TestCase):
             any("이 프로젝트는 무엇을 해결하나요?" in m.value for m in app.markdown)
         )
         self.assertTrue(
+            any("START HERE · 대표 시나리오 체험" in m.value for m in app.markdown)
+        )
+        self.assertEqual(
+            next(r for r in app.radio if r.label == "체험할 상황").value,
+            "incident_recovery",
+        )
+        self.assertTrue(
             any("ENTERPRISE WLAN OPERATIONS" in m.value for m in app.markdown)
         )
         self.assertTrue(
@@ -259,7 +266,7 @@ class ScenarioTests(unittest.TestCase):
         self.assertFalse(
             any(e.label == "프로젝트 목적과 체험 안내" for e in app.expander)
         )
-        next(b for b in app.button if b.label == "시나리오 자동 실행").click().run()
+        next(b for b in app.button if b.label == "▶ 시나리오 자동 실행").click().run()
         self.assertFalse(app.exception)
         run = app.session_state.scenario_runner.run
         self.assertTrue(run.completed)
@@ -293,10 +300,8 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(app.session_state.runtime.health.severity.value, "normal")
         self.assertTrue(any("고급 운영 / 수동 점검" == e.label for e in app.expander))
         for key in ("collection_failure", "normal", "connection_change"):
-            next(s for s in app.selectbox if s.label == "예시 상황").select(
-                key
-            ).run()
-            next(b for b in app.button if b.label == "시나리오 자동 실행").click().run()
+            next(r for r in app.radio if r.label == "체험할 상황").set_value(key).run()
+            next(b for b in app.button if b.label == "▶ 시나리오 자동 실행").click().run()
             self.assertFalse(app.exception)
             self.assertTrue(app.session_state.scenario_runner.run.completed)
         next(b for b in app.button if b.label == "지금 점검").click().run()
@@ -305,7 +310,7 @@ class ScenarioTests(unittest.TestCase):
 
     def test_raw_and_parsed_are_preserved_inside_advanced_area(self):
         app = AppTest.from_file(str(Path(__file__).with_name("app.py"))).run()
-        next(b for b in app.button if b.label == "시나리오 자동 실행").click().run()
+        next(b for b in app.button if b.label == "▶ 시나리오 자동 실행").click().run()
         self.assertFalse(app.exception)
         advanced = next(e for e in app.expander if e.label == "고급 운영 / 수동 점검")
         self.assertTrue(
@@ -322,7 +327,7 @@ if __name__ == "__main__":
 class GuidedFlowTests(unittest.TestCase):
     def test_navigation_keeps_execution_identity_and_results_on_rerun(self):
         app = AppTest.from_file(str(Path(__file__).with_name("app.py"))).run()
-        next(b for b in app.button if b.label == "시나리오 자동 실행").click().run()
+        next(b for b in app.button if b.label == "▶ 시나리오 자동 실행").click().run()
         self.assertFalse(app.exception)
         token = app.session_state.guided_run_id
         runner = app.session_state.scenario_runner
@@ -340,7 +345,7 @@ class GuidedFlowTests(unittest.TestCase):
         self.assertEqual(token, app.session_state.guided_run_id)
         self.assertIs(runner, app.session_state.scenario_runner)
         self.assertIs(runtime, app.session_state.runtime)
-        next(b for b in app.button if b.label == "시나리오 자동 실행").click().run()
+        next(b for b in app.button if b.label == "▶ 시나리오 자동 실행").click().run()
         self.assertNotEqual(token, app.session_state.guided_run_id)
 
 
