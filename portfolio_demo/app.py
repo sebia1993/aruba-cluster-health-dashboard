@@ -335,11 +335,7 @@ def render_settings() -> None:
         c[0].metric("이상 확정", "3회")
         c[1].metric("복구 확정", "2회")
         c[2].metric("실제 SSH", "비활성")
-        if st.button("Demo Reset", use_container_width=True):
-            st.session_state.runtime = DemoRuntime()
-            st.session_state.cluster_selected_ip = None
-            st.rerun()
-
+        
 
 def render_device_table() -> str | None:
     st.markdown("#### 장비 검색 및 필터")
@@ -471,11 +467,16 @@ def render_demo_shortcut() -> None:
             "실제 Desktop App과 같은 화면/판단 흐름을 사용하되 실제 SSH 대신 "
             "비식별 합성 CLI만 공급합니다."
         )
-        if st.button("대표 장애 상태까지 자동 재생"):
+        c = st.columns(2)
+        if c[0].button("대표 장애 상태까지 자동 재생", use_container_width=True):
             demo = DemoRuntime()
             for _ in range(6):
                 demo.poll()
             st.session_state.runtime = demo
+            st.rerun()
+        if c[1].button("Demo Reset", use_container_width=True):
+            st.session_state.runtime = DemoRuntime()
+            st.session_state.cluster_selected_ip = None
             st.rerun()
 
 
