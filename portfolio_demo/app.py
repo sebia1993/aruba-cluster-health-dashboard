@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from html import escape
 from pathlib import Path
 import sys
 
@@ -10,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from portfolio_demo.runtime import DemoRuntime, TOPOLOGY
 
 from portfolio_demo.execution_trace import render_trace
+from portfolio_demo.scenario_runner import ScenarioRunner, SCENARIOS
 
 st.set_page_config(
     page_title="Aruba 네트워크 상태 미니보드 · Public Web Edition",
@@ -90,6 +92,12 @@ st.markdown(
         color: #8392a4;
         font-size: .78rem;
     }
+    .scenario-grid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.75rem;}
+    .scenario-card {border:1px solid #8885;border-radius:12px;padding:1rem;overflow-wrap:anywhere;}
+    .scenario-current {border:2px solid #62b9ff;background:#62b9ff12;}
+    .scenario-card h4 {margin:0 0 .6rem;font-size:1.05rem;}
+    .scenario-card p {margin:.45rem 0;font-size:.9rem;}
+    @media(max-width:700px) {.scenario-grid {grid-template-columns:1fr;}}
     [data-testid="stMetricValue"] {white-space: normal; overflow-wrap: anywhere; font-size: clamp(1rem, 2.2vw, 2rem);}
     </style>
     """,
@@ -134,9 +142,9 @@ def render_window_header() -> None:
     with left:
         st.markdown(
             '<div class="desktop-shell">'
-            '<div class="window-title">Aruba 네트워크 상태 미니보드 — 데모</div>'
-            '<div class="window-meta">Desktop App의 운영 화면을 그대로 옮긴 Public Web Edition</div>'
-            '</div>',
+            '<div class="window-title">Aruba Cluster Health Dashboard</div>'
+            '<div class="window-meta">여러 무선 Controller 상태를 종합하여 실제 장애 징후와 일시적인 수집 실패를 구분합니다.</div>'
+            "</div>",
             unsafe_allow_html=True,
         )
     with right:
@@ -145,7 +153,7 @@ def render_window_header() -> None:
             '<span class="demo-pill">PUBLIC DEMO</span>'
             '<span class="demo-pill">SYNTHETIC CLI</span>'
             '<span class="demo-pill">READ ONLY</span>'
-            '</div>',
+            "</div>",
             unsafe_allow_html=True,
         )
 
@@ -157,9 +165,7 @@ def render_status_card() -> None:
         reason = "점검을 실행하면 판단 근거가 표시됩니다."
     else:
         status = ko_status(r.health.severity.value)
-        problem_devices = [
-            d for d in r.health.devices if d.severity.value != "normal"
-        ]
+        problem_devices = [d for d in r.health.devices if d.severity.value != "normal"]
         if problem_devices:
             first = problem_devices[0]
             problem = f"주요 문제 IP: {first.ip} · {first.display_name}"
@@ -172,7 +178,7 @@ def render_status_card() -> None:
         f'<div class="status-value">{status}</div>'
         f'<div class="status-line">{problem}</div>'
         f'<div class="status-line">판단 근거: {reason}</div>'
-        '</div>',
+        "</div>",
         unsafe_allow_html=True,
     )
 
@@ -189,17 +195,18 @@ def render_overview() -> None:
     else:
         overall = ko_status(r.health.severity.value)
         unknown = sum(d.mm_status is None for d in r.health.devices)
-        up = sum((d.mm_status or '').lower() == 'up' for d in r.health.devices)
+        up = sum((d.mm_status or "").lower() == "up" for d in r.health.devices)
         controller_up = (
             f"확인 불가 {unknown} / {len(r.health.devices)}"
-            if unknown else f"{up} / {len(r.health.devices)}"
+            if unknown
+            else f"{up} / {len(r.health.devices)}"
         )
         known = [
-            d.active_clients
-            for d in r.health.devices
-            if d.active_clients is not None
+            d.active_clients for d in r.health.devices if d.active_clients is not None
         ]
-        active_total = sum(known) if len(known) == len(r.health.devices) else "확인 불가"
+        active_total = (
+            sum(known) if len(known) == len(r.health.devices) else "확인 불가"
+        )
         incident_count = len(r.incidents.active_incidents())
 
     cols = st.columns(4)
@@ -220,14 +227,16 @@ def render_overview() -> None:
                         '<div class="controller-card">'
                         f'<div class="controller-name">{device.display_name}</div>'
                         f'<div class="controller-meta">{device.ip}<br>'
-                        f'{ko_status(device.severity.value)} · Active {client_value(device.active_clients)} · '
-                        f'Standby {client_value(device.standby_clients)}<br>'
-                        f'Connection {device.connection_type or "확인 불가"}</div>'
-                        '</div>',
+                        f"{ko_status(device.severity.value)} · Active {client_value(device.active_clients)} · "
+                        f"Standby {client_value(device.standby_clients)}<br>"
+                        f"Connection {device.connection_type or '확인 불가'}</div>"
+                        "</div>",
                         unsafe_allow_html=True,
                     )
         else:
-            st.caption("점검 전입니다. 등록된 Demo Controller 4대를 대상으로 상태를 수집합니다.")
+            st.caption(
+                "점검 전입니다. 등록된 Demo Controller 4대를 대상으로 상태를 수집합니다."
+            )
 
     with right:
         st.markdown("#### 최근 이벤트")
@@ -247,11 +256,7 @@ def render_time_row() -> None:
         c[0].caption(f"마지막 점검: Poll {r.poll_count} · {r.stage}")
     else:
         c[0].caption("마지막 점검: -")
-    c[1].caption(
-        "다음 점검: Demo 재생 대기"
-        if r.running
-        else "다음 점검: 일시정지"
-    )
+    c[1].caption("다음 점검: Demo 재생 대기" if r.running else "다음 점검: 일시정지")
 
 
 def selected_ip() -> str | None:
@@ -263,6 +268,7 @@ def selected_ip() -> str | None:
 
 
 def run_one_poll(*, failure: bool = False) -> None:
+    st.session_state.pop("scenario_runner", None)
     try:
         r.poll(failure)
     except ValueError as exc:
@@ -288,6 +294,7 @@ def render_controls() -> None:
         disabled=ip is None,
         use_container_width=True,
     ):
+        st.session_state.pop("scenario_runner", None)
         r.acknowledge(ip)
         st.rerun()
 
@@ -341,25 +348,31 @@ def render_settings() -> None:
             width="stretch",
         )
         c = st.columns(3)
-        c[0].metric("이상 확정", "3회")
-        c[1].metric("복구 확정", "2회")
+        c[0].metric(
+            "이상 확정", f"{r.engine.detector.settings.anomaly_confirmations}회"
+        )
+        c[1].metric(
+            "복구 확정", f"{r.engine.detector.settings.recovery_confirmations}회"
+        )
         c[2].metric("실제 SSH", "비활성")
-        
+
 
 def render_device_table() -> str | None:
     st.markdown("#### 장비 검색 및 필터")
     f = st.columns([2.2, 1, 1, 1])
     search = f[0].text_input(
         "장비 검색",
+        key="장비 검색",
         placeholder="IP, alias, hostname 검색",
         label_visibility="collapsed",
     )
     status_filter = f[1].selectbox(
         "상태 필터",
         ["전체 상태", "정상", "주의", "장애", "확인 불가"],
+        key="상태 필터",
         label_visibility="collapsed",
     )
-    problem_only = f[2].checkbox("문제만 보기")
+    problem_only = f[2].checkbox("문제만 보기", key="문제만 보기")
     monitoring_only = f[3].checkbox("감시 대상만", value=True)
 
     rows = []
@@ -377,9 +390,10 @@ def render_device_table() -> str | None:
                 "감시 범위": "감시 중",
                 "분배 상태": distribution_status(device),
             }
-            if search and search.casefold() not in (
-                row["IP"] + row["장비명"]
-            ).casefold():
+            if (
+                search
+                and search.casefold() not in (row["IP"] + row["장비명"]).casefold()
+            ):
                 continue
             if status_filter != "전체 상태" and row["종합 상태"] != status_filter:
                 continue
@@ -417,9 +431,7 @@ def render_device_table() -> str | None:
         "선택 Controller",
         options,
         index=index,
-        format_func=lambda ip: (
-            f"{r.health.device_by_ip(ip).display_name} · {ip}"
-        ),
+        format_func=lambda ip: f"{r.health.device_by_ip(ip).display_name} · {ip}",
     )
     st.session_state.cluster_selected_ip = choice
     return choice
@@ -442,9 +454,7 @@ def render_detail(ip: str | None) -> None:
         c[0].write(f"**종합 상태**  {ko_status(device.severity.value)}")
         c[1].write(f"**Active Client**  {client_value(device.active_clients)}")
         c[1].write(f"**Standby Client**  {client_value(device.standby_clients)}")
-        c[1].write(
-            f"**Connection-Type**  {device.connection_type or '확인 불가'}"
-        )
+        c[1].write(f"**Connection-Type**  {device.connection_type or '확인 불가'}")
         reasons = " / ".join(device.issue_reasons) or "별도 이상 근거 없음"
         st.info(f"판단 근거: {reasons}")
 
@@ -455,9 +465,6 @@ def render_detail(ip: str | None) -> None:
         ]
         if pending:
             st.warning("Connection-Type 변화가 기준 수용 대기 중입니다.")
-            if st.button("현재 Connection-Type을 정상 기준으로 설정"):
-                r.accept_baseline(ip)
-                st.rerun()
 
     with parsed:
         st.json(asdict(device))
@@ -478,6 +485,7 @@ def render_demo_shortcut() -> None:
         )
         c = st.columns(2)
         if c[0].button("대표 장애 상태까지 자동 재생", use_container_width=True):
+            st.session_state.pop("scenario_runner", None)
             demo = DemoRuntime()
             demo.execution.on_change = lambda: render_trace(demo.execution, trace_slot)
             for _ in range(6):
@@ -485,35 +493,222 @@ def render_demo_shortcut() -> None:
             st.session_state.runtime = demo
             st.rerun()
         if c[1].button("Demo Reset", use_container_width=True):
+            st.session_state.pop("scenario_runner", None)
             st.session_state.runtime = DemoRuntime()
             st.session_state.cluster_selected_ip = None
             st.rerun()
 
 
+def render_scenario_timeline(runner, slot):
+    if runner is None or runner.run is None:
+        slot.empty()
+        return
+    run = runner.run
+    settings = runner.runtime.engine.detector.settings
+    cards = []
+    for index, snap in enumerate(run.snapshots):
+        incidents = (
+            ", ".join(
+                f"{i.incident_type.value}: "
+                + (
+                    "ACK"
+                    if i.active and i.acknowledged
+                    else "Open"
+                    if i.active
+                    else "Resolved"
+                    if i.recovered_at
+                    else "ACK"
+                    if i.acknowledged
+                    else "종료"
+                )
+                for i in snap.incidents
+            )
+            or "없음"
+        )
+        focus = (
+            ", ".join(
+                f"{d['alias']} · Active {client_value(d['active'])} / Standby {client_value(d['standby'])}"
+                for d in snap.focus
+            )
+            or "특정 Controller 이상 확정 없음"
+        )
+        current = " scenario-current" if index == run.current_index else ""
+        cards.append(
+            f'<article class="scenario-card{current}"><h4>Poll #{snap.poll} · {escape(snap.title)}</h4>'
+            f"<p><b>종합(확정 판정): {ko_status(snap.health.severity.value)}</b> · Controller Up: {client_value(snap.up)} / {len(snap.health.devices)}"
+            f" · 전체 Active: {client_value(snap.active_total)}</p>"
+            f"<p>{escape(focus)}</p>"
+            f"<p>연속 이상 {snap.anomaly_count}/{settings.anomaly_confirmations} · 복구 관측 {snap.recovery_count}/{settings.recovery_confirmations}</p>"
+            f"<p>Incident: {escape(incidents)}</p><p>{escape(snap.explanation)}</p></article>"
+        )
+    if not run.completed and not run.error and len(run.snapshots) <= run.current_index:
+        cards.append(
+            f'<article class="scenario-card scenario-current">Poll #{run.current_index + 1} · 실제 관측 처리 중</article>'
+        )
+    status = (
+        "시나리오 완료"
+        if run.completed
+        else "실행 중단"
+        if run.error
+        else "시나리오 실행 중"
+    )
+    slot.markdown(
+        '<section aria-label="Scenario Timeline"><h3>Scenario Timeline · '
+        + escape(run.name)
+        + "</h3><p>"
+        + status
+        + " · "
+        + str(len(run.snapshots))
+        + "/"
+        + str(len(run.steps))
+        + ' Poll</p><div class="scenario-grid">'
+        + "".join(cards)
+        + "</div></section>",
+        unsafe_allow_html=True,
+    )
+
+
+def start_scenario(key):
+    global r
+    runner = ScenarioRunner()
+    st.session_state.scenario_runner = runner
+    st.session_state.cluster_selected_ip = None
+    st.session_state.cluster_compact = False
+    # Reset prior manual filters so a new story and its dashboard agree.
+    for widget_key in ("장비 검색", "상태 필터", "문제만 보기"):
+        st.session_state.pop(widget_key, None)
+
+    def update(current):
+        render_scenario_timeline(current, timeline_slot)
+        render_trace(current.runtime.execution, trace_slot)
+
+    try:
+        runner.play(key, update)
+    except Exception as exc:
+        st.error(f"시나리오를 완료하지 못했습니다: {exc}")
+    # play resets the runtime; retain the exact instance that produced snapshots.
+    r = runner.runtime
+    st.session_state.runtime = r
+    st.session_state.trace_poll = (
+        len(runner.run.snapshots) - 1 if runner.run and runner.run.snapshots else 0
+    )
+
+
+def render_incident_history():
+    st.subheader("Incident / History")
+    incidents, history, evidence = st.tabs(
+        ["Incident 이력", "Poll History", "Evidence"]
+    )
+    with incidents:
+        rows = [
+            {
+                "종류": i.incident_type.value,
+                "Controller": i.alias or i.ip or "수집 경로",
+                "상태": "ACK"
+                if i.active and i.acknowledged
+                else "Open"
+                if i.active
+                else "Resolved"
+                if i.recovered_at
+                else "종료",
+                "최초 관측": str(i.first_detected_at),
+                "복구 시각": str(i.recovered_at or "-"),
+                "근거": i.reason,
+            }
+            for i in r.incidents.events()
+        ]
+        if rows:
+            st.dataframe(rows, hide_index=True, width="stretch")
+        else:
+            st.info("생성된 Incident가 없습니다.")
+    with history:
+        st.dataframe(r.history, hide_index=True, width="stretch")
+    with evidence:
+        st.json(
+            {
+                "detector_settings": asdict(r.engine.detector.settings),
+                "detector_state": r.engine.detector.dump_state(),
+                "transitions": [asdict(t) for t in r.transitions],
+            }
+        )
+
+
 render_window_header()
+scenario_controls = st.container()
+timeline_slot = st.empty()
+trace_selector = st.container()
+trace_slot = st.empty()
+with scenario_controls:
+    st.caption(
+        "한 번 실행하면 정상 → 이상 누적 → 장애 확정 → 복구를 자동으로 확인합니다. 실제 장비 접속 없이 합성 CLI를 production 분석 코어에 공급합니다."
+    )
+    st.caption(
+        "Controller는 무선 네트워크 관리 장비, Client는 연결 단말입니다. Incident는 확인된 이상을 추적하는 기록이며, Open은 진행 중, Resolved는 복구 완료를 뜻합니다."
+    )
+    chosen = None
+    if st.button(
+        "대표 장애 → 복구 시나리오 실행", type="primary", use_container_width=True
+    ):
+        chosen = "incident_recovery"
+    st.caption("다른 시나리오")
+    columns = st.columns(3)
+    for column, key in zip(
+        columns, ("normal", "collection_failure", "connection_change")
+    ):
+        if column.button(SCENARIOS[key], use_container_width=True):
+            chosen = key
+    if chosen:
+        start_scenario(chosen)
+
+runner = st.session_state.get("scenario_runner")
+render_scenario_timeline(runner, timeline_slot)
+r.execution.on_change = lambda: render_trace(r.execution, trace_slot)
+if runner and runner.run and runner.run.snapshots:
+    with trace_selector:
+        selected_poll = st.selectbox(
+            "Poll별 Execution Trace",
+            range(len(runner.run.snapshots)),
+            format_func=lambda i: (
+                f"Poll #{runner.run.snapshots[i].poll} · {runner.run.snapshots[i].title}"
+            ),
+            key="trace_poll",
+        )
+        st.caption(
+            "Timeline은 운영 상황의 변화, Trace는 선택한 Poll의 실제 처리 근거입니다. 아래 Dashboard는 마지막 Poll 결과입니다."
+        )
+    render_trace(runner.run.snapshots[selected_poll].trace, trace_slot)
+    if runner.run.completed:
+        st.success(runner.run.summary)
+    elif runner.run.error:
+        st.error(runner.run.error)
+else:
+    render_trace(r.execution, trace_slot)
+
 render_status_card()
 render_overview()
 render_time_row()
-controls_area = st.container()
-trace_slot = st.empty()
-r.execution.on_change = lambda: render_trace(r.execution, trace_slot)
-render_trace(r.execution, trace_slot)
-with controls_area:
-    render_controls()
-render_settings()
-
 selected = render_device_table()
 render_detail(selected)
-render_demo_shortcut()
+render_incident_history()
+with st.expander("고급 운영 / 수동 점검", expanded=False):
+    st.caption(
+        "수동 점검을 실행하면 시나리오 기록을 닫고 현재 Runtime의 관측을 이어갑니다."
+    )
+    render_controls()
+    if selected and any(
+        p.member_ip == selected for p in r.engine.pending_connection_changes()
+    ):
+        if st.button("현재 Connection-Type을 정상 기준으로 설정"):
+            st.session_state.pop("scenario_runner", None)
+            r.accept_baseline(selected)
+            st.rerun()
+    render_settings()
+    render_demo_shortcut()
 
 st.caption(
-    "Public Web Edition · production DemoPoller / Parser / CorrelationEngine / "
-    "IncidentManager 재사용 · 실제 장비 연결 없음"
+    "Public Web Edition · production DemoPoller / Parser / CorrelationEngine / Detector / IncidentManager 재사용 · 실제 장비 연결 없음"
 )
 st.link_button(
-    "GitHub Source",
-    "https://github.com/sebia1993/aruba-cluster-health-dashboard",
+    "GitHub Source", "https://github.com/sebia1993/aruba-cluster-health-dashboard"
 )
-
-# Bind UI notifications only for the active Streamlit script run.
 r.execution.on_change = None
