@@ -497,10 +497,14 @@ def render_operations_snapshot() -> None:
         incidents = str(len(r.incidents.active_incidents()))
     st.markdown(
         '<div class="health-strip">'
-        f'<div class="health-tile"><div class="k">OVERALL</div><div class="v">{escape(overall)}</div></div>'
-        f'<div class="health-tile"><div class="k">정상 응답 장비</div><div class="v">{escape(up)}</div></div>'
-        f'<div class="health-tile"><div class="k">현재 연결 단말</div><div class="v">{escape(clients)}</div></div>'
-        f'<div class="health-tile"><div class="k">확인 필요한 이상</div><div class="v">{escape(incidents)}</div></div>'
+        '<div class="health-tile"><div class="k">OVERALL</div>'
+        f'<div class="v">{escape(overall)}</div></div>'
+        '<div class="health-tile"><div class="k">정상 응답 장비</div>'
+        f'<div class="v">{escape(up)}</div></div>'
+        '<div class="health-tile"><div class="k">현재 연결 단말</div>'
+        f'<div class="v">{escape(clients)}</div></div>'
+        '<div class="health-tile"><div class="k">확인 필요한 이상</div>'
+        f'<div class="v">{escape(incidents)}</div></div>'
         '</div>',
         unsafe_allow_html=True,
     )
