@@ -350,3 +350,5 @@ Windows onedir 패키지:
 Public Web Edition은 실제 수집·분석 호출의 실행 과정과 결과값을 Execution Trace로 남깁니다. 시간은 실제 호출 기준이며, 개별 측정이 없는 결과 단계는 시간을 표시하지 않습니다.
 
 Public Web Edition에서는 대표 운영 시나리오(장애 → 복구, 정상, CLI 수집 실패, Connection-Type 변화)를 한 번의 실행으로 재생하며, 각 Poll에서 실제 Parser·Correlation·Detector·Incident 처리 과정을 Execution Trace로 확인할 수 있습니다. 세부 Poll·ACK·기준 수용은 고급 운영 / 수동 점검에 유지합니다.
+
+대표 시나리오는 정상 → 연속 이상 → Incident → 복구를 자동 재생하며, 각 Poll의 실제 수집·Parser·상관분석 결과를 Timeline으로 표시합니다. Raw·Parsed Output은 고급 운영 / 수동 점검에서 확인할 수 있습니다.
