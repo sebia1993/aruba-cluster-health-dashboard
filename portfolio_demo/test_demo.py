@@ -244,16 +244,14 @@ class ScenarioTests(unittest.TestCase):
 
     def test_one_click_app_flow_and_rerun_persistence(self):
         app = AppTest.from_file(str(Path(__file__).with_name("app.py"))).run()
-        next(
-            b for b in app.button if b.label == "대표 장애 → 복구 시나리오 실행"
-        ).click().run()
+        next(b for b in app.button if b.label == "체험 시작").click().run()
         self.assertFalse(app.exception)
         run = app.session_state.scenario_runner.run
         self.assertTrue(run.completed)
         self.assertEqual(app.session_state.runtime.health.severity.value, "normal")
         self.assertTrue(
             any(
-                "Scenario Timeline" in m.proto.body and "복구 완료" in m.proto.body
+                "data-scene" in m.proto.body and "복구 완료" in m.proto.body
                 for m in app.get("html")
             )
         )
@@ -279,8 +277,11 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(app.session_state.runtime.poll_count, count)
         self.assertEqual(app.session_state.runtime.health.severity.value, "normal")
         self.assertTrue(any("고급 운영 / 수동 점검" == e.label for e in app.expander))
-        for label in ("CLI 수집 실패", "정상 상태", "Connection-Type 변화"):
-            next(b for b in app.button if b.label == label).click().run()
+        for key in ("collection_failure", "normal", "connection_change"):
+            next(s for s in app.selectbox if s.label == "체험 시나리오").select(
+                key
+            ).run()
+            next(b for b in app.button if b.label == "체험 시작").click().run()
             self.assertFalse(app.exception)
             self.assertTrue(app.session_state.scenario_runner.run.completed)
         next(b for b in app.button if b.label == "지금 점검").click().run()
@@ -289,9 +290,7 @@ class ScenarioTests(unittest.TestCase):
 
     def test_raw_and_parsed_are_preserved_inside_advanced_area(self):
         app = AppTest.from_file(str(Path(__file__).with_name("app.py"))).run()
-        next(
-            b for b in app.button if b.label == "대표 장애 → 복구 시나리오 실행"
-        ).click().run()
+        next(b for b in app.button if b.label == "체험 시작").click().run()
         self.assertFalse(app.exception)
         advanced = next(e for e in app.expander if e.label == "고급 운영 / 수동 점검")
         self.assertTrue(
@@ -308,9 +307,7 @@ if __name__ == "__main__":
 class GuidedFlowTests(unittest.TestCase):
     def test_navigation_keeps_execution_identity_and_results_on_rerun(self):
         app = AppTest.from_file(str(Path(__file__).with_name("app.py"))).run()
-        next(
-            b for b in app.button if b.label == "대표 장애 → 복구 시나리오 실행"
-        ).click().run()
+        next(b for b in app.button if b.label == "체험 시작").click().run()
         self.assertFalse(app.exception)
         token = app.session_state.guided_run_id
         runner = app.session_state.scenario_runner
@@ -319,13 +316,74 @@ class GuidedFlowTests(unittest.TestCase):
             h.proto.body for h in app.get("html") if 'id="guided-flow"' in h.proto.body
         )
         self.assertIn('data-phase="result"', html)
-        self.assertIn('aria-label="실행 단계 선택"', html)
+        self.assertIn("data-toggle", html)
         app.run()
         self.assertFalse(app.exception)
         self.assertEqual(token, app.session_state.guided_run_id)
         self.assertIs(runner, app.session_state.scenario_runner)
         self.assertIs(runtime, app.session_state.runtime)
-        next(
-            b for b in app.button if b.label == "대표 장애 → 복구 시나리오 실행"
-        ).click().run()
+        next(b for b in app.button if b.label == "체험 시작").click().run()
         self.assertNotEqual(token, app.session_state.guided_run_id)
+
+
+class StoryTests(unittest.TestCase):
+    def test_story_uses_each_snapshot_not_final_runtime(self):
+        from portfolio_demo.story_view import snapshot_card, render_story
+
+        runner = ScenarioRunner()
+        run = runner.run_incident_recovery()
+        anomaly = snapshot_card(run.snapshots[1], run.snapshots[0])
+        self.assertIn("연결 단말 260 → 0", anomaly)
+        self.assertIn("이상 관측 · 확정 대기", anomaly)
+        self.assertIn("연결 0 · 대기 4", anomaly)
+        self.assertNotIn("복구 완료</h4>", anomaly)
+        confirmed = snapshot_card(run.snapshots[3], run.snapshots[2])
+        self.assertIn("3/3", confirmed)
+        self.assertIn("진행 중 이상 <b>1</b>", confirmed)
+        recovery = snapshot_card(run.snapshots[4], run.snapshots[3])
+        self.assertIn("연결 단말 0 → 260", recovery)
+        self.assertIn("1/2", recovery)
+        final = render_story(run).split("data-summary", 1)[1]
+        self.assertIn("이번에 확인한 과정", final)
+        self.assertIn("이상 확정 · 주의 기록 생성", final)
+        self.assertIn("복구 완료 <b>1</b>", final)
+        self.assertEqual(render_story(run).count("data-scene"), len(run.snapshots))
+
+    def test_unknown_baseline_change_and_custom_threshold_narration(self):
+        from portfolio_demo.story_view import render_story
+
+        runner = ScenarioRunner()
+        failed = render_story(runner.run_collection_failure())
+        self.assertIn("응답 장비 <b>확인 불가 / 4", failed)
+        self.assertIn("장비가 꺼졌다는 뜻이 아닙니다", failed)
+        changed = render_story(runner.run_connection_change())
+        self.assertIn("Type-A → Type-B", changed)
+        self.assertIn("정상 기준은 자동 변경하지 않습니다", changed)
+        runner = ScenarioRunner(
+            AnomalySettings(anomaly_confirmations=4, recovery_confirmations=3)
+        )
+        custom = render_story(runner.run_incident_recovery())
+        self.assertIn("4/4", custom)
+        self.assertIn("3/3", custom)
+        self.assertEqual(custom.count("data-scene"), 8)
+
+    def test_interrupted_story_preserves_evidence_and_escapes_text(self):
+        from portfolio_demo.story_view import render_story
+
+        runner = ScenarioRunner()
+        # Inject at the real poll boundary after play resets its runtime.
+        with patch.object(DemoRuntime, "poll", autospec=True) as poll:
+            poll.side_effect = RuntimeError("interrupted")
+            with self.assertRaises(RuntimeError):
+                runner.run_normal()
+        self.assertFalse(runner.run.completed)
+        self.assertIn("완료된 관측이 없습니다", render_story(runner.run))
+        run = ScenarioRunner().run_normal()
+        run.completed = False
+        run.error = "failure"
+        run.snapshots = run.snapshots[:1]
+        run.snapshots[0].explanation = '<script>alert("x")</script>'
+        html = render_story(run)
+        self.assertIn("중단 전 마지막 관측", html)
+        self.assertNotIn("<script>", html)
+        self.assertIn("&lt;script&gt;", html)

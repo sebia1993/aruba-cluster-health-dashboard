@@ -8,7 +8,7 @@ from portfolio_demo.execution_trace import ExecutionTrace
 from portfolio_demo.runtime import DemoRuntime
 
 SCENARIOS = {
-    "incident_recovery": "대표 장애 → 복구",
+    "incident_recovery": "단말 분배 이상 → 복구",
     "normal": "정상 상태",
     "collection_failure": "CLI 수집 실패",
     "connection_change": "Connection-Type 변화",
@@ -170,10 +170,10 @@ class ScenarioRunner:
             title = "복구 완료"
             explanation = f"{names}에서 연속 정상 관측 {recovery}/{settings.recovery_confirmations}회가 확인되어 Incident가 종료되었습니다."
         elif recovery:
-            title = "복구 관측 · Incident 유지"
+            title = "복구 관측 · 이상 기록 유지"
             explanation = f"{names}의 정상 값이 다시 관측됐지만 복구 기준 {recovery}/{settings.recovery_confirmations}회로, 아직 Incident를 유지합니다."
         elif any(v.active for v in evaluation.values()):
-            title = "장애 조건 충족 · Incident 생성"
+            title = "이상 확정 · 주의 기록 생성"
             explanation = f"{names}의 Client 분배 이상이 연속 {anomaly}/{settings.anomaly_confirmations}회 확인되어 주의 Incident를 생성했습니다. 장비 Down을 뜻하지는 않습니다."
         elif anomaly:
             title = "이상 징후 최초 관측" if anomaly == 1 else "이상 지속 · 확정 전"

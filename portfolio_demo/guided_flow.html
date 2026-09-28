@@ -1,20 +1,29 @@
-<section id="guided-flow" data-run="__RUN_ID__" data-phase="__PHASE__" aria-label="안내형 실행 화면" style="scroll-margin-top:70px">
+<section id="guided-flow" data-run="__RUN_ID__" data-phase="__PHASE__" aria-label="안내형 실행 화면" style="scroll-margin-top:65px">
 <style>
 #guided-flow {border:1px solid #8886;border-radius:12px;padding:1rem;margin:.5rem 0;overflow-wrap:anywhere}
-#guided-flow h3 {margin:0 0 .6rem}
-#guided-flow .guide-nav {display:flex;flex-wrap:wrap;gap:.5rem;margin:.5rem 0}
-#guided-flow button,#guided-flow select {font:inherit;color:inherit;background:transparent;border:1px solid #8888;border-radius:8px;padding:.5rem;max-width:100%;cursor:pointer}
-#guided-flow select {flex:1;min-width:160px}
-#guided-flow select option {color:#111;background:#fff}
+#guided-flow h3 {margin:0 0 .4rem;font-size:1.15rem}
+#guided-flow h4 {margin:.5rem 0;font-size:1.1rem}
+#guided-flow p {margin:.5rem 0;line-height:1.5}
+#guided-flow .guide-nav {display:flex;flex-wrap:wrap;gap:.4rem;margin:.6rem 0}
+#guided-flow button {font:inherit;color:inherit;background:transparent;border:1px solid #8888;border-radius:8px;padding:.45rem .65rem;cursor:pointer}
+#guided-flow button:disabled {opacity:.4;cursor:default}
+#guided-flow button[data-toggle] {border-color:#62b9ff}
 #guided-flow [hidden] {display:none!important}
-#guided-flow .scenario-grid {display:block}
-#guided-flow article {margin:.5rem 0!important}
-#guided-flow section > h3,#guided-flow section > p {display:none}
+#guided-flow .story-metrics {display:flex;flex-wrap:wrap;gap:.4rem 1rem;padding:.6rem 0;font-size:.85rem}
+#guided-flow .story-devices {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.4rem}
+#guided-flow .story-device {border:1px solid #8885;border-radius:8px;padding:.5rem;font-size:.82rem}
+#guided-flow .story-device span,#guided-flow small {display:block}
+#guided-flow .story-focus {border:2px solid #d9ac58}
+#guided-flow .story-recap {font-size:.85rem}
+#guided-flow [data-readout],#guided-flow .story-note {font-size:.82rem}
 #guided-flow :focus-visible {outline:3px solid #4f9eff;outline-offset:3px}
-@media(max-width:600px) {#guided-flow {padding:.7rem} #guided-flow select {width:100%;flex-basis:100%}}
+@media(max-width:600px) {#guided-flow {padding:.7rem} #guided-flow p {font-size:.88rem} #guided-flow button {font-size:.85rem} #guided-flow .story-device {font-size:.75rem}}
 </style>
 <h3 tabindex="-1">__TITLE__</h3>
-<p data-readout role="status" aria-live="polite">실제 실행 기록을 확인합니다.</p>
-<div class="guide-nav"><button data-follow type="button">현재 단계 따라가기</button><button data-replay type="button">과정 다시 보기</button></div>
-<div class="guide-nav" data-steps><select aria-label="실행 단계 선택"><option value="-1">최종 결과</option></select><button data-back type="button" aria-label="이전 단계">← 이전</button><button data-next type="button" aria-label="다음 단계">다음 →</button></div>
-<div>__BODY__</div></section>
+<p class="story-note">샘플 분석 결과를 순서대로 보여주는 시나리오 해설입니다. 실제 장비의 실시간 감시는 아닙니다.</p>
+<p data-readout role="status" aria-live="polite">분석 기록을 준비하고 있습니다.</p>
+<div class="guide-nav" data-controls hidden><button data-toggle type="button">일시정지</button><button data-back type="button">이전</button><button data-next type="button">다음</button><button data-result type="button">결과 바로보기</button><button data-replay type="button">다시 보기</button></div>
+<p data-error role="alert" __ERROR_HIDDEN__>실행 중단 · __ERROR__</p>
+<div>__BODY__</div>
+<noscript>자동 해설에는 JavaScript가 필요합니다. 아래 상세 결과에서 관측 기록을 확인할 수 있습니다.</noscript>
+</section>
