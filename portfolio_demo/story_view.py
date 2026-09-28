@@ -69,6 +69,7 @@ def snapshot_card(snap, previous=None, *, final=False):
         .replace("Incident를", "이상 기록을")
         .replace("Incident가", "이상 기록이")
         .replace("Incident", "이상 기록")
+        .replace("장비 Down으로", "장비가 꺼졌다고")
         .replace("장비 Down", "장비가 꺼졌음")
         .replace("Collection Failure는 수집 경로의 문제 기록입니다.", "")
     )

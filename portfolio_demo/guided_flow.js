@@ -52,16 +52,19 @@
  root.querySelector('[data-replay]').addEventListener('click',() => {state.index=0;state.playing=true;paint();});
  const visibility = () => {if (document.hidden) pause();};
  const manual = e => {if (!root.contains(e.target)) pause();};
+ const keyboard = e => {if (['PageUp','PageDown','Home','End','ArrowUp','ArrowDown'].includes(e.key)) pause();};
  document.addEventListener('visibilitychange',visibility);
  document.addEventListener('wheel',pause,{passive:true});
  document.addEventListener('touchmove',pause,{passive:true});
  document.addEventListener('click',manual);
+ document.addEventListener('keydown',keyboard);
  state.cleanup = () => {
    stopTimer();
    document.removeEventListener('visibilitychange',visibility);
    document.removeEventListener('wheel',pause);
    document.removeEventListener('touchmove',pause);
    document.removeEventListener('click',manual);
+   document.removeEventListener('keydown',keyboard);
  };
  if (ready && !state.started) {
    state.started=true;
