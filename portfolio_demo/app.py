@@ -535,7 +535,7 @@ def render_scenario_timeline(runner, slot):
         current = " scenario-current" if index == run.current_index else ""
         cards.append(
             f'<article class="scenario-card{current}"><h4>Poll #{snap.poll} · {escape(snap.title)}</h4>'
-            f"<p><b>종합: {ko_status(snap.health.severity.value)}</b> · Controller Up: {client_value(snap.up)} / {len(snap.health.devices)}"
+            f"<p><b>종합(확정 판정): {ko_status(snap.health.severity.value)}</b> · Controller Up: {client_value(snap.up)} / {len(snap.health.devices)}"
             f" · 전체 Active: {client_value(snap.active_total)}</p>"
             f"<p>{escape(focus)}</p>"
             f"<p>연속 이상 {snap.anomaly_count}/{settings.anomaly_confirmations} · 복구 관측 {snap.recovery_count}/{settings.recovery_confirmations}</p>"
@@ -641,6 +641,9 @@ trace_slot = st.empty()
 with scenario_controls:
     st.caption(
         "한 번 실행하면 정상 → 이상 누적 → 장애 확정 → 복구를 자동으로 확인합니다. 실제 장비 접속 없이 합성 CLI를 production 분석 코어에 공급합니다."
+    )
+    st.caption(
+        "Controller는 무선 네트워크 관리 장비, Client는 연결 단말입니다. Incident는 확인된 이상을 추적하는 기록이며, Open은 진행 중, Resolved는 복구 완료를 뜻합니다."
     )
     chosen = None
     if st.button(
