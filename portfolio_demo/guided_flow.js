@@ -12,6 +12,9 @@
  const controls = root.querySelector('[data-controls]');
  const readout = root.querySelector('[data-readout]');
  const toggle = root.querySelector('[data-toggle]');
+ const progressFill = root.querySelector('[data-progress-fill]');
+ const progressLabel = root.querySelector('[data-progress-label]');
+ const progressPercent = root.querySelector('[data-progress-percent]');
  let timer;
  function stopTimer() {clearTimeout(timer);}
  function schedule() {
@@ -36,6 +39,18 @@
      readout.textContent = root.dataset.phase === 'error' ? '해설 종료 · 실행이 중단되어 전체 결론을 내릴 수 없습니다.' : '해설 완료 · 관측부터 판단까지의 흐름을 확인했습니다.';
    } else {
      readout.textContent = `장면 ${state.index+1}/${scenes.length} · ${state.playing ? '자동 전개 · 약 4초 간격' : '일시정지'} · ${scenes[state.index].querySelector('h4').textContent}`;
+   }
+   const total = scenes.length || 1;
+   const shown = finished ? scenes.length : Math.min(state.index + 1, scenes.length);
+   const percent = finished ? 100 : Math.round((shown / total) * 100);
+   if (progressFill) progressFill.style.width = percent + '%';
+   if (progressPercent) progressPercent.textContent = percent + '%';
+   if (progressLabel) {
+     progressLabel.textContent = finished
+       ? '시나리오 완료'
+       : ready
+       ? `장면 ${shown} / ${scenes.length}`
+       : '분석 준비';
    }
    toggle.textContent = state.playing ? '일시정지' : '계속';
    toggle.disabled = finished;
