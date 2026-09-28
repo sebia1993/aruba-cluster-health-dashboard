@@ -28,14 +28,61 @@ class PollBridge:
     def correlate(self, cycle):
         cycle.expected_cluster_members = dict(TOPOLOGY)
         self.runtime.raw = dict(cycle.raw_outputs)
-        return self.runtime.engine.correlate(cycle)
+        trace = self.runtime.execution
+        parsed = (cycle.mm_result, cycle.load_result, cycle.membership_result)
+        counts = [
+            len(result.rows) if result and result.is_complete else None
+            for result in parsed
+        ]
+        trace.record(
+            "parser",
+            "Production Parser",
+            "success" if all(n is not None for n in counts) else "warning",
+            "MM / Client / Membership 관측 행: "
+            + " / ".join(str(n) if n is not None else "확인 불가" for n in counts),
+            {"rows": counts},
+        )
+        with trace.step("correlation", "IP 기준 상관분석 / Detector") as step:
+            health = self.runtime.engine.correlate(cycle)
+            unknown = sum(d.severity.value == "unknown" for d in health.devices)
+            step.status = "warning" if unknown else "success"
+            step.detail = f"대상 {len(health.devices)}대 · 확인 불가 {unknown}대 · {health.summary}"
+            step.evidence = {"controllers": len(health.devices), "unknown": unknown}
+        return health
+
+
+from portfolio_demo.execution_trace import ExecutionTrace, traced
+
+
+class EvidencePoller(DemoPoller):
+    def _read(self, filename):
+        trace = self.engine.runtime.execution
+        stage = self.last_stage
+        label = next(
+            (
+                label
+                for name, label in (
+                    (stage.mm_fixture, "MM Controller 상태 수집"),
+                    (stage.load_fixture, "Client 분배 수집"),
+                    (stage.membership_fixture, "Cluster Membership 수집"),
+                )
+                if filename == name
+            ),
+            "합성 CLI 수집",
+        )
+        with trace.step("collect", label, filename) as step:
+            output = super()._read(filename)
+            step.detail = f"{filename} · {len(output.splitlines())}줄 수집"
+            step.evidence = {"fixture": filename, "lines": len(output.splitlines())}
+            return output
 
 
 class DemoRuntime:
     def __init__(self):
+        self.execution = ExecutionTrace()
         self.engine = CorrelationEngine()
         self.incidents = IncidentManager()
-        self.poller = DemoPoller(PollBridge(self))
+        self.poller = EvidencePoller(PollBridge(self))
         self.health = None
         self.raw = {}
         self.history = []
@@ -44,6 +91,7 @@ class DemoRuntime:
         self.poll_count = 0
         self.stage = "아직 점검하지 않음"
 
+    @traced("Controller 점검")
     def poll(self, failure=False):
         if self.poll_count >= 100:
             self.running = False
@@ -52,7 +100,11 @@ class DemoRuntime:
             )
         if failure:
             self.raw = {}
-            self.health = self.engine.correlate(
+            for source in ("MM Controller 상태", "Client 분배", "Cluster Membership"):
+                self.execution.record(
+                    "collect", source, "failure", "CLI Timeout · 관측 확인 불가"
+                )
+            self.health = PollBridge(self).correlate(
                 PollCycleResult(
                     checked_at=datetime.now(timezone.utc),
                     expected_cluster_members=dict(TOPOLOGY),
@@ -75,7 +127,15 @@ class DemoRuntime:
             self.health = self.poller()
             self.stage = self.poller.last_stage.name
         self.poll_count += 1
-        self.transitions.extend(self.incidents.process(self.health))
+        with self.execution.step("incident", "Incident 판정") as step:
+            transitions = self.incidents.process(self.health)
+            self.transitions.extend(transitions)
+            active = self.incidents.active_incidents()
+            step.status = (
+                "warning" if self.health.severity.value != "normal" else "success"
+            )
+            step.detail = f"활성 Incident {len(active)}건 · 이번 전이 {len(transitions)}건 · {self.health.summary}"
+            step.evidence = {"active": len(active), "transitions": len(transitions)}
         self.history.append(
             {
                 "Poll": self.poll_count,

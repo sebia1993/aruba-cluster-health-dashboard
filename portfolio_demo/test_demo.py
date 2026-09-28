@@ -75,9 +75,9 @@ class DemoTests(unittest.TestCase):
             click("자동 시작")
             for _ in range(3):
                 click("다음 Poll")
-            next(
-                box for box in app.selectbox if box.label == "선택 Controller"
-            ).select("192.0.2.12").run()
+            next(box for box in app.selectbox if box.label == "선택 Controller").select(
+                "192.0.2.12"
+            ).run()
             click("알림 확인")
             self.assertEqual(app.session_state.runtime.health.severity.value, "warning")
             click("일시정지")
@@ -95,6 +95,46 @@ class DemoTests(unittest.TestCase):
             click("대표 장애 상태까지 자동 재생")
             self.assertEqual(app.session_state.runtime.poll_count, 6)
             self.assertIsNotNone(app.session_state.runtime.health)
+
+    def test_execution_trace_counts_unknown_and_live_updates(self):
+        r = DemoRuntime()
+        updates = []
+        r.execution.on_change = lambda: updates.append(
+            [s.status for s in r.execution.steps]
+        )
+        health = r.poll()
+        steps = {s.id: s for s in r.execution.steps}
+        self.assertTrue(
+            {"collect", "parser", "correlation", "incident"} <= steps.keys()
+        )
+        self.assertEqual(steps["parser"].evidence["rows"], [len(health.devices)] * 3)
+        self.assertEqual(
+            steps["correlation"].evidence["controllers"], len(health.devices)
+        )
+        self.assertTrue(any("running" in update for update in updates))
+        self.assertIsNotNone(r.execution.elapsed_ms)
+        self.assertTrue(all(s.status != "running" for s in r.execution.steps))
+        r.poll(failure=True)
+        steps = {s.id: s for s in r.execution.steps}
+        self.assertEqual(steps["parser"].evidence["rows"], [None, None, None])
+        self.assertEqual(
+            steps["correlation"].evidence["unknown"], len(r.health.devices)
+        )
+        self.assertTrue(any(s.status == "failure" for s in r.execution.steps))
+        app = AppTest.from_file(str(Path(__file__).with_name("app.py"))).run()
+        next(b for b in app.button if b.label == "지금 점검").click().run()
+        self.assertFalse(app.exception)
+        self.assertTrue(
+            any(
+                "실행 과정" in m.value and "Production Parser" in m.value
+                for m in app.markdown
+            )
+        )
+        self.assertEqual(
+            next(m.value for m in app.metric if m.label == "Controller Up"), "4 / 4"
+        )
+        app.run()
+        self.assertTrue(any("실행 과정" in m.value for m in app.markdown))
 
 
 if __name__ == "__main__":
