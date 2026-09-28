@@ -52,6 +52,15 @@ class DemoTests(unittest.TestCase):
         self.assertTrue(all(d.mm_status is None for d in r.health.devices))
         self.assertEqual(r.poller.index, 4)
 
+    def test_timeout_ui_never_reports_zero_up(self):
+        app = AppTest.from_file(str(Path(__file__).with_name("app.py"))).run()
+        app.session_state.runtime.poll(failure=True)
+        app.run()
+        self.assertFalse(app.exception)
+        metrics = {item.label: item.value for item in app.metric}
+        self.assertEqual(metrics["Controller Up"], "확인 불가 4 / 4")
+        self.assertEqual(metrics["전체 Active Client"], "확인 불가")
+
     def test_ui_poll_filter_ack_pause_reset_and_isolation(self):
         with patch(
             "socket.create_connection", side_effect=AssertionError("No network")

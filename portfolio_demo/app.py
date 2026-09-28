@@ -88,6 +88,7 @@ st.markdown(
         color: #8392a4;
         font-size: .78rem;
     }
+    [data-testid="stMetricValue"] {white-space: normal; overflow-wrap: anywhere; font-size: clamp(1rem, 2.2vw, 2rem);}
     </style>
     """,
     unsafe_allow_html=True,
@@ -181,16 +182,18 @@ def render_overview() -> None:
         incident_count = 0
     else:
         overall = ko_status(r.health.severity.value)
+        unknown = sum(d.mm_status is None for d in r.health.devices)
+        up = sum((d.mm_status or '').lower() == 'up' for d in r.health.devices)
         controller_up = (
-            f"{sum((d.mm_status or '').lower() == 'up' for d in r.health.devices)}"
-            f" / {len(r.health.devices)}"
+            f"확인 불가 {unknown} / {len(r.health.devices)}"
+            if unknown else f"{up} / {len(r.health.devices)}"
         )
         known = [
             d.active_clients
             for d in r.health.devices
             if d.active_clients is not None
         ]
-        active_total = sum(known) if known else "확인 불가"
+        active_total = sum(known) if len(known) == len(r.health.devices) else "확인 불가"
         incident_count = len(r.incidents.active_incidents())
 
     cols = st.columns(4)
