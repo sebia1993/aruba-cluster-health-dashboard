@@ -63,16 +63,16 @@ class DemoTests(unittest.TestCase):
                 self.assertFalse(app.exception)
 
             self.assertIsNone(app.session_state.runtime.health)
-            click("자동 점검 시작")
+            click("자동 시작")
             for _ in range(3):
                 click("다음 Poll")
-            app.selectbox[1].select("192.0.2.12").run()
-            click("알림 확인 · ACK")
+            next(
+                box for box in app.selectbox if box.label == "선택 Controller"
+            ).select("192.0.2.12").run()
+            click("알림 확인")
             self.assertEqual(app.session_state.runtime.health.severity.value, "warning")
             click("일시정지")
-            self.assertTrue(
-                next(b for b in app.button if b.label == "다음 Poll").disabled
-            )
+            self.assertFalse(app.session_state.runtime.running)
             app.run()
             self.assertEqual(app.session_state.runtime.poll_count, 4)
             other = AppTest.from_file(str(Path(__file__).with_name("app.py"))).run()
@@ -83,7 +83,7 @@ class DemoTests(unittest.TestCase):
             click("지금 점검")
             self.assertEqual(app.session_state.runtime.health.severity.value, "normal")
             click("Demo Reset")
-            click("▶ 대표 장애 시나리오 1-click")
+            click("대표 장애 상태까지 자동 재생")
             self.assertEqual(app.session_state.runtime.poll_count, 6)
             self.assertIsNotNone(app.session_state.runtime.health)
 

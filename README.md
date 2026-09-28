@@ -6,6 +6,9 @@
 
 Live Demo에서는 **대표 장애 시나리오 1-click**을 누르면 정상 관측 → 이상 누적 → Incident 생성 흐름을 바로 볼 수 있습니다. 실제 장비 대신 비식별 합성 CLI만 사용하지만 Parser·상관분석·Incident 판단은 프로젝트의 production 로직을 재사용합니다.
 
+> **Public Web Edition:** 실제 PySide6 `Aruba 네트워크 상태 미니보드`의 전체 상태 카드, Overview KPI, Controller 표, 장비 검색/필터, 상세 정보(요약/파싱/원본), 점검·자동·ACK 흐름을 브라우저로 옮겼습니다. 공개 URL에서는 실제 SSH 대신 비식별 합성 CLI만 공급하며 Parser·CorrelationEngine·IncidentManager는 동일 production 로직을 사용합니다.
+
+
 [![Windows CI](https://github.com/sebia1993/aruba-cluster-health-dashboard/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/sebia1993/aruba-cluster-health-dashboard/actions/workflows/ci-windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
