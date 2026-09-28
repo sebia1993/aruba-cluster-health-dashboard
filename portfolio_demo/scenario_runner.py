@@ -8,10 +8,28 @@ from portfolio_demo.execution_trace import ExecutionTrace
 from portfolio_demo.runtime import DemoRuntime
 
 SCENARIOS = {
-    "incident_recovery": "단말 분배 이상 → 복구",
-    "normal": "정상 상태",
-    "collection_failure": "CLI 수집 실패",
-    "connection_change": "Connection-Type 변화",
+    "incident_recovery": "특정 장비의 연결 단말 감소 → 정상 복구",
+    "normal": "모든 장비 정상",
+    "collection_failure": "장비 정보를 가져오지 못한 상황",
+    "connection_change": "장비 간 연결 상태 변화",
+}
+
+SCENARIO_DESCRIPTIONS = {
+    "incident_recovery": (
+        "특정 장비의 연결 단말 수가 급감한 상태를 반복 관측하고, "
+        "문제 확정 후 정상 상태가 연속 확인되면 복구 처리하는 흐름입니다."
+    ),
+    "normal": (
+        "모든 장비가 정상적으로 응답하고 연결 단말 수도 정상인 상태가 반복되는 흐름입니다."
+    ),
+    "collection_failure": (
+        "장비 상태 정보를 가져오지 못했을 때 이를 장비 고장으로 단정하지 않고 "
+        "'확인 불가'로 처리하는 흐름입니다."
+    ),
+    "connection_change": (
+        "장비 간 연결 상태가 기존 정상 기준과 달라졌을 때 자동으로 정상 처리하지 않고 "
+        "확인 대상으로 남기는 흐름입니다."
+    ),
 }
 
 
