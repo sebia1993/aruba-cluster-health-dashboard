@@ -247,6 +247,15 @@ class ScenarioTests(unittest.TestCase):
         self.assertTrue(
             any("이 프로젝트는 무엇을 해결하나요?" in m.value for m in app.markdown)
         )
+        self.assertTrue(
+            any("ENTERPRISE WLAN OPERATIONS" in m.value for m in app.markdown)
+        )
+        self.assertTrue(
+            any("CLUSTER TOPOLOGY" in m.value for m in app.markdown)
+        )
+        self.assertTrue(
+            any("OPERATIONS TIMELINE" in m.value for m in app.markdown)
+        )
         self.assertFalse(
             any(e.label == "프로젝트 목적과 체험 안내" for e in app.expander)
         )
