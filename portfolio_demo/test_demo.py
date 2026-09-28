@@ -133,7 +133,7 @@ class DemoTests(unittest.TestCase):
             )
         )
         self.assertEqual(
-            next(m.value for m in app.metric if m.label == "Controller Up"), "4 / 4"
+            next(m.value for m in app.metric if m.label == "정상 응답 장비"), "4 / 4"
         )
         app.run()
         self.assertTrue(any("실행 과정" in m.value for m in app.markdown))
@@ -271,7 +271,7 @@ class ScenarioTests(unittest.TestCase):
         self.assertTrue(any("IP" in list(df.value.columns) for df in app.dataframe))
         self.assertTrue(
             any(
-                "상태" in df.value.columns and "Resolved" in df.value["상태"].tolist()
+                "상태" in df.value.columns and "복구 완료" in df.value["상태"].tolist()
                 for df in app.dataframe
             )
         )
