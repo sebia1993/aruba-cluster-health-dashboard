@@ -346,3 +346,5 @@ Windows onedir 패키지:
 ## 라이선스
 
 프로젝트 자체 코드는 [MIT License](LICENSE)를 사용합니다. Windows 배포물의 PySide6/Qt 및 기타 제3자 구성요소는 각 라이선스와 고지를 따르며, 상세 내용은 `THIRD_PARTY_NOTICES.txt`, `QT_THIRD_PARTY_NOTICES.txt`, `LGPL_RUNTIME_LICENSES/` 및 [LGPL 런타임 교체 안내](docs/LGPL_RUNTIME_REPLACEMENT_KO_EN.md)를 참고하십시오.
+
+Public Web Edition은 실제 수집·분석 호출의 실행 과정과 결과값을 Execution Trace로 남깁니다. 시간은 실제 호출 기준이며, 개별 측정이 없는 결과 단계는 시간을 표시하지 않습니다.

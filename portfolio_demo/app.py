@@ -9,6 +9,8 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from portfolio_demo.runtime import DemoRuntime, TOPOLOGY
 
+from portfolio_demo.execution_trace import render_trace
+
 st.set_page_config(
     page_title="Aruba 네트워크 상태 미니보드 · Public Web Edition",
     page_icon="📡",
@@ -477,6 +479,7 @@ def render_demo_shortcut() -> None:
         c = st.columns(2)
         if c[0].button("대표 장애 상태까지 자동 재생", use_container_width=True):
             demo = DemoRuntime()
+            demo.execution.on_change = lambda: render_trace(demo.execution, trace_slot)
             for _ in range(6):
                 demo.poll()
             st.session_state.runtime = demo
@@ -491,7 +494,12 @@ render_window_header()
 render_status_card()
 render_overview()
 render_time_row()
-render_controls()
+controls_area = st.container()
+trace_slot = st.empty()
+r.execution.on_change = lambda: render_trace(r.execution, trace_slot)
+render_trace(r.execution, trace_slot)
+with controls_area:
+    render_controls()
 render_settings()
 
 selected = render_device_table()
@@ -506,3 +514,6 @@ st.link_button(
     "GitHub Source",
     "https://github.com/sebia1993/aruba-cluster-health-dashboard",
 )
+
+# Bind UI notifications only for the active Streamlit script run.
+r.execution.on_change = None
