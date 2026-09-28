@@ -54,7 +54,8 @@ def snapshot_card(snap, previous=None, *, final=False):
         if d.ip in focused and status == "정상" and snap.anomaly_count:
             status = "이상 관측 · 확정 대기"
         cards.append(
-            '<div class="story-device'
+            '<div class="story-device '
+            + d.severity.value
             + (" story-focus" if d.ip in focused else "")
             + '">'
             f"<b>{escape(d.display_name)}</b><span>{escape(status)}</span>"
@@ -76,14 +77,27 @@ def snapshot_card(snap, previous=None, *, final=False):
     opened = sum(i.active for i in snap.incidents)
     resolved = sum(bool(i.recovered_at) and not i.active for i in snap.incidents)
     return (
-        f"<article {'data-summary' if final else 'data-scene'} hidden>"
+        f"<article {'data-summary' if final else 'data-scene'} "
+        f'data-state="{escape(snap.health.severity.value)}" hidden>'
+        '<div class="story-head">'
         f"<h4>{escape(title)}</h4>"
-        f"<p><b>관측</b> · {escape(observation(snap, previous))}</p>"
-        f"<p><b>판단</b> · {escape(explanation)}</p>"
+        f'<span class="story-badge">{escape(state)}</span>'
+        "</div>"
+        '<div class="story-analysis">'
+        '<section class="story-block observation">'
+        '<span class="story-block-label">OBSERVATION · 관측</span>'
+        f"<p>{escape(observation(snap, previous))}</p>"
+        "</section>"
+        '<section class="story-block judgement">'
+        '<span class="story-block-label">DECISION · 판단</span>'
+        f"<p>{escape(explanation)}</p>"
+        "</section>"
+        "</div>"
         '<div class="story-metrics">'
-        f"<span>응답 장비 <b>{value(snap.up)} / {len(snap.health.devices)}</b></span>"
-        f"<span>연결 단말 <b>{value(snap.active_total)}</b></span>"
-        f"<span>진행 중 이상 <b>{opened}</b> · 복구 완료 <b>{resolved}</b></span></div>"
+        f"<span>응답 장비<b>{value(snap.up)} / {len(snap.health.devices)}</b></span>"
+        f"<span>연결 단말<b>{value(snap.active_total)}</b></span>"
+        f"<span>현재 이상 / 복구<b>{opened} / {resolved}</b></span>"
+        "</div>"
         '<div class="story-devices">' + "".join(cards) + "</div></article>"
     )
 
