@@ -11,6 +11,12 @@ from aruba_mini_dashboard.demo import DEMO_STAGES, DemoPoller
 from aruba_mini_dashboard.models import CollectionError, IncidentType, PollCycleResult
 from aruba_mini_dashboard.services.correlation_engine import CorrelationEngine
 from aruba_mini_dashboard.services.incident_manager import IncidentManager
+from aruba_mini_dashboard.services.anomaly_detector import AnomalyDetector
+from aruba_mini_dashboard.collectors.base import (
+    SHOW_SWITCHES,
+    SHOW_CLIENT_DISTRIBUTION,
+    SHOW_GROUP_MEMBERSHIP,
+)
 
 TOPOLOGY = {f"192.0.2.{i}": f"DEMO-MD-{i - 10:02}" for i in range(11, 15)}
 
@@ -72,15 +78,33 @@ class EvidencePoller(DemoPoller):
         )
         with trace.step("collect", label, filename) as step:
             output = super()._read(filename)
-            step.detail = f"{filename} · {len(output.splitlines())}줄 수집"
-            step.evidence = {"fixture": filename, "lines": len(output.splitlines())}
+            command = {
+                stage.mm_fixture: SHOW_SWITCHES,
+                stage.load_fixture: SHOW_CLIENT_DISTRIBUTION,
+                stage.membership_fixture: SHOW_GROUP_MEMBERSHIP,
+            }[filename]
+            step.detail = f"{command} · {filename} · {len(output.splitlines())}줄 수집"
+            step.evidence = {
+                "fixture": filename,
+                "command": command,
+                "lines": len(output.splitlines()),
+            }
             return output
 
 
+class EvidenceDetector(AnomalyDetector):
+    """Observe the real evaluation, including recovery before counters reset."""
+
+    def evaluate_client_distribution(self, *args, **kwargs):
+        self.before = self.dump_state()
+        self.evaluations = super().evaluate_client_distribution(*args, **kwargs)
+        return self.evaluations
+
+
 class DemoRuntime:
-    def __init__(self):
+    def __init__(self, settings=None):
         self.execution = ExecutionTrace()
-        self.engine = CorrelationEngine()
+        self.engine = CorrelationEngine(detector=EvidenceDetector(settings))
         self.incidents = IncidentManager()
         self.poller = EvidencePoller(PollBridge(self))
         self.health = None
@@ -92,7 +116,7 @@ class DemoRuntime:
         self.stage = "아직 점검하지 않음"
 
     @traced("Controller 점검")
-    def poll(self, failure=False):
+    def poll(self, failure=False, *, stage_index=None):
         if self.poll_count >= 100:
             self.running = False
             raise ValueError(
@@ -122,10 +146,43 @@ class DemoRuntime:
             )
             self.stage = "수집 Timeout · 단계 진행 보류"
         else:
+            if stage_index is not None:
+                if not 0 <= stage_index < len(DEMO_STAGES):
+                    raise ValueError("유효하지 않은 합성 입력 단계입니다.")
+                self.poller.index = stage_index
             # Hold the final stage instead of silently resetting the engine.
             self.poller.index = min(self.poller.index, len(DEMO_STAGES) - 1)
             self.health = self.poller()
             self.stage = self.poller.last_stage.name
+        detector = self.engine.detector
+        evaluations = {ip: asdict(value) for ip, value in detector.evaluations.items()}
+        counts = " / ".join(
+            f"{TOPOLOGY.get(ip, ip)} 이상 {e['anomaly_streak']}/{detector.settings.anomaly_confirmations}, "
+            f"복구 {int(detector.before.get('load|' + ip, {}).get('recovery_streak', 0)) + 1 if e['recovered'] else e['recovery_streak']}/{detector.settings.recovery_confirmations}"
+            + (" (복구 확정, 내부 counter는 0으로 초기화)" if e["recovered"] else "")
+            for ip, e in evaluations.items()
+            if e["anomaly_streak"] or e["recovery_streak"] or e["recovered"]
+        )
+        self.execution.record(
+            "detector",
+            "Detector 연속 관측 판정",
+            "warning"
+            if any(
+                e["active"] or e["deferred"] or e["condition_met"]
+                for e in evaluations.values()
+            )
+            else "success",
+            counts
+            or (
+                "관측 불완전 · 판정 보류" if failure else "확정된 Client 분배 이상 없음"
+            ),
+            {
+                "evaluations": evaluations,
+                "settings": asdict(detector.settings),
+                "before": detector.before,
+                "after": detector.dump_state(),
+            },
+        )
         self.poll_count += 1
         with self.execution.step("incident", "Incident 판정") as step:
             transitions = self.incidents.process(self.health)
@@ -135,7 +192,13 @@ class DemoRuntime:
                 "warning" if self.health.severity.value != "normal" else "success"
             )
             step.detail = f"활성 Incident {len(active)}건 · 이번 전이 {len(transitions)}건 · {self.health.summary}"
-            step.evidence = {"active": len(active), "transitions": len(transitions)}
+            step.evidence = {
+                "active": len(active),
+                "transitions": len(transitions),
+                "events": [asdict(t) for t in transitions],
+            }
+            if transitions:
+                step.detail += " · " + ", ".join(t.kind.value for t in transitions)
         self.history.append(
             {
                 "Poll": self.poll_count,
