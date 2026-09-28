@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from portfolio_demo.runtime import DemoRuntime, TOPOLOGY
 
 from portfolio_demo.execution_trace import render_trace
+from portfolio_demo.guided_flow import GuidedSlot, begin
 from portfolio_demo.scenario_runner import ScenarioRunner, SCENARIOS
 
 st.set_page_config(
@@ -597,6 +598,7 @@ def render_scenario_timeline(runner, slot):
 
 def start_scenario(key):
     global r
+    begin()
     runner = ScenarioRunner()
     st.session_state.scenario_runner = runner
     st.session_state.cluster_selected_ip = None
@@ -661,11 +663,16 @@ def render_incident_history():
 
 
 render_window_header()
-render_reviewer_summary()
+with st.expander("프로젝트 목적과 체험 안내", expanded=False):
+    render_reviewer_summary()
 scenario_controls = st.container()
-timeline_slot = st.empty()
-trace_selector = st.container()
-trace_slot = st.empty()
+timeline_slot = GuidedSlot(
+    st.empty(), lambda: getattr(st.session_state.get("scenario_runner"), "run", None)
+)
+result_summary = st.container()
+with st.expander("실제 처리 기록 / Execution Trace", expanded=False):
+    trace_selector = st.container()
+    trace_slot = st.empty()
 with scenario_controls:
     st.caption(
         "한 번 실행하면 정상 → 이상 누적 → 장애 확정 → 복구를 자동으로 확인합니다. 실제 장비 접속 없이 합성 CLI를 production 분석 코어에 공급합니다."
@@ -706,9 +713,9 @@ if runner and runner.run and runner.run.snapshots:
         )
     render_trace(runner.run.snapshots[selected_poll].trace, trace_slot)
     if runner.run.completed:
-        st.success(runner.run.summary)
+        result_summary.success(runner.run.summary)
     elif runner.run.error:
-        st.error(runner.run.error)
+        result_summary.error(runner.run.error)
 else:
     render_trace(r.execution, trace_slot)
 
@@ -716,8 +723,9 @@ render_status_card()
 render_overview()
 render_time_row()
 selected = render_device_table()
-render_detail(selected)
-render_incident_history()
+with st.expander("판단 근거 / 장비 상세 및 이력", expanded=False):
+    render_detail(selected)
+    render_incident_history()
 with st.expander("고급 운영 / 수동 점검", expanded=False):
     st.caption(
         "수동 점검을 실행하면 시나리오 기록을 닫고 현재 Runtime의 관측을 이어갑니다."
