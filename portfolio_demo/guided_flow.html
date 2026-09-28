@@ -1,28 +1,252 @@
 <section id="guided-flow" data-run="__RUN_ID__" data-phase="__PHASE__" aria-label="안내형 실행 화면" style="scroll-margin-top:65px">
 <style>
-#guided-flow {border:1px solid #8886;border-radius:12px;padding:1rem;margin:.5rem 0;overflow-wrap:anywhere}
-#guided-flow h3 {margin:0 0 .4rem;font-size:1.15rem}
-#guided-flow h4 {margin:.5rem 0;font-size:1.1rem}
-#guided-flow p {margin:.5rem 0;line-height:1.5}
-#guided-flow .guide-nav {display:flex;flex-wrap:wrap;gap:.4rem;margin:.6rem 0}
-#guided-flow button {font:inherit;color:inherit;background:transparent;border:1px solid #8888;border-radius:8px;padding:.45rem .65rem;cursor:pointer}
-#guided-flow button:disabled {opacity:.4;cursor:default}
-#guided-flow button[data-toggle] {border-color:#62b9ff}
+#guided-flow {
+  border:1px solid rgba(93,123,157,.36);
+  border-radius:16px;
+  padding:1rem;
+  margin:.75rem 0;
+  overflow-wrap:anywhere;
+  background:
+    linear-gradient(180deg, rgba(12,20,32,.98), rgba(16,27,42,.96));
+  color:#e7eef7;
+  box-shadow:0 14px 38px rgba(3,8,16,.18);
+}
+#guided-flow * {box-sizing:border-box}
+#guided-flow .guide-head {
+  display:flex;
+  justify-content:space-between;
+  gap:.8rem;
+  align-items:flex-start;
+  flex-wrap:wrap;
+  padding-bottom:.8rem;
+  border-bottom:1px solid rgba(111,137,168,.18);
+}
+#guided-flow .guide-kicker {
+  color:#76bfff;
+  font-size:.68rem;
+  font-weight:850;
+  letter-spacing:.09em;
+  margin-bottom:.25rem;
+}
+#guided-flow h3 {margin:0;font-size:1.18rem;color:#f4f8fc}
+#guided-flow .guide-mode {
+  display:flex;
+  gap:.35rem;
+  align-items:center;
+  color:#8fa2b8;
+  font-size:.68rem;
+  font-weight:750;
+}
+#guided-flow .guide-led {
+  width:.52rem;height:.52rem;border-radius:50%;
+  background:#31c48d;box-shadow:0 0 0 4px rgba(49,196,141,.10);
+}
+#guided-flow .story-note {
+  margin:.65rem 0 .4rem;
+  color:#8ea0b5;
+  font-size:.78rem;
+  line-height:1.5;
+}
+#guided-flow .guide-progress {
+  margin:.75rem 0 .55rem;
+}
+#guided-flow .guide-progress-meta {
+  display:flex;justify-content:space-between;gap:.8rem;
+  color:#9badc0;font-size:.7rem;margin-bottom:.3rem;
+}
+#guided-flow .guide-progress-track {
+  height:7px;border-radius:999px;
+  background:rgba(255,255,255,.07);
+  overflow:hidden;
+}
+#guided-flow .guide-progress-fill {
+  height:100%;width:0%;
+  background:linear-gradient(90deg,#3d8fd1,#63c5ff);
+  transition:width .25s ease;
+}
+#guided-flow [data-readout] {
+  margin:.45rem 0 .7rem;
+  padding:.55rem .7rem;
+  border-radius:9px;
+  background:rgba(84,123,165,.10);
+  border:1px solid rgba(91,134,179,.16);
+  color:#c7d4e3;
+  font-size:.77rem;
+}
+#guided-flow .guide-nav {
+  display:flex;flex-wrap:wrap;gap:.4rem;margin:.55rem 0 .85rem;
+}
+#guided-flow button {
+  font:inherit;color:#dce8f4;
+  background:rgba(255,255,255,.035);
+  border:1px solid rgba(119,145,175,.30);
+  border-radius:8px;padding:.43rem .7rem;cursor:pointer;
+}
+#guided-flow button:hover {background:rgba(255,255,255,.07)}
+#guided-flow button:disabled {opacity:.35;cursor:default}
+#guided-flow button[data-toggle] {border-color:#4baee9}
 #guided-flow [hidden] {display:none!important}
-#guided-flow .story-metrics {display:flex;flex-wrap:wrap;gap:.4rem 1rem;padding:.6rem 0;font-size:.85rem}
-#guided-flow .story-devices {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.4rem}
-#guided-flow .story-device {border:1px solid #8885;border-radius:8px;padding:.5rem;font-size:.82rem}
-#guided-flow .story-device span,#guided-flow small {display:block}
-#guided-flow .story-focus {border:2px solid #d9ac58}
-#guided-flow .story-recap {font-size:.85rem}
-#guided-flow [data-readout],#guided-flow .story-note {font-size:.82rem}
+
+#guided-flow article[data-scene],
+#guided-flow article[data-summary] {
+  border:1px solid rgba(111,137,168,.22);
+  border-radius:13px;
+  padding:.9rem;
+  background:linear-gradient(180deg, rgba(18,29,44,.92), rgba(14,23,36,.86));
+}
+#guided-flow article[data-state="normal"] {border-top:3px solid #31c48d}
+#guided-flow article[data-state="warning"] {border-top:3px solid #f4b740}
+#guided-flow article[data-state="critical"] {border-top:3px solid #f05252}
+#guided-flow article[data-state="unknown"] {border-top:3px solid #8193a7}
+#guided-flow .story-head {
+  display:flex;justify-content:space-between;gap:.7rem;align-items:center;
+  margin-bottom:.7rem;
+}
+#guided-flow .story-head h4 {
+  margin:0;color:#f0f5fa;font-size:1.08rem;
+}
+#guided-flow .story-badge {
+  border-radius:999px;
+  padding:.18rem .5rem;
+  font-size:.66rem;
+  font-weight:850;
+  background:rgba(255,255,255,.06);
+  color:#b8c7d7;
+  white-space:nowrap;
+}
+#guided-flow article[data-state="normal"] .story-badge {color:#71e0b0}
+#guided-flow article[data-state="warning"] .story-badge {color:#ffd67d}
+#guided-flow article[data-state="critical"] .story-badge {color:#ff9a9a}
+#guided-flow .story-analysis {
+  display:grid;grid-template-columns:1fr 1fr;gap:.65rem;margin-bottom:.75rem;
+}
+#guided-flow .story-block {
+  border:1px solid rgba(107,135,168,.18);
+  border-radius:10px;
+  padding:.72rem .78rem;
+  background:rgba(255,255,255,.025);
+}
+#guided-flow .story-block-label {
+  display:block;
+  color:#79bfff;
+  font-size:.66rem;
+  font-weight:850;
+  letter-spacing:.06em;
+  margin-bottom:.3rem;
+}
+#guided-flow .story-block p {
+  margin:0;color:#d4deea;font-size:.82rem;line-height:1.5;
+}
+#guided-flow .story-block.judgement .story-block-label {color:#e8be64}
+
+#guided-flow .story-metrics {
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:.5rem;
+  margin:.65rem 0 .75rem;
+}
+#guided-flow .story-metrics span {
+  border:1px solid rgba(107,135,168,.18);
+  border-radius:9px;
+  padding:.55rem .6rem;
+  background:rgba(255,255,255,.025);
+  color:#8799ae;
+  font-size:.67rem;
+}
+#guided-flow .story-metrics b {
+  display:block;
+  color:#e6eef7;
+  font-size:.96rem;
+  margin-top:.12rem;
+}
+
+#guided-flow .story-devices {
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.5rem;
+}
+#guided-flow .story-device {
+  position:relative;
+  border:1px solid rgba(118,144,175,.20);
+  border-left:4px solid #7f91a6;
+  border-radius:10px;
+  padding:.62rem .7rem;
+  background:rgba(255,255,255,.025);
+  min-height:82px;
+}
+#guided-flow .story-device.normal {border-left-color:#31c48d}
+#guided-flow .story-device.warning {border-left-color:#f4b740}
+#guided-flow .story-device.critical {border-left-color:#f05252}
+#guided-flow .story-device.unknown {border-left-color:#8193a7}
+#guided-flow .story-device.story-focus {
+  background:rgba(244,183,64,.055);
+  box-shadow:inset 0 0 0 1px rgba(244,183,64,.18);
+}
+#guided-flow .story-device b {
+  display:block;color:#e8eff7;font-size:.78rem;margin-bottom:.2rem;
+}
+#guided-flow .story-device span {
+  display:inline-block;color:#9fb0c2;font-size:.68rem;margin-bottom:.2rem;
+}
+#guided-flow .story-device small {
+  display:block;color:#7f91a6;font-size:.65rem;line-height:1.45;
+}
+#guided-flow .story-recap {
+  border-left:3px solid #63bff5;
+  padding:.55rem .7rem;
+  background:rgba(81,143,191,.07);
+  border-radius:0 8px 8px 0;
+  color:#b9c8d8;
+  font-size:.74rem;
+  line-height:1.5;
+  margin:.55rem 0 .7rem;
+}
+#guided-flow [data-error] {
+  color:#ff9a9a;background:rgba(240,82,82,.08);
+  border:1px solid rgba(240,82,82,.18);
+  border-radius:8px;padding:.55rem .65rem;
+}
 #guided-flow :focus-visible {outline:3px solid #4f9eff;outline-offset:3px}
-@media(max-width:600px) {#guided-flow {padding:.7rem} #guided-flow p {font-size:.88rem} #guided-flow button {font-size:.85rem} #guided-flow .story-device {font-size:.75rem}}
+
+@media(max-width:700px) {
+  #guided-flow {padding:.8rem;border-radius:14px}
+  #guided-flow .guide-head {gap:.45rem}
+  #guided-flow .story-analysis {grid-template-columns:1fr}
+  #guided-flow .story-metrics {grid-template-columns:1fr 1fr}
+  #guided-flow .story-devices {grid-template-columns:1fr 1fr}
+  #guided-flow button {font-size:.78rem;padding:.4rem .55rem}
+  #guided-flow .story-block p {font-size:.78rem}
+}
+@media(max-width:420px) {
+  #guided-flow .story-devices {grid-template-columns:1fr}
+  #guided-flow .story-metrics {grid-template-columns:1fr}
+}
 </style>
-<h3 tabindex="-1">__TITLE__</h3>
-<p class="story-note">샘플 분석 결과를 순서대로 보여주는 시나리오 해설입니다. 실제 장비의 실시간 감시는 아닙니다.</p>
+
+<div class="guide-head">
+  <div>
+    <div class="guide-kicker">SCENARIO PLAYBACK · OPERATIONS ANALYSIS</div>
+    <h3 tabindex="-1">__TITLE__</h3>
+  </div>
+  <div class="guide-mode"><span class="guide-led"></span>PUBLIC DEMO · READ ONLY</div>
+</div>
+
+<p class="story-note">샘플 분석 결과를 순서대로 보여주는 시나리오입니다. 실제 운영 데이터 대신 비식별 샘플을 사용합니다.</p>
+
+<div class="guide-progress">
+  <div class="guide-progress-meta">
+    <span data-progress-label>진행 준비</span>
+    <span data-progress-percent>0%</span>
+  </div>
+  <div class="guide-progress-track"><div class="guide-progress-fill" data-progress-fill></div></div>
+</div>
+
 <p data-readout role="status" aria-live="polite">분석 기록을 준비하고 있습니다.</p>
-<div class="guide-nav" data-controls hidden><button data-toggle type="button">일시정지</button><button data-back type="button">이전</button><button data-next type="button">다음</button><button data-result type="button">결과 바로보기</button><button data-replay type="button">다시 보기</button></div>
+<div class="guide-nav" data-controls hidden>
+  <button data-toggle type="button">일시정지</button>
+  <button data-back type="button">이전</button>
+  <button data-next type="button">다음</button>
+  <button data-result type="button">결과 바로보기</button>
+  <button data-replay type="button">다시 보기</button>
+</div>
 <p data-error role="alert" __ERROR_HIDDEN__>실행 중단 · __ERROR__</p>
 <div>__BODY__</div>
 <noscript>자동 해설에는 JavaScript가 필요합니다. 아래 상세 결과에서 관측 기록을 확인할 수 있습니다.</noscript>
