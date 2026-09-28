@@ -16,7 +16,7 @@
 
 Live Demo에서는 **특정 장비의 연결 단말 감소 → 정상 복구** 같은 예시 상황을 선택하고 **시나리오 자동 실행**을 누르면, 정상 관측부터 문제 확정과 복구까지의 흐름을 추가 조작 없이 볼 수 있습니다. 실제 장비 대신 비식별 합성 CLI만 사용하지만 Parser·상관분석·Incident 판단은 프로젝트의 production 로직을 재사용합니다.
 
-> **Public Web Edition:** 실제 PySide6 `Aruba 네트워크 상태 미니보드`의 전체 상태 카드, Overview KPI, Controller 표, 장비 검색/필터, 상세 정보(요약/파싱/원본), 점검·자동·ACK 흐름을 브라우저로 옮겼습니다. 공개 URL에서는 실제 SSH 대신 비식별 합성 CLI만 공급하며 Parser·CorrelationEngine·IncidentManager는 동일 production 로직을 사용합니다.
+> **Public Web Edition:** 실제 PySide6 `Aruba 네트워크 상태 미니보드`의 전체 상태 카드, Overview KPI, Controller 표, 장비 검색/필터, 상세 정보(요약/파싱/원본), 점검·자동·ACK 흐름을 브라우저로 옮겼습니다. 공개 화면은 Enterprise WLAN NOC 형태의 Cluster Topology·Controller Health·Operations Timeline으로 현재 상태를 한눈에 읽도록 구성했습니다. 공개 URL에서는 실제 SSH 대신 비식별 합성 CLI만 공급하며 Parser·CorrelationEngine·IncidentManager는 동일 production 로직을 사용합니다.
 
 
 [![Windows CI](https://github.com/sebia1993/aruba-cluster-health-dashboard/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/sebia1993/aruba-cluster-health-dashboard/actions/workflows/ci-windows.yml)

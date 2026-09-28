@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from html import escape
 from pathlib import Path
 import sys
 
@@ -118,6 +119,182 @@ st.markdown(
         color: #8392a4;
         font-size: .78rem;
     }
+    .noc-bar {
+        border: 1px solid rgba(102, 126, 158, .30);
+        border-radius: 12px;
+        background: linear-gradient(135deg, rgba(11, 20, 32, .94), rgba(20, 35, 54, .82));
+        padding: .78rem 1rem;
+        margin: .15rem 0 .9rem;
+        display: flex;
+        gap: .9rem;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+    }
+    .noc-brand {
+        display: flex;
+        align-items: center;
+        gap: .65rem;
+    }
+    .noc-live {
+        width: .62rem;
+        height: .62rem;
+        border-radius: 50%;
+        background: #31c48d;
+        box-shadow: 0 0 0 5px rgba(49, 196, 141, .10);
+        display: inline-block;
+    }
+    .noc-label {
+        color: #d7e4f3;
+        font-size: .78rem;
+        font-weight: 850;
+        letter-spacing: .08em;
+    }
+    .noc-meta {
+        color: #8497ad;
+        font-size: .74rem;
+        display: flex;
+        gap: 1rem;
+        flex-wrap: wrap;
+    }
+    .ops-panel {
+        border: 1px solid rgba(112, 137, 169, .26);
+        border-radius: 14px;
+        background: linear-gradient(180deg, rgba(15, 24, 38, .80), rgba(12, 19, 31, .62));
+        padding: 1rem;
+        min-height: 100%;
+    }
+    .ops-panel-title {
+        color: #dce8f6;
+        font-size: .88rem;
+        font-weight: 850;
+        letter-spacing: .02em;
+        margin-bottom: .7rem;
+    }
+    .topology-grid {
+        display: grid;
+        grid-template-columns: minmax(0,1fr) 92px minmax(0,1fr);
+        grid-template-areas:
+            "n1 . n2"
+            ". core ."
+            "n3 . n4";
+        gap: .7rem .8rem;
+        align-items: center;
+        min-height: 280px;
+        position: relative;
+    }
+    .topology-core {
+        grid-area: core;
+        width: 92px;
+        height: 92px;
+        border-radius: 50%;
+        border: 1px solid rgba(98, 185, 255, .55);
+        background: radial-gradient(circle, rgba(48, 111, 170, .32), rgba(21, 37, 57, .90));
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        color: #d7ecff;
+        font-size: .72rem;
+        font-weight: 850;
+        box-shadow: 0 0 28px rgba(69, 151, 219, .10);
+    }
+    .topology-node {
+        border: 1px solid rgba(123, 148, 180, .28);
+        border-left: 4px solid #74869c;
+        border-radius: 10px;
+        padding: .72rem .78rem;
+        background: rgba(22, 33, 49, .78);
+        min-height: 86px;
+    }
+    .topology-node.n1 {grid-area:n1;}
+    .topology-node.n2 {grid-area:n2;}
+    .topology-node.n3 {grid-area:n3;}
+    .topology-node.n4 {grid-area:n4;}
+    .topology-node.normal {border-left-color:#31c48d;}
+    .topology-node.warning {border-left-color:#f4b740;}
+    .topology-node.critical {border-left-color:#f05252;}
+    .topology-node.unknown {border-left-color:#8193a7;}
+    .node-head {
+        display:flex;
+        justify-content:space-between;
+        gap:.5rem;
+        align-items:center;
+        font-size:.79rem;
+        font-weight:800;
+        color:#e0e9f4;
+    }
+    .node-state {
+        font-size:.65rem;
+        border-radius:999px;
+        padding:.13rem .42rem;
+        background:rgba(255,255,255,.06);
+        color:#aebdd0;
+        white-space:nowrap;
+    }
+    .node-meta {
+        color:#8395ab;
+        font-size:.68rem;
+        line-height:1.55;
+        margin-top:.35rem;
+    }
+    .event-list {
+        display:flex;
+        flex-direction:column;
+        gap:.55rem;
+    }
+    .event-row {
+        display:grid;
+        grid-template-columns:18px 1fr;
+        gap:.55rem;
+        align-items:start;
+        padding:.5rem .55rem;
+        border-radius:9px;
+        background:rgba(255,255,255,.025);
+    }
+    .event-dot {
+        width:9px;
+        height:9px;
+        margin-top:.28rem;
+        border-radius:50%;
+        background:#8193a7;
+        box-shadow:0 0 0 4px rgba(129,147,167,.08);
+    }
+    .event-row.normal .event-dot {background:#31c48d;}
+    .event-row.warning .event-dot {background:#f4b740;}
+    .event-row.critical .event-dot {background:#f05252;}
+    .event-row.unknown .event-dot {background:#8193a7;}
+    .event-title {
+        color:#dce7f4;
+        font-size:.74rem;
+        font-weight:760;
+    }
+    .event-meta {
+        color:#7f91a7;
+        font-size:.66rem;
+        line-height:1.45;
+        margin-top:.12rem;
+    }
+    .health-strip {
+        display:grid;
+        grid-template-columns:repeat(4,minmax(0,1fr));
+        gap:.6rem;
+        margin:.65rem 0 .9rem;
+    }
+    .health-tile {
+        border:1px solid rgba(112,137,169,.22);
+        border-radius:10px;
+        padding:.72rem .82rem;
+        background:rgba(16,25,39,.70);
+    }
+    .health-tile .k {color:#8194aa;font-size:.66rem;font-weight:750;}
+    .health-tile .v {color:#e4edf7;font-size:1.12rem;font-weight:850;margin-top:.18rem;}
+    @media(max-width:900px) {
+        .health-strip {grid-template-columns:repeat(2,minmax(0,1fr));}
+        .topology-grid {grid-template-columns:1fr;grid-template-areas:"core" "n1" "n2" "n3" "n4";min-height:auto;}
+        .topology-core {margin:0 auto .2rem;}
+    }
     .scenario-grid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.75rem;}
     .scenario-card {border:1px solid #8885;border-radius:12px;padding:1rem;overflow-wrap:anywhere;}
     .scenario-current {border:2px solid #62b9ff;background:#62b9ff12;}
@@ -183,6 +360,159 @@ def render_window_header() -> None:
             "</div>",
             unsafe_allow_html=True,
         )
+
+
+def severity_css(value: str) -> str:
+    return value if value in {"normal", "warning", "critical", "unknown"} else "unknown"
+
+
+def render_noc_bar() -> None:
+    last_poll = f"Poll {r.poll_count}" if r.poll_count else "대기"
+    overall = ko_status(r.health.severity.value) if r.health else "점검 전"
+    st.markdown(
+        '<div class="noc-bar">'
+        '<div class="noc-brand"><span class="noc-live"></span>'
+        '<span class="noc-label">ENTERPRISE WLAN OPERATIONS</span></div>'
+        '<div class="noc-meta">'
+        f'<span>Cluster · {len(TOPOLOGY)} Controllers</span>'
+        f'<span>전체 상태 · {escape(overall)}</span>'
+        f'<span>Last Poll · {escape(last_poll)}</span>'
+        '<span>Mode · READ ONLY</span>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _topology_devices():
+    if r.health:
+        return list(r.health.devices[:4])
+    return [
+        {
+            "ip": ip,
+            "display_name": alias,
+            "severity": "unknown",
+            "active_clients": None,
+            "connection_type": None,
+        }
+        for ip, alias in TOPOLOGY.items()
+    ]
+
+
+def render_cluster_topology() -> None:
+    devices = _topology_devices()
+    cards = []
+    for index, item in enumerate(devices, start=1):
+        if isinstance(item, dict):
+            name = item["display_name"]
+            ip = item["ip"]
+            severity = item["severity"]
+            active = item["active_clients"]
+            connection = item["connection_type"]
+        else:
+            name = item.display_name
+            ip = item.ip
+            severity = item.severity.value
+            active = item.active_clients
+            connection = item.connection_type
+        cards.append(
+            f'<div class="topology-node n{index} {severity_css(severity)}">'
+            '<div class="node-head">'
+            f'<span>{escape(str(name))}</span>'
+            f'<span class="node-state">{escape(ko_status(severity))}</span>'
+            '</div>'
+            '<div class="node-meta">'
+            f'{escape(str(ip))}<br>'
+            f'연결 단말 · {escape(client_value(active))}<br>'
+            f'장비 간 연결 · {escape(connection or "확인 불가")}'
+            '</div></div>'
+        )
+    while len(cards) < 4:
+        index = len(cards) + 1
+        cards.append(
+            f'<div class="topology-node n{index} unknown">'
+            '<div class="node-head"><span>미등록</span><span class="node-state">-</span></div>'
+            '<div class="node-meta">등록된 장비 없음</div></div>'
+        )
+    st.markdown(
+        '<div class="ops-panel">'
+        '<div class="ops-panel-title">CLUSTER TOPOLOGY · 무선 장비 구성</div>'
+        '<div class="topology-grid">'
+        + "".join(cards)
+        + '<div class="topology-core">CLUSTER<small>Health</small></div>'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_event_timeline() -> None:
+    rows = list(reversed(r.history[-6:])) if r.history else []
+    if not rows:
+        body = (
+            '<div class="event-row unknown"><span class="event-dot"></span><div>'
+            '<div class="event-title">아직 관측 기록이 없습니다.</div>'
+            '<div class="event-meta">시나리오를 실행하면 상태 변화가 시간 순서로 쌓입니다.</div>'
+            '</div></div>'
+        )
+    else:
+        rendered = []
+        for row in rows:
+            state = str(row.get("Status", "unknown"))
+            title = row.get("Stage") or f'Poll {row.get("Poll", "-")}'
+            reason = row.get("Reason") or "별도 판단 근거 없음"
+            active = row.get("Active incidents", 0)
+            rendered.append(
+                f'<div class="event-row {severity_css(state)}">'
+                '<span class="event-dot"></span><div>'
+                f'<div class="event-title">{escape(str(title))}</div>'
+                f'<div class="event-meta">Poll {escape(str(row.get("Poll", "-")))} · '
+                f'현재 확인 필요 {escape(str(active))}건<br>{escape(str(reason))}</div>'
+                '</div></div>'
+            )
+        body = "".join(rendered)
+    st.markdown(
+        '<div class="ops-panel">'
+        '<div class="ops-panel-title">OPERATIONS TIMELINE · 최근 상태 변화</div>'
+        f'<div class="event-list">{body}</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_operations_snapshot() -> None:
+    if r.health is None:
+        overall = "점검 전"
+        up = "-"
+        clients = "-"
+        incidents = "0"
+    else:
+        overall = ko_status(r.health.severity.value)
+        known_mm = [d.mm_status for d in r.health.devices]
+        if all(v is not None for v in known_mm):
+            up_count = sum(str(v).lower() == "up" for v in known_mm)
+            up = f"{up_count} / {len(known_mm)}"
+        else:
+            up = "확인 불가"
+        active = [d.active_clients for d in r.health.devices]
+        clients = str(sum(active)) if all(v is not None for v in active) else "확인 불가"
+        incidents = str(len(r.incidents.active_incidents()))
+    st.markdown(
+        '<div class="health-strip">'
+        '<div class="health-tile"><div class="k">OVERALL</div>'
+        f'<div class="v">{escape(overall)}</div></div>'
+        '<div class="health-tile"><div class="k">정상 응답 장비</div>'
+        f'<div class="v">{escape(up)}</div></div>'
+        '<div class="health-tile"><div class="k">현재 연결 단말</div>'
+        f'<div class="v">{escape(clients)}</div></div>'
+        '<div class="health-tile"><div class="k">확인 필요한 이상</div>'
+        f'<div class="v">{escape(incidents)}</div></div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    left, right = st.columns([1.15, 1])
+    with left:
+        render_cluster_topology()
+    with right:
+        render_event_timeline()
 
 
 def render_reviewer_summary() -> None:
@@ -632,6 +962,7 @@ def render_incident_history():
 
 
 render_window_header()
+render_noc_bar()
 render_reviewer_summary()
 scenario_controls = st.container()
 timeline_slot = GuidedSlot(
@@ -653,6 +984,8 @@ with scenario_controls:
 
 runner = st.session_state.get("scenario_runner")
 render_scenario_timeline(runner, timeline_slot)
+st.markdown("### Operations Overview")
+render_operations_snapshot()
 r.execution.on_change = lambda: render_trace(r.execution, trace_slot)
 if runner and runner.run and runner.run.snapshots:
     with trace_selector:
