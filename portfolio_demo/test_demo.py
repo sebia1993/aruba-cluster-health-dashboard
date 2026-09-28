@@ -364,7 +364,7 @@ class StoryTests(unittest.TestCase):
         final = render_story(run).split("data-summary", 1)[1]
         self.assertIn("이번에 확인한 과정", final)
         self.assertIn("이상 확정 · 주의 기록 생성", final)
-        self.assertIn("복구 완료 <b>1</b>", final)
+        self.assertIn("현재 이상 / 복구<b>0 / 1</b>", final)
         self.assertEqual(render_story(run).count("data-scene"), len(run.snapshots))
 
     def test_unknown_baseline_change_and_custom_threshold_narration(self):
