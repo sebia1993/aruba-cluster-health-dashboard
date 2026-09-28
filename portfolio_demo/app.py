@@ -11,7 +11,11 @@ from portfolio_demo.runtime import DemoRuntime, TOPOLOGY
 
 from portfolio_demo.execution_trace import render_trace
 from portfolio_demo.guided_flow import GuidedSlot, begin
-from portfolio_demo.scenario_runner import ScenarioRunner, SCENARIOS
+from portfolio_demo.scenario_runner import (
+    SCENARIO_DESCRIPTIONS,
+    SCENARIOS,
+    ScenarioRunner,
+)
 from portfolio_demo.story_view import render_story
 
 st.set_page_config(
@@ -144,7 +148,8 @@ def render_window_header() -> None:
         st.markdown(
             '<div class="desktop-shell">'
             '<div class="window-title">Aruba Cluster Health Dashboard</div>'
-            '<div class="window-meta">무선 네트워크 관리 장비의 상태를 반복 확인해, 지속되는 이상을 감지하고 복구까지 추적하는 헬스체크 도구입니다.</div>'
+            '<div class="window-meta">여러 무선 장비의 상태를 반복 확인해, '
+            '순간적인 변화와 실제로 지속되는 문제를 구분하고 복구까지 추적합니다.</div>'
             "</div>",
             unsafe_allow_html=True,
         )
@@ -161,43 +166,47 @@ def render_window_header() -> None:
 
 def render_reviewer_summary() -> None:
     st.markdown("### 이 프로젝트는 무엇을 해결하나요?")
+    st.write(
+        "기업 Wi-Fi 환경에서는 장비 하나의 숫자만 보고 문제 여부를 판단하기 어렵습니다. "
+        "장비 응답 상태, 연결된 단말 수, 장비 간 연결 상태를 사람이 따로 확인해야 합니다. "
+        "이 프로젝트는 여러 정보를 반복 관측해 **순간적인 변화인지, 실제 문제가 지속되는지, "
+        "단순히 정보를 가져오지 못한 것인지** 자동으로 구분합니다."
+    )
     left, right = st.columns(2)
     with left, st.container(border=True):
         st.markdown("**프로젝트 목적**")
         st.write(
-            "여러 무선 장비의 상태를 사람이 일일이 비교하지 않아도, "
-            "반복 관측과 여러 상태 정보를 합쳐 실제 장애인지, 일시적인 현상인지, "
-            "단순한 정보 수집 실패인지를 자동으로 구분하는 도구입니다."
+            "운영자가 여러 장비 화면과 명령 결과를 하나씩 대조하지 않아도 "
+            "현재 확인이 필요한 문제와 그 판단 근거를 한 화면에 정리합니다."
         )
         st.caption(
-            "쉽게 말해: 여러 장비 상태를 계속 지켜보다가 '지금 정말 문제가 생긴 것인지'를 "
+            "쉽게 말해: 여러 장비를 계속 지켜보다가 '지금 정말 확인이 필요한 문제가 생겼는지'를 "
             "대신 판단합니다."
         )
     with right, st.container(border=True):
         st.markdown("**이 데모에서 보여주는 것**")
         st.write(
-            "정상 상태 → 이상 징후 누적 → 주의 판정 → 복구까지의 흐름을 자동 재생하고, "
-            "정보를 가져오지 못한 상황을 실제 장애로 잘못 판단하지 않는 과정을 보여줍니다."
+            "**정상 → 이상 징후 발견 → 같은 이상 반복 → 문제 확정 → 정상 상태 반복 확인 → 복구** "
+            "흐름을 사용자 추가 조작 없이 자동으로 보여줍니다."
         )
         st.caption(
-            "해커톤 관점: 여러 신호를 시간 순서로 결합해 하나의 판단과 근거로 만드는 "
-            "자동화입니다."
+            "정보 수집에 실패한 경우에는 장비가 고장났다고 추정하지 않고 '확인 불가'로 남깁니다."
         )
 
 
 def render_status_card() -> None:
     if r.health is None:
         status = "확인 불가"
-        problem = "문제 IP: 확인 전"
+        problem = "주요 확인 대상: 점검 전"
         reason = "점검을 실행하면 판단 근거가 표시됩니다."
     else:
         status = ko_status(r.health.severity.value)
         problem_devices = [d for d in r.health.devices if d.severity.value != "normal"]
         if problem_devices:
             first = problem_devices[0]
-            problem = f"주요 문제 IP: {first.ip} · {first.display_name}"
+            problem = f"주요 확인 대상: {first.display_name} · {first.ip}"
         else:
-            problem = "문제 IP: 없음"
+            problem = "주요 확인 대상: 없음"
         reason = r.health.summary or "현재 관측에서 별도 이상 신호가 없습니다."
 
     st.markdown(
@@ -238,13 +247,13 @@ def render_overview() -> None:
 
     cols = st.columns(4)
     cols[0].metric("전체 상태", overall)
-    cols[1].metric("Controller Up", controller_up)
-    cols[2].metric("전체 Active Client", active_total)
-    cols[3].metric("활성 Incident", incident_count)
+    cols[1].metric("정상 응답 장비", controller_up)
+    cols[2].metric("현재 연결 단말 수", active_total)
+    cols[3].metric("현재 확인이 필요한 이상", incident_count)
 
     left, right = st.columns([3, 2])
     with left:
-        st.markdown("#### 등록 Controller")
+        st.markdown("#### 등록 무선 장비")
         devices = r.health.devices if r.health else []
         if devices:
             cards = st.columns(2)
@@ -254,9 +263,9 @@ def render_overview() -> None:
                         '<div class="controller-card">'
                         f'<div class="controller-name">{device.display_name}</div>'
                         f'<div class="controller-meta">{device.ip}<br>'
-                        f"{ko_status(device.severity.value)} · Active {client_value(device.active_clients)} · "
-                        f"Standby {client_value(device.standby_clients)}<br>"
-                        f"Connection {device.connection_type or '확인 불가'}</div>"
+                        f"{ko_status(device.severity.value)} · 연결 단말 {client_value(device.active_clients)} · "
+                        f"대기 단말 {client_value(device.standby_clients)}<br>"
+                        f"장비 간 연결 상태 {device.connection_type or '확인 불가'}</div>"
                         "</div>",
                         unsafe_allow_html=True,
                     )
@@ -408,14 +417,14 @@ def render_device_table() -> str | None:
             row = {
                 "IP": device.ip,
                 "장비명": device.display_name,
-                "MM 보고 상태": device.mm_status or "확인 불가",
-                "Active": client_value(device.active_clients),
-                "Standby": client_value(device.standby_clients),
-                "Connection-Type": device.connection_type or "확인 불가",
+                "관리 시스템 보고 상태": device.mm_status or "확인 불가",
+                "연결 단말": client_value(device.active_clients),
+                "대기 단말": client_value(device.standby_clients),
+                "장비 간 연결 상태": device.connection_type or "확인 불가",
                 "종합 상태": ko_status(device.severity.value),
                 "마지막 확인": f"Poll {r.poll_count}",
                 "감시 범위": "감시 중",
-                "분배 상태": distribution_status(device),
+                "단말 분배 상태": distribution_status(device),
             }
             if (
                 search
@@ -434,14 +443,14 @@ def render_device_table() -> str | None:
             {
                 "IP": ip,
                 "장비명": alias,
-                "MM 보고 상태": "점검 전",
-                "Active": "-",
-                "Standby": "-",
-                "Connection-Type": "-",
+                "관리 시스템 보고 상태": "점검 전",
+                "연결 단말": "-",
+                "대기 단말": "-",
+                "장비 간 연결 상태": "-",
                 "종합 상태": "확인 불가",
                 "마지막 확인": "-",
                 "감시 범위": "감시 중",
-                "분배 상태": "점검 전",
+                "단말 분배 상태": "점검 전",
             }
             for ip, alias in TOPOLOGY.items()
         ]
@@ -474,11 +483,11 @@ def render_detail(ip: str | None) -> None:
     c = st.columns(2)
     c[0].write(f"**장비명**  {device.display_name}")
     c[0].write(f"**IP**  {device.ip}")
-    c[0].write(f"**MM 보고 상태**  {device.mm_status or '확인 불가'}")
+    c[0].write(f"**관리 시스템 보고 상태**  {device.mm_status or '확인 불가'}")
     c[0].write(f"**종합 상태**  {ko_status(device.severity.value)}")
-    c[1].write(f"**Active Client**  {client_value(device.active_clients)}")
-    c[1].write(f"**Standby Client**  {client_value(device.standby_clients)}")
-    c[1].write(f"**Connection-Type**  {device.connection_type or '확인 불가'}")
+    c[1].write(f"**연결 단말 수**  {client_value(device.active_clients)}")
+    c[1].write(f"**대기 단말 수**  {client_value(device.standby_clients)}")
+    c[1].write(f"**장비 간 연결 상태 (Connection-Type)**  {device.connection_type or '확인 불가'}")
     reasons = " / ".join(device.issue_reasons) or "별도 이상 근거 없음"
     st.info(f"판단 근거: {reasons}")
 
@@ -486,7 +495,7 @@ def render_detail(ip: str | None) -> None:
         item for item in r.engine.pending_connection_changes() if item.member_ip == ip
     ]
     if pending:
-        st.warning("Connection-Type 변화가 기준 수용 대기 중입니다.")
+        st.warning("장비 간 연결 상태 변화가 확인되어 정상 기준 수용을 기다리고 있습니다.")
 
 
 def render_technical_detail(ip: str | None) -> None:
@@ -563,9 +572,9 @@ def start_scenario(key):
 
 
 def render_incident_history():
-    st.subheader("Incident / History")
+    st.subheader("이상 기록 / History")
     incidents, history, evidence = st.tabs(
-        ["Incident 이력", "Poll History", "Evidence"]
+        ["이상 기록 (Incident)", "점검 이력", "기술 근거"]
     )
     with incidents:
         rows = [
@@ -588,7 +597,7 @@ def render_incident_history():
         if rows:
             st.dataframe(rows, hide_index=True, width="stretch")
         else:
-            st.info("생성된 Incident가 없습니다.")
+            st.info("현재 생성된 이상 기록이 없습니다.")
     with history:
         st.dataframe(r.history, hide_index=True, width="stretch")
     with evidence:
@@ -602,8 +611,7 @@ def render_incident_history():
 
 
 render_window_header()
-with st.expander("프로젝트 목적과 체험 안내", expanded=False):
-    render_reviewer_summary()
+render_reviewer_summary()
 scenario_controls = st.container()
 timeline_slot = GuidedSlot(
     st.empty(), lambda: getattr(st.session_state.get("scenario_runner"), "run", None)
@@ -612,11 +620,14 @@ with st.expander("실제 처리 기록 / Execution Trace", expanded=False):
     trace_selector = st.container()
     trace_slot = st.empty()
 with scenario_controls:
+    st.markdown("### 대표 흐름 체험")
     st.caption(
-        "시나리오를 선택하고 시작하면, 관측부터 판단까지 약 4초씩 자동으로 보여줍니다."
+        "예시 상황을 하나 고르면 필요한 점검을 모두 자동 실행합니다. "
+        "세부 버튼을 직접 조작할 필요가 없습니다."
     )
-    chosen = st.selectbox("체험 시나리오", list(SCENARIOS), format_func=SCENARIOS.get)
-    if st.button("체험 시작", type="primary", use_container_width=True):
+    chosen = st.selectbox("예시 상황", list(SCENARIOS), format_func=SCENARIOS.get)
+    st.info(SCENARIO_DESCRIPTIONS[chosen])
+    if st.button("시나리오 자동 실행", type="primary", use_container_width=True):
         start_scenario(chosen)
 
 runner = st.session_state.get("scenario_runner")
@@ -625,7 +636,7 @@ r.execution.on_change = lambda: render_trace(r.execution, trace_slot)
 if runner and runner.run and runner.run.snapshots:
     with trace_selector:
         selected_poll = st.selectbox(
-            "Poll별 Execution Trace",
+            "점검 단계별 Execution Trace",
             range(len(runner.run.snapshots)),
             format_func=lambda i: (
                 f"Poll #{runner.run.snapshots[i].poll} · {runner.run.snapshots[i].title}"
@@ -633,7 +644,8 @@ if runner and runner.run and runner.run.snapshots:
             key="trace_poll",
         )
         st.caption(
-            "Timeline은 운영 상황의 변화, Trace는 선택한 Poll의 실제 처리 근거입니다. 상세 결과는 마지막 점검 시점이며, 해설 속 장비 카드는 각 장면의 관측값입니다."
+            "위 흐름은 사람이 이해하기 쉬운 상황 변화이고, 이 영역은 선택한 점검 단계에서 "
+            "프로그램이 실제로 어떤 수집·분석을 했는지 보여주는 기술 근거입니다."
         )
     render_trace(runner.run.snapshots[selected_poll].trace, trace_slot)
 else:
