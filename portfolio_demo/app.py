@@ -143,7 +143,7 @@ def render_window_header() -> None:
         st.markdown(
             '<div class="desktop-shell">'
             '<div class="window-title">Aruba Cluster Health Dashboard</div>'
-            '<div class="window-meta">여러 무선 Controller 상태를 종합하여 실제 장애 징후와 일시적인 수집 실패를 구분합니다.</div>'
+            '<div class="window-meta">여러 무선 Controller를 반복 관측하고, 순간적인 이상과 실제 장애를 구분해 Incident를 생성하는 모니터링 도구입니다.</div>'
             "</div>",
             unsafe_allow_html=True,
         )
@@ -156,7 +156,6 @@ def render_window_header() -> None:
             "</div>",
             unsafe_allow_html=True,
         )
-
 
 
 def render_reviewer_summary() -> None:
@@ -471,28 +470,29 @@ def render_detail(ip: str | None) -> None:
 
     device = r.health.device_by_ip(ip)
     st.markdown("#### 장비 상세 정보")
-    summary, parsed, raw = st.tabs(["요약", "파싱 결과", "원본 출력"])
+    c = st.columns(2)
+    c[0].write(f"**장비명**  {device.display_name}")
+    c[0].write(f"**IP**  {device.ip}")
+    c[0].write(f"**MM 보고 상태**  {device.mm_status or '확인 불가'}")
+    c[0].write(f"**종합 상태**  {ko_status(device.severity.value)}")
+    c[1].write(f"**Active Client**  {client_value(device.active_clients)}")
+    c[1].write(f"**Standby Client**  {client_value(device.standby_clients)}")
+    c[1].write(f"**Connection-Type**  {device.connection_type or '확인 불가'}")
+    reasons = " / ".join(device.issue_reasons) or "별도 이상 근거 없음"
+    st.info(f"판단 근거: {reasons}")
 
-    with summary:
-        c = st.columns(2)
-        c[0].write(f"**장비명**  {device.display_name}")
-        c[0].write(f"**IP**  {device.ip}")
-        c[0].write(f"**MM 보고 상태**  {device.mm_status or '확인 불가'}")
-        c[0].write(f"**종합 상태**  {ko_status(device.severity.value)}")
-        c[1].write(f"**Active Client**  {client_value(device.active_clients)}")
-        c[1].write(f"**Standby Client**  {client_value(device.standby_clients)}")
-        c[1].write(f"**Connection-Type**  {device.connection_type or '확인 불가'}")
-        reasons = " / ".join(device.issue_reasons) or "별도 이상 근거 없음"
-        st.info(f"판단 근거: {reasons}")
+    pending = [
+        item for item in r.engine.pending_connection_changes() if item.member_ip == ip
+    ]
+    if pending:
+        st.warning("Connection-Type 변화가 기준 수용 대기 중입니다.")
 
-        pending = [
-            item
-            for item in r.engine.pending_connection_changes()
-            if item.member_ip == ip
-        ]
-        if pending:
-            st.warning("Connection-Type 변화가 기준 수용 대기 중입니다.")
 
+def render_technical_detail(ip: str | None) -> None:
+    if not ip or not r.health:
+        return
+    device = r.health.device_by_ip(ip)
+    parsed, raw = st.tabs(["파싱 결과", "원본 출력"])
     with parsed:
         st.json(asdict(device))
 
@@ -731,6 +731,7 @@ with st.expander("고급 운영 / 수동 점검", expanded=False):
             r.accept_baseline(selected)
             st.rerun()
     render_settings()
+    render_technical_detail(selected)
     render_demo_shortcut()
 
 st.caption(

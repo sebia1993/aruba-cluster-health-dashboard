@@ -287,6 +287,19 @@ class ScenarioTests(unittest.TestCase):
         self.assertFalse(app.exception)
         self.assertNotIn("scenario_runner", app.session_state)
 
+    def test_raw_and_parsed_are_preserved_inside_advanced_area(self):
+        app = AppTest.from_file(str(Path(__file__).with_name("app.py"))).run()
+        next(
+            b for b in app.button if b.label == "대표 장애 → 복구 시나리오 실행"
+        ).click().run()
+        self.assertFalse(app.exception)
+        advanced = next(e for e in app.expander if e.label == "고급 운영 / 수동 점검")
+        self.assertTrue(
+            {"파싱 결과", "원본 출력"} <= {t.label for t in advanced.get("tab")}
+        )
+        self.assertTrue(advanced.get("code"))
+        self.assertEqual(app.session_state.runtime.health.severity.value, "normal")
+
 
 if __name__ == "__main__":
     unittest.main()
