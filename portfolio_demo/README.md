@@ -1,9 +1,32 @@
-# Public Streamlit Demo
+# Cluster Health Dashboard — Public Demo
 
 **[Live Demo](https://sebia1993-cluster-health-demo.streamlit.app/)** · [GitHub Source](https://github.com/sebia1993/aruba-cluster-health-dashboard)
 
-별도 장비와 계정 없이 원 프로젝트의 Python 분석 로직을 실행합니다.
-비식별 문서 주소와 합성 CLI만 사용하며, 외부 연결·내부 파일 업로드는 지원하지 않습니다.
+## 무엇을 보여주는 데모인가
+
+여러 Aruba 무선 Controller의 상태를 자동으로 종합해 **실제 장애 징후와 단순 수집 실패를 구분하는 운영 Dashboard**입니다.
+
+실제 운영에서는 다음 정보를 사람이 각각 확인해야 합니다.
+
+- MM이 보고하는 Controller 상태
+- Active / Standby Client 분배
+- Cluster Connection-Type과 구성원 상태
+- 순간적인 수집 실패인지 지속적인 이상인지 여부
+
+Public Demo는 이 값을 Controller IP 기준으로 합쳐 **정상 / 주의 / 장애 / 확인 불가**로 계산하고, 운영자가 확인할 사건만 Incident로 표시합니다.
+
+## 가장 빠르게 보는 방법
+
+1. Live Demo를 엽니다.
+2. **대표 장애 시나리오 1-click**을 누릅니다.
+3. 상단의 자연어 **결론**을 먼저 읽습니다.
+4. `운영 Dashboard`에서 Controller별 상태를 확인합니다.
+5. `Incident / 상세`에서 어떤 Controller가 왜 문제인지 확인합니다.
+6. 필요할 때만 `Evidence / Export`에서 Raw CLI와 상태 전이를 봅니다.
+
+실제 장비 연결은 하지 않습니다. 비식별 합성 CLI가 입력 역할만 하며, production Parser, CorrelationEngine, IncidentManager와 연속 이상·복구 판단 로직을 재사용합니다.
+
+## 직접 실행
 
 ```sh
 python -m venv .venv-demo
@@ -13,24 +36,6 @@ python -m streamlit run portfolio_demo/app.py
 python -m unittest discover -s portfolio_demo -p test_demo.py -v
 ```
 
-Streamlit Community Cloud: repository `sebia1993/aruba-cluster-health-dashboard`, branch `main`,
-entrypoint `portfolio_demo/app.py`, Python 3.13.
-의존성은 entrypoint 옆 `portfolio_demo/requirements.txt`를 사용합니다.
-기존 Windows 앱의 런타임 잠금 파일과 패키징 경로는 유지합니다.
+Streamlit Community Cloud는 repository `sebia1993/aruba-cluster-health-dashboard`, branch `main`, entrypoint `portfolio_demo/app.py`를 사용합니다.
 
-v2는 Poll 상태를 누적하며 ACK와 기준 수용을 별도로 실행합니다.
-브라우저 세션별 엔진을 사용하고 Reset으로 초기화합니다.
-Fixture·AppTest·Windows CI는 실제 장비/운영망 검증이 아닙니다.
-
-## Public Demo v2 (review branch)
-
-`codex/public-demo-v2` provides a session-owned operations console: inspect Demo Lab,
-run one poll or start the controlled Next Poll playback, inspect incidents, ACK,
-explicitly accept a Connection-Type baseline, and observe recovery. The production
-DemoPoller, parsers, CorrelationEngine and IncidentManager are reused. An adapter
-prevents the desktop scripted demo from automatically accepting a baseline.
-Timeout injection pauses the stage and preserves unconfirmed incidents. Playback
-holds the final stage and is bounded to 100 polls; Reset clears all engine state.
-
-The existing main Live Demo remains unchanged until review. No SSH, credentials,
-background daemon, shared database or production device connections are used.
+Fixture·AppTest·Windows CI 결과는 실제 운영 장비 검증이나 현장 성과 수치와 구분합니다.
