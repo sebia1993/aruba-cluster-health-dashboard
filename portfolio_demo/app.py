@@ -162,8 +162,7 @@ def render_window_header() -> None:
 def render_reviewer_summary() -> None:
     st.markdown("### 이 프로젝트는 무엇을 해결하나요?")
     left, right = st.columns(2)
-    with left:
-        with st.container(border=True):
+    with left, st.container(border=True):
             st.markdown("**프로젝트 목적**")
             st.write(
                 "여러 무선 장비의 상태를 사람이 일일이 비교하지 않아도, "
@@ -171,17 +170,18 @@ def render_reviewer_summary() -> None:
                 "단순한 정보 수집 실패인지를 자동으로 구분하는 도구입니다."
             )
             st.caption(
-                "쉽게 말해: 여러 장비 상태를 계속 지켜보다가 '지금 정말 문제가 생긴 것인지'를 대신 판단합니다."
+                "쉽게 말해: 여러 장비 상태를 계속 지켜보다가 '지금 정말 문제가 생긴 것인지'를 "
+                "대신 판단합니다."
             )
-    with right:
-        with st.container(border=True):
+    with right, st.container(border=True):
             st.markdown("**이 데모에서 보여주는 것**")
             st.write(
                 "정상 상태 → 이상 징후 누적 → 장애 확정 → 복구까지의 흐름을 자동 재생하고, "
                 "정보를 가져오지 못한 상황을 실제 장애로 잘못 판단하지 않는 과정을 보여줍니다."
             )
             st.caption(
-                "해커톤 관점: 여러 신호를 시간 순서로 결합해 하나의 판단과 근거로 만드는 자동화입니다."
+                "해커톤 관점: 여러 신호를 시간 순서로 결합해 하나의 판단과 근거로 만드는 "
+                "자동화입니다."
             )
 
 
