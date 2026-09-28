@@ -491,13 +491,15 @@ def render_demo_shortcut() -> None:
 
 
 render_window_header()
-trace_slot = st.empty()
-r.execution.on_change = lambda: render_trace(r.execution, trace_slot)
-render_trace(r.execution, trace_slot)
 render_status_card()
 render_overview()
 render_time_row()
-render_controls()
+controls_area = st.container()
+trace_slot = st.empty()
+r.execution.on_change = lambda: render_trace(r.execution, trace_slot)
+render_trace(r.execution, trace_slot)
+with controls_area:
+    render_controls()
 render_settings()
 
 selected = render_device_table()
