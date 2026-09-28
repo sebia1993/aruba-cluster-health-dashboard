@@ -1,4 +1,4 @@
-# Aruba MM / WLC 상태 모니터링
+# Aruba Cluster Health Dashboard — 무선 장비 상태 판단 자동화
 
 **[Live Demo · 브라우저에서 실행](https://sebia1993-cluster-health-demo.streamlit.app/)** · [실행·검증 안내](portfolio_demo/README.md) · [GitHub Source](https://github.com/sebia1993/aruba-cluster-health-dashboard)
 
