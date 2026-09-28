@@ -27,6 +27,13 @@ st.markdown(
     .flow-title {font-size:.76rem; color:#8da2bb; font-weight:700; margin-bottom:.2rem;}
     .flow-value {font-size:1rem; font-weight:760;}
     .hint {font-size:.82rem; color:#8391a3;}
+    .explain-card {
+        border:1px solid rgba(120,145,175,.24); border-radius:12px;
+        padding:.85rem 1rem; background:rgba(18,27,41,.5); min-height:118px;
+    }
+    .explain-label {font-size:.72rem; color:#7da7ff; font-weight:800; letter-spacing:.04em;}
+    .explain-title {font-size:1rem; font-weight:780; margin:.2rem 0 .35rem;}
+    .explain-copy {font-size:.86rem; color:#91a0b3; line-height:1.45;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -47,10 +54,17 @@ def severity_label(value: str) -> str:
 
 
 def render_header() -> None:
-    st.markdown('<div class="product-kicker">ARUBA CLUSTER OPERATIONS</div>', unsafe_allow_html=True)
-    st.markdown('<div class="product-title">Cluster Health Dashboard</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="product-sub">MM / Controller 상태, Client 분배, Connection-Type 변화와 Incident를 한 화면에서 확인합니다.</div>',
+        '<div class="product-kicker">ARUBA CLUSTER HEALTH</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="product-title">무선 컨트롤러 장애 판단 Dashboard</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="product-sub">여러 CLI를 사람이 따로 대조하던 작업을 자동화해 '
+        'Controller 상태를 정상 / 주의 / 장애 / 확인 불가로 종합합니다.</div>',
         unsafe_allow_html=True,
     )
     st.markdown(
@@ -59,6 +73,97 @@ def render_header() -> None:
         '<span class="demo-badge">READ ONLY</span>',
         unsafe_allow_html=True,
     )
+
+
+
+def render_explainer() -> None:
+    st.markdown("### 이 도구는 무엇을 해결하나요?")
+    cols = st.columns(3)
+    cards = (
+        (
+            "현업 문제",
+            "여러 CLI를 따로 확인",
+            "Controller 상태, Client 분배, Cluster 연결 정보를 사람이 각각 확인하면 "
+            "순간 변동과 실제 장애를 구분하기 어렵습니다.",
+        ),
+        (
+            "자동화 방식",
+            "장비 IP 기준 상관분석",
+            "서로 다른 CLI 결과를 같은 Controller 기준으로 묶고 연속 이상·복구 조건까지 "
+            "적용해 한 번의 상태로 계산합니다.",
+        ),
+        (
+            "운영 결과",
+            "장애와 수집 실패를 분리",
+            "실제 장애 징후는 Incident로 올리고, SSH/CLI/Parser 실패는 장비 Down으로 "
+            "추정하지 않고 확인 불가로 남깁니다.",
+        ),
+    )
+    for col, (label, title, copy) in zip(cols, cards):
+        col.markdown(
+            '<div class="explain-card">'
+            f'<div class="explain-label">{label}</div>'
+            f'<div class="explain-title">{title}</div>'
+            f'<div class="explain-copy">{copy}</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+    st.info(
+        "예시: Controller 한 대의 Client 분배가 순간적으로 줄었다고 바로 장애로 판단하지 않습니다. "
+        "연속 관측과 MM 상태, Connection-Type을 함께 확인해 실제 운영자가 확인할 Incident만 남깁니다."
+    )
+    c = st.columns([1.5, 3.5])
+    if c[0].button(
+        "▶ 대표 장애 시나리오 1-click",
+        type="primary",
+        use_container_width=True,
+    ):
+        demo = DemoRuntime()
+        for _ in range(6):
+            demo.poll()
+        st.session_state.runtime = demo
+        st.rerun()
+    c[1].caption(
+        "한 번 클릭하면 정상 관측부터 이상 누적과 Incident 생성까지 대표 흐름을 재생합니다. "
+        "실제 장비 대신 비식별 합성 CLI만 사용합니다."
+    )
+
+
+def render_plain_summary() -> None:
+    if r.health is None:
+        return
+    h = r.health
+    impacted = [d.display_name for d in h.devices if d.severity.value != "normal"]
+    names = ", ".join(impacted[:3])
+    if len(impacted) > 3:
+        names += f" 외 {len(impacted) - 3}대"
+
+    if h.severity.value == "critical":
+        st.error(
+            f"결론: {names or 'Cluster'}에서 장애 조건이 확인되었습니다. "
+            "단순 수집 실패만으로 장애를 만들지 않고 여러 관측값과 상태 전이를 종합한 결과입니다."
+        )
+    elif h.severity.value == "warning":
+        st.warning(
+            f"결론: {names or 'Cluster'}에서 주의 징후가 확인되었습니다. "
+            "연속 관측 기준을 더 확인하거나 Incident 상세에서 근거를 검토하세요."
+        )
+    elif h.severity.value == "unknown":
+        st.warning(
+            "결론: 일부 상태를 정상적으로 수집하지 못했습니다. "
+            "장비가 Down이라고 추정하지 않고 '확인 불가'로 유지합니다."
+        )
+    else:
+        st.success(
+            "결론: 현재 관측에서는 확정된 장애 징후가 없습니다. "
+            "MM 상태, Client 분배와 Cluster 연결 정보를 함께 확인한 결과입니다."
+        )
+
+    with st.expander("용어를 쉽게 보기", expanded=False):
+        st.write("**MM**: 여러 무선 Controller의 상태를 관리·조회하는 상위 관리 계층")
+        st.write("**MD / Controller**: 실제 무선 단말 트래픽을 처리하는 Controller")
+        st.write("**Connection-Type**: Cluster 구성원 사이의 연결 상태/형태를 나타내는 관측값")
+        st.write("**Incident**: 여러 관측을 종합해 운영자가 확인할 필요가 있다고 판단된 사건")
 
 
 def render_sidebar() -> None:
@@ -278,9 +383,12 @@ def render_evidence() -> None:
 
 
 render_header()
+render_explainer()
 render_sidebar()
-render_operator_controls()
+with st.expander("직접 점검 / 고급 조작", expanded=False):
+    render_operator_controls()
 render_metrics()
+render_plain_summary()
 
 dashboard, incidents, evidence = st.tabs(
     ["운영 Dashboard", "Incident / 상세", "Evidence / Export"]
