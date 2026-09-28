@@ -2,7 +2,9 @@
 
 **[Live Demo · 브라우저에서 실행](https://sebia1993-cluster-health-demo.streamlit.app/)** · [실행·검증 안내](portfolio_demo/README.md) · [GitHub Source](https://github.com/sebia1993/aruba-cluster-health-dashboard)
 
-장비 없이 합성 시나리오를 선택하고 기존 Python 분석 결과와 Raw 근거를 확인할 수 있습니다.
+> **30초 요약:** 여러 Aruba 무선 Controller의 상태를 각각 확인하지 않고, MM 상태·Client 분배·Cluster 연결 정보를 한 번에 합쳐 **정상 / 주의 / 장애 / 확인 불가**로 보여주는 운영 Dashboard입니다.
+
+Live Demo에서는 **대표 장애 시나리오 1-click**을 누르면 정상 관측 → 이상 누적 → Incident 생성 흐름을 바로 볼 수 있습니다. 실제 장비 대신 비식별 합성 CLI만 사용하지만 Parser·상관분석·Incident 판단은 프로젝트의 production 로직을 재사용합니다.
 
 [![Windows CI](https://github.com/sebia1993/aruba-cluster-health-dashboard/actions/workflows/ci-windows.yml/badge.svg?branch=main)](https://github.com/sebia1993/aruba-cluster-health-dashboard/actions/workflows/ci-windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)

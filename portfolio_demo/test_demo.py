@@ -82,6 +82,10 @@ class DemoTests(unittest.TestCase):
             self.assertFalse(app.session_state.runtime.incidents.events())
             click("지금 점검")
             self.assertEqual(app.session_state.runtime.health.severity.value, "normal")
+            click("Demo Reset")
+            click("▶ 대표 장애 시나리오 1-click")
+            self.assertEqual(app.session_state.runtime.poll_count, 6)
+            self.assertIsNotNone(app.session_state.runtime.health)
 
 
 if __name__ == "__main__":
