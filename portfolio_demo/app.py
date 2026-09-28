@@ -157,8 +157,8 @@ def render_window_header() -> None:
         st.markdown(
             '<div style="padding-top:.65rem;text-align:right">'
             '<span class="demo-pill">PUBLIC DEMO</span>'
-            '<span class="demo-pill">SYNTHETIC CLI</span>'
-            '<span class="demo-pill">READ ONLY</span>'
+            '<span class="demo-pill">비식별 샘플 데이터</span>'
+            '<span class="demo-pill">읽기 전용</span>'
             "</div>",
             unsafe_allow_html=True,
         )
@@ -581,11 +581,11 @@ def render_incident_history():
             {
                 "종류": i.incident_type.value,
                 "Controller": i.alias or i.ip or "수집 경로",
-                "상태": "ACK"
+                "상태": "확인됨"
                 if i.active and i.acknowledged
-                else "Open"
+                else "확인 필요"
                 if i.active
-                else "Resolved"
+                else "복구 완료"
                 if i.recovered_at
                 else "종료",
                 "최초 관측": str(i.first_detected_at),
