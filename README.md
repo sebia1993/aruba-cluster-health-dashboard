@@ -333,7 +333,9 @@ Windows onedir 패키지:
 
 ## 현재 기능 범위
 
-현재 프로젝트는 **운영자가 Aruba MM/WLC 상태를 빠르게 판단하도록 돕는 읽기 전용 모니터링 도구**입니다.
+현재 프로젝트의 기본 기능은 **운영자가 Aruba MM/WLC 상태를 빠르게 판단하도록 돕는 읽기 전용 모니터링**입니다.
+
+별도로 제공하는 **자동 Controller 장애조치는 기본 OFF인 선택 기능**입니다. 운영자가 명시적으로 켠 경우에만 안전 조건과 별도 allowlist를 거쳐 `reload force`(재부팅)와 `cluster-debug bucketmap rebalance`(재분배)를 실행할 수 있습니다. 이 기능은 장비 상태를 변경하므로 읽기 전용 모니터링과 구분하며, 실행 조건·중복 방지·감사 기록은 [자동 Controller 장애조치](docs/AUTOMATIC_REMEDIATION_KO.md)를 참고하십시오.
 
 다음은 현재 범위가 아닙니다.
 
